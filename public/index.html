@@ -373,6 +373,36 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 .plain-bullet::before{content:'•';position:absolute;left:4px;color:var(--brand-primary)}
 .plain-line{font-size:13px;line-height:1.6;color:var(--ink-soft);padding:2px 0}
 .lp-methodology{border-left:3px solid #e2dff0;background:var(--purple-tag-bg)!important}
+
+/* ── CLASS DOCUMENT ── */
+.cls-doc-wrapper{max-width:760px;margin:0 auto;padding-bottom:40px}
+.cls-doc-actions{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.cls-doc{background:var(--white);border:1px solid var(--border);border-radius:var(--radius-lg);padding:36px 40px;font-family:'Inter',sans-serif;outline:none;box-shadow:0 2px 20px rgba(0,0,0,.05);min-height:400px;line-height:1.8;cursor:text}
+.cls-doc:focus{border-color:var(--border)}
+.cls-title{font-size:17px;font-weight:700;color:var(--ink);margin-bottom:5px;line-height:1.4}
+.cls-attendance{font-size:12px;color:var(--ink-muted);margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+.cls-section-head{font-size:13px;font-weight:700;color:var(--ink);margin-top:18px;margin-bottom:6px}
+.cls-challenge{font-size:13px;font-weight:700;color:var(--brand-primary);margin-top:12px;margin-bottom:5px}
+.cls-bullet{font-size:13px;color:var(--ink-soft);padding:2px 0 2px 14px;position:relative;line-height:1.65}
+.cls-bullet::before{content:'–';position:absolute;left:1px;color:var(--brand-primary)}
+.cls-quote{font-size:13px;color:var(--ink-soft);padding:4px 12px;margin:3px 0;border-left:3px solid var(--border);background:var(--bg);border-radius:0 5px 5px 0;line-height:1.65}
+.cls-correction{font-size:13px;padding:2px 0;line-height:1.65}
+.cls-wrong{color:var(--red);text-decoration:line-through;opacity:.7}
+.cls-arrow{color:var(--ink-muted);margin:0 4px}
+.cls-right{color:var(--green);font-weight:600}
+.cls-line{font-size:13px;color:var(--ink-soft);line-height:1.7;padding:1px 0}
+.cls-link{color:var(--brand-primary);text-decoration:none}
+.cls-link:hover{text-decoration:underline}
+
+/* ── SKILLS PRIORITY ── */
+.skill-drag-item{display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--white);border:1.5px solid var(--border);border-radius:8px;margin-bottom:5px;cursor:grab;transition:all .15s;user-select:none}
+.skill-drag-item:active{cursor:grabbing}
+.skill-drag-item.dragging{opacity:.4;border-style:dashed}
+.skill-drag-item.drag-over{border-color:var(--brand-primary);background:var(--purple-tag-bg);transform:scale(1.01)}
+.skill-drag-handle{color:var(--ink-muted);font-size:14px;cursor:grab;flex-shrink:0;line-height:1}
+.skill-drag-icon{font-size:14px;flex-shrink:0}
+.skill-drag-label{font-size:12px;font-weight:500;color:var(--ink);flex:1}
+.skill-drag-rank{width:20px;height:20px;border-radius:50%;background:var(--brand-primary);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 </style>
 </head>
 <body>
@@ -498,21 +528,77 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
         <div class="smart-tools">
           <div class="smart-tools-header">
             <div class="smart-title">Smart tools</div>
-            <div class="st-section-label">Class</div>
+
+            <!-- TOP ROW: Language + Group size -->
             <div class="st-row">
               <div class="st-field"><label class="st-label">Language</label><select id="st-language" class="st-select"><option>English</option><option>Spanish</option><option>Portuguese</option><option>French</option><option>German</option><option>Italian</option></select></div>
               <div class="st-field"><label class="st-label">Group size</label><input type="number" id="st-groupsize" class="st-input" value="25" min="1" max="200"></div>
             </div>
-            <div class="st-field"><label class="st-label">Level</label><select id="st-level" class="st-select"><option>Early Childhood</option><option>Primary</option><option>Secondary</option><option selected>Intermediate</option><option>Advanced</option><option>University</option><option>Adult Education</option></select></div>
-            <div class="st-field"><label class="st-label">Duration</label><select id="st-duration" class="st-select"><option>30 minutes</option><option selected>45 minutes</option><option>60 minutes</option><option>90 minutes</option><option>2 hours</option></select></div>
-            <div class="st-field">
+
+            <!-- COMPACT ROW: Level + Duration side by side -->
+            <div class="st-row">
+              <div class="st-field">
+                <label class="st-label">Level</label>
+                <select id="st-level" class="st-select" style="font-size:12px">
+                  <option>Early Childhood</option><option>Primary</option><option>Secondary</option>
+                  <option selected>Intermediate</option><option>Advanced</option>
+                  <option>University</option><option>Adult Education</option>
+                </select>
+              </div>
+              <div class="st-field">
+                <label class="st-label">Duration</label>
+                <select id="st-duration" class="st-select" style="font-size:12px">
+                  <option>30 min</option><option selected>45 min</option>
+                  <option>60 min</option><option>90 min</option><option>2 hrs</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- SUBJECTS compact -->
+            <div class="st-field" style="margin-bottom:6px">
               <label class="st-label">Subjects</label>
-              <div class="subjects-container" onclick="document.getElementById('subjects-input').focus()">
+              <div class="subjects-container" style="min-height:34px;padding:5px 7px" onclick="document.getElementById('subjects-input').focus()">
                 <div class="subject-tag" data-val="English">English <button class="subject-tag-remove" onclick="removeSubject(this)">✕</button></div>
                 <input type="text" id="subjects-input" class="subjects-input" placeholder="">
               </div>
               <div class="subjects-hint">Press enter to add</div>
             </div>
+
+            <!-- SKILLS PRIORITY + LEARNING APPROACH side by side header -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+              <div class="st-label" style="margin-bottom:0;display:flex;align-items:center">Skills Priority</div>
+              <div class="st-label" style="margin-bottom:0;display:flex;align-items:center">Weight</div>
+            </div>
+
+            <!-- SKILLS DRAG LIST -->
+            <div id="skills-priority-list" style="margin-bottom:4px">
+              <div class="skill-drag-item" data-skill="Speaking" draggable="true">
+                <span class="skill-drag-handle">⠿</span>
+                <span class="skill-drag-icon">🗣️</span>
+                <span class="skill-drag-label">Speaking</span>
+                <span class="skill-drag-rank" id="skill-rank-Speaking">1</span>
+              </div>
+              <div class="skill-drag-item" data-skill="Listening" draggable="true">
+                <span class="skill-drag-handle">⠿</span>
+                <span class="skill-drag-icon">👂</span>
+                <span class="skill-drag-label">Listening</span>
+                <span class="skill-drag-rank" id="skill-rank-Listening">2</span>
+              </div>
+              <div class="skill-drag-item" data-skill="Reading" draggable="true">
+                <span class="skill-drag-handle">⠿</span>
+                <span class="skill-drag-icon">📖</span>
+                <span class="skill-drag-label">Reading</span>
+                <span class="skill-drag-rank" id="skill-rank-Reading">3</span>
+              </div>
+              <div class="skill-drag-item" data-skill="Writing" draggable="true">
+                <span class="skill-drag-handle">⠿</span>
+                <span class="skill-drag-icon">✍️</span>
+                <span class="skill-drag-label">Writing</span>
+                <span class="skill-drag-rank" id="skill-rank-Writing">4</span>
+              </div>
+            </div>
+            <div style="font-size:10px;color:var(--ink-muted);margin-bottom:10px">Drag to reorder · #1 = main focus</div>
+
             <div class="st-divider"></div>
             <div class="approach-label">Learning approach</div>
           </div>
@@ -1136,6 +1222,7 @@ function enterApp(){
     document.getElementById('admin-inst-badge').textContent=org?.name||'Institution';
   }
   loadPlannings();renderClasses();
+  setTimeout(()=>initSkillsDrag(),200);
   const cfg=getConfig();
   if(!cfg.apiKey&&!currentUser.isOrgAdmin&&!currentUser.isSuperAdmin)setTimeout(()=>{showSettings();showToast('Configure Azure OpenAI to start','err');},600);
   if(currentUser.isSuperAdmin){setTimeout(()=>{if(!Object.keys(getOrgs()).length){showPanel('superadmin');renderInstitutions();showToast('Welcome Super Admin! Create your first institution.','ok');}  },400);}
@@ -1153,7 +1240,7 @@ function showPanel(name){
   if(name==='admin')renderDashboard();
   if(name==='superadmin')renderInstitutions();
   if(name==='master')loadMasterSettings();
-  if(name==='ai')buildSystemPrompt(); // refresh master prompt indicator
+  if(name==='ai'){buildSystemPrompt();initSkillsDrag();} // refresh master prompt indicator
 }
 
 // ══ CONFIG ══
@@ -1292,71 +1379,67 @@ function buildMethodologyBlock(p){
 function buildUserPrompt(p){
   const active=METHODOLOGIES.filter(m=>p[m.key]>10).sort((a,b)=>p[b.key]-p[a.key]);
   const methodStr=active.map(m=>`${m.label} (${p[m.key]}%)`).join(', ');
-  return`You are an experienced teacher writing your OWN lesson plan to teach TODAY. 
-Write EVERYTHING in ${p.language}. This document must be so complete that ANY teacher can pick it up and run the class without preparation.
+  const skills=getSkillsPriority();
+  const today=new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+  return `You are an experienced teacher writing your own lesson plan for TODAY.
+This is a real class document — not a template. Make it specific, human, and ready to use.
+Write everything in ${p.language}.
 
-LESSON DETAILS:
+CLASS INFO:
+- Date: ${today}
 - Topic: ${p.prompt}
 - Subject: ${p.subjects.join(', ')||'General'}
 - Level: ${p.level}
-- Group size: ${p.groupSize} students
+- Students: ${p.groupSize}
 - Duration: ${p.duration}
+- Skills priority: ${skills.map((s,i)=>`${i+1}. ${s}`).join(' → ')}
 - Pedagogical blend: ${methodStr||'Balanced'}
 
-CRITICAL RULES — READ BEFORE WRITING:
-1. Write the ACTUAL content of every activity. Not "do an exercise" — write THE exercise itself.
-2. Write the EXACT words the teacher says. Not "introduce the topic" — write what they actually say.
-3. Write the EXACT instructions students receive. Copy them as if printing a student handout.
-4. Include REAL examples, REAL sentences, REAL questions — specific to this exact topic.
-5. If there is a game, write the rules. If there is a role-play, write the roles and scenario cards. If there is a worksheet, write the worksheet.
-6. Do NOT use markdown asterisks (**) or hashtags (#) inside any section. Plain text only.
-7. Use the pedagogical weights to shape how you structure the class — not just mention them.
+STUDY THIS REAL EXAMPLE — match this style exactly:
 
-Respond with EXACTLY these 7 sections separated by "###":
+Week 5 - Class 8 - May 19, 2026 - Hybrid Work: Productivity vs Real Life
+Attendance: Lautaro Lopez, Ariel Dapia Graziani
 
-### LESSON TITLE
-A specific, descriptive title for this lesson.
+Today's Objectives:
+- Discuss professional growth and learning
+- React to ideas naturally in meetings
+- Talk about challenges and improvement
 
-### OVERVIEW
-2-3 sentences: what students will do and learn. Be concrete.
+Vocabulary – Q & A – Clarifications
+The project consists on put → The project consists of putting...
 
-### LEARNING OBJECTIVES
-Exactly 3-4 objectives starting with action verbs (Bloom's taxonomy). One per line, starting with a dash.
+Warm-up (5 min) — Tag Questions Recap:
+"You've used AI to generate production code..."
+"Data engineers spend more time debugging than coding..." 😅
+"Clients always understand technical explanations..." 👀
+"You've copied code from Stack Overflow recently..."
+"Software developers work better at night..."
+"You wouldn't trust AI-generated code without reviewing it..."
 
-### LESSON TIMELINE
-THIS IS THE CORE OF THE PLAN. Break ${p.duration} into phases. Write each phase like this:
+⚡ Final Challenge — React FAST using a tag question:
+"Hybrid work can be exhausting, can't it?" 🗣️
+"Meetings are longer online, aren't they?" 🗣️
+"You've checked your phone during meetings, haven't you?" 😄
 
-[TIME] Phase Title
-Teacher says: Write the EXACT opening words or script for this phase. Include real questions, real instructions, real examples specific to the topic.
-Teacher does: Describe the physical/logistical action (writes on board, distributes handout, plays audio, etc.)
-Student task: Write the COMPLETE task instructions exactly as students would receive them. If it is a written exercise, include the full exercise with blanks, sentences, or prompts. If it is a speaking activity, write the prompt cards or scenario. If it is a game, write the rules and example round.
-Materials: List every item needed for this phase.
+Optional:
+Shadowing Site: Practice with native speakers
+https://www.shadowingfordummies.com/en/page/10/our_videos
+Voice Hero Game: https://gemini.google.com/share/ea4bac6417a3 (Chrome only!)
 
-EXAMPLE of the detail level expected:
-[0-5 min] Warmer: True or False?
-Teacher says: "I am going to read 5 sentences. Write T for True and F for False in your notebook. Ready? Number 1: The Eiffel Tower was built in 1989."
-Teacher does: Reads sentences aloud slowly, pauses between each.
-Student task: Listen and write T or F for each sentence in their notebook. Then compare answers with the person next to them.
-Materials: Teacher's list of 5 true/false statements (prepared in advance).
+---
 
-Write EVERY phase at this level. Fill the entire ${p.duration} with real content.
+NOW WRITE A COMPLETE CLASS for the topic above in the SAME STYLE. Rules:
 
-### ASSESSMENT
-Include ALL of the following:
-- Formative check during class: describe the exact moment and what to look for
-- Exit ticket: write the EXACT question or task students complete before leaving
-- Success criteria written as "I can..." statements for students
-- How to handle students who finish early (extension task — write it out)
+1. Start with: "Week X - Class X - ${today} - [Topic]" then "Attendance: [blank]"
+2. Today's Objectives: 3-4 short bullet points
+3. Vocabulary section: 3-5 corrections or key phrases using the → format for corrections
+4. Warm-up with exact time: write ALL sentences/prompts with emojis — not descriptions of them
+5. 2-3 Main activities: write the COMPLETE content of each — all questions, sentences, prompts, role cards
+6. ⚡ Fast challenge: a high-energy speaking or production task, fully written out
+7. Optional: 1-2 real resource links relevant to the topic
 
-### MATERIALS AND RESOURCES
-Full list organized by:
-- For the teacher (scripts, answer keys, timing notes)
-- For students (handouts, materials — write out any short handout content here)
-- Technology and setup needed
-- Preparation required before class
-
-### METHODOLOGY NOTES
-3-5 sentences explaining HOW the pedagogical weights (${methodStr}) shaped specific activities in this lesson. Name the actual activities from the Timeline.`;
+DO NOT use ** or # for formatting. Use plain text, dashes, emojis, and the → arrow.
+Write like a real teacher, warm and specific. Include emojis naturally. 😊`;
 }
 
 async function callAzure(cfg,params){
@@ -1369,143 +1452,59 @@ async function callAzure(cfg,params){
 
 function displayResult(text,params){
   document.getElementById('ai-loading').classList.remove('visible');
+  const firstLine=text.split('\n')[0].trim();
+  currentResult={title:firstLine||params.prompt.substring(0,60),text,params,date:new Date().toISOString()};
 
-  const SECS=[
-    {key:'LESSON TITLE',icon:'📋',label:'Lesson Title'},
-    {key:'OVERVIEW',icon:'📌',label:'Overview'},
-    {key:'LEARNING OBJECTIVES',icon:'🎯',label:'Learning Objectives'},
-    {key:'LESSON TIMELINE',icon:'⏱',label:'Lesson Timeline'},
-    {key:'ASSESSMENT',icon:'📊',label:'Assessment'},
-    {key:'MATERIALS AND RESOURCES',icon:'📚',label:'Materials & Resources'},
-    {key:'METHODOLOGY NOTES',icon:'🧠',label:'Methodology Notes'},
-  ];
-
-  const parsed={};
-  SECS.forEach(s=>{
-    const rx=new RegExp('###\\s*'+s.key+'\\s*([\\s\\S]*?)(?=###|$)','i');
-    const m=text.match(rx);
-    parsed[s.key]=m?m[1].trim():'';
-  });
-
-  const title=parsed['LESSON TITLE']||params.prompt.substring(0,60);
-  currentResult={title,text,params,date:new Date().toISOString()};
-
-  // Build timeline cards
-  function renderTimeline(raw){
-    if(!raw)return'';
-    const blocks=raw.split(/\n(?=\[)/).filter(b=>b.trim());
-    if(blocks.length<2)return`<div class="tl-card"><div class="tl-body">${raw.replace(/\n/g,'<br>')}</div></div>`;
-    return blocks.map(block=>{
-      const lines=block.trim().split('\n');
-      const header=lines[0]||'';
-      const timeMatch=header.match(/\[([^\]]+)\]\s*(.*)/);
-      const time=timeMatch?timeMatch[1]:'';
-      const phase=timeMatch?timeMatch[2]:header;
-      let teacher='',student='',materials='',extra=[];
-      lines.slice(1).forEach(line=>{
-        if(/^teacher action:/i.test(line))teacher=line.replace(/^teacher action:\s*/i,'');
-        else if(/^student action:/i.test(line))student=line.replace(/^student action:\s*/i,'');
-        else if(/^materials:/i.test(line))materials=line.replace(/^materials:\s*/i,'');
-        else if(line.trim())extra.push(line.trim());
-      });
-      return`<div class="tl-card">
-        <div class="tl-header">
-          <span class="tl-time">${time}</span>
-          <span class="tl-phase">${phase}</span>
-        </div>
-        ${teacher?`<div class="tl-row"><span class="tl-role teacher-role">👩‍🏫 Teacher</span><span class="tl-text">${teacher}</span></div>`:''}
-        ${student?`<div class="tl-row"><span class="tl-role student-role">🧑‍🎓 Students</span><span class="tl-text">${student}</span></div>`:''}
-        ${materials?`<div class="tl-row"><span class="tl-role mat-role">📎 Materials</span><span class="tl-text">${materials}</span></div>`:''}
-        ${extra.length?`<div class="tl-extra">${extra.join('<br>')}</div>`:''}
-      </div>`;
-    }).join('');
+  function fmtLine(line,idx){
+    const t=line.trim();
+    if(!t)return '<div style="height:7px"></div>';
+    if(idx===0)return `<div class="cls-title">${t}</div>`;
+    if(/^attendance:/i.test(t))return `<div class="cls-attendance">${t}</div>`;
+    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback)/i.test(t))return `<div class="cls-section-head">${t}</div>`;
+    if(t.startsWith('\u26A1'))return `<div class="cls-challenge">${t}</div>`;
+    if(/^[-•]/.test(t))return `<div class="cls-bullet">${t.replace(/^[-•]\s*/,'')}</div>`;
+    if(t.startsWith('"')||t.startsWith('\u201C'))return `<div class="cls-quote">${t}</div>`;
+    if(t.includes('\u2192')){const p=t.split('\u2192');return `<div class="cls-correction"><span class="cls-wrong">${p[0].trim()}</span> <span class="cls-arrow">→</span> <span class="cls-right">${p.slice(1).join('→').trim()}</span></div>`;}
+    if(t.match(/https?:\/\//)){const linked=t.replace(/(https?:\/\/[^\s]+)/g,'<a href="$1" target="_blank" class="cls-link">$1</a>');return `<div class="cls-line">${linked}</div>`;}
+    return `<div class="cls-line">${t}</div>`;
   }
 
-  // Build objectives list
-  function renderObjectives(raw){
-    if(!raw)return'';
-    const lines=raw.split('\n').filter(l=>l.trim());
-    return'<ul class="obj-list">'+lines.map(l=>`<li>${l.replace(/^[-•*]\s*/,'')}</li>`).join('')+'</ul>';
-  }
-
-  // Build plain sections
-  function renderPlain(raw){
-    if(!raw)return'';
-    return raw.split('\n').filter(l=>l.trim()).map(l=>{
-      if(/^[-•]/.test(l))return`<div class="plain-bullet">${l.replace(/^[-•]\s*/,'')}</div>`;
-      return`<div class="plain-line">${l}</div>`;
-    }).join('');
-  }
+  const html=text.split('\n').map((l,i)=>fmtLine(l,i)).join('');
 
   const out=document.getElementById('ai-output');
-  out.innerHTML=`
-    <div class="lp-doc" id="lp-doc">
-
-      <!-- HEADER -->
-      <div class="lp-header">
-        <div class="lp-header-left">
-          <div class="lp-title" contenteditable="true">${title}</div>
-          <div class="lp-meta-row">
-            ${params.subjects.map(s=>`<span class="lp-meta-chip">${s}</span>`).join('')}
-            <span class="lp-meta-chip">${params.level}</span>
-            <span class="lp-meta-chip">⏱ ${params.duration}</span>
-            <span class="lp-meta-chip">👥 ${params.groupSize} students</span>
-            <span class="lp-meta-chip">🌐 ${params.language}</span>
-          </div>
-        </div>
-        <div class="lp-header-actions">
-          <button class="btn-out" onclick="savePlanning()">💾 Save</button>
-          <button class="btn-out" onclick="generatePlanning()">↺ Regenerate</button>
-          <button class="btn-out dark" onclick="exportPDF()">⬇ Export PDF</button>
-        </div>
-      </div>
-
-      <!-- OVERVIEW -->
-      ${parsed['OVERVIEW']?`
-      <div class="lp-section lp-overview">
-        <div class="lp-section-label">📌 Overview</div>
-        <div class="lp-overview-text" contenteditable="true">${parsed['OVERVIEW']}</div>
-      </div>`:''}
-
-      <!-- OBJECTIVES -->
-      ${parsed['LEARNING OBJECTIVES']?`
-      <div class="lp-section">
-        <div class="lp-section-label">🎯 Learning Objectives</div>
-        <div class="obj-container" contenteditable="true">${renderObjectives(parsed['LEARNING OBJECTIVES'])}</div>
-      </div>`:''}
-
-      <!-- TIMELINE -->
-      ${parsed['LESSON TIMELINE']?`
-      <div class="lp-section">
-        <div class="lp-section-label">⏱ Lesson Timeline</div>
-        <div class="tl-container">${renderTimeline(parsed['LESSON TIMELINE'])}</div>
-      </div>`:''}
-
-      <!-- BOTTOM GRID -->
-      <div class="lp-bottom-grid">
-        ${parsed['ASSESSMENT']?`
-        <div class="lp-section lp-card">
-          <div class="lp-section-label">📊 Assessment</div>
-          <div contenteditable="true">${renderPlain(parsed['ASSESSMENT'])}</div>
-        </div>`:''}
-        ${parsed['MATERIALS AND RESOURCES']?`
-        <div class="lp-section lp-card">
-          <div class="lp-section-label">📚 Materials & Resources</div>
-          <div contenteditable="true">${renderPlain(parsed['MATERIALS AND RESOURCES'])}</div>
-        </div>`:''}
-      </div>
-
-      <!-- METHODOLOGY -->
-      ${parsed['METHODOLOGY NOTES']?`
-      <div class="lp-section lp-methodology">
-        <div class="lp-section-label">🧠 Methodology Notes</div>
-        <div contenteditable="true" style="font-size:13px;line-height:1.7;color:var(--ink-soft)">${parsed['METHODOLOGY NOTES']}</div>
-      </div>`:''}
-
-    </div>`;
-
+  out.innerHTML=`<div class="cls-doc-wrapper">
+    <div class="cls-doc-actions">
+      <button class="btn-out" onclick="savePlanning()">💾 Save</button>
+      <button class="btn-out" onclick="generatePlanning()">↺ Regenerate</button>
+      <button class="btn-out" onclick="copyForGoogleDocs()" id="btn-copy">📋 Copy for Google Docs</button>
+      <button class="btn-out dark" onclick="exportPDF()">⬇ Export PDF</button>
+    </div>
+    <div class="cls-doc" id="lp-doc" contenteditable="true">${html}</div>
+  </div>`;
   out.classList.add('visible');
-  showToast('Lesson plan ready ✓','ok');
+  showToast('Class plan ready ✓','ok');
+}
+
+function copyForGoogleDocs(){
+  const doc=document.getElementById('lp-doc');
+  if(!doc)return;
+  // Use innerHTML selection so Google Docs preserves some formatting
+  const range=document.createRange();
+  range.selectNodeContents(doc);
+  const sel=window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  try{
+    document.execCommand('copy');
+    sel.removeAllRanges();
+    const btn=document.getElementById('btn-copy');
+    if(btn){btn.textContent='✓ Copied!';setTimeout(()=>btn.textContent='📋 Copy for Google Docs',2200);}
+    showToast('Copied! Open Google Docs → Ctrl+V (or Cmd+V)','ok');
+  }catch(e){
+    navigator.clipboard.writeText(doc.innerText).then(()=>{
+      showToast('Copied as plain text! Paste into Google Docs','ok');
+    });
+  }
 }
 
 // ══ SAVE & HISTORY ══
@@ -1527,103 +1526,75 @@ function renderClasses(){
 function exportPDF(){
   const doc=document.getElementById('lp-doc');
   if(!doc){showToast('Generate a lesson plan first.','err');return;}
-  const title=currentResult?.title||'Lesson Plan';
   const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-  let html=`<html><head><meta charset="UTF-8"><title>${title}</title><style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:30px;color:#1a1a1a;font-size:13px;line-height:1.6}
-    .lp-title{font-size:22px;font-weight:700;margin-bottom:8px}
-    .meta-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px}
-    .chip{font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:#f3eeff;color:#7c5cbf;border:1px solid #d4c5f0}
-    .section{margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #eee}
-    .section-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#7c5cbf;margin-bottom:8px}
-    .overview{font-size:13px;line-height:1.7;color:#444;padding:10px 14px;background:#f3eeff;border-radius:6px;border-left:3px solid #7c5cbf}
-    ul.objs{list-style:none;padding:0}
-    ul.objs li{padding:6px 10px 6px 28px;position:relative;background:#f8f8f8;border-radius:5px;margin-bottom:5px}
-    ul.objs li::before{content:"✓";position:absolute;left:9px;color:#7c5cbf;font-weight:700}
-    .tl-card{margin-bottom:10px;border:1px solid #eee;border-radius:8px;overflow:hidden}
-    .tl-head{background:#1a1a1a;color:#fff;padding:8px 12px;display:flex;gap:10px;align-items:center}
-    .tl-time-badge{background:#7c5cbf;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px}
-    .tl-phase-name{font-size:12px;font-weight:600;color:#fff}
-    .tl-row{display:flex;gap:8px;padding:7px 12px;border-bottom:1px solid #f0f0f0;align-items:flex-start}
-    .tl-row:last-child{border-bottom:none}
-    .role-badge{font-size:9px;font-weight:700;padding:2px 6px;border-radius:20px;white-space:nowrap;flex-shrink:0;margin-top:1px}
-    .t-role{background:#FFF3CD;color:#856404}
-    .s-role{background:#D1ECF1;color:#0C5460}
-    .m-role{background:#D4EDDA;color:#155724}
-    .tl-txt{font-size:12px;line-height:1.5;color:#444}
-    .two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-    .bullet-item{padding:4px 0 4px 14px;position:relative;font-size:12px;color:#444}
-    .bullet-item::before{content:"•";position:absolute;left:3px;color:#7c5cbf}
-    .methodology{background:#f3eeff;padding:12px;border-radius:6px;font-size:12px;color:#444;line-height:1.7}
-    .footer{margin-top:24px;padding-top:12px;border-top:1px solid #eee;font-size:10px;color:#999;text-align:center}
-    @media print{body{padding:15px}@page{margin:1.5cm}}
-  </style></head><body>`;
-
-  // Title + meta
-  const titleEl=doc.querySelector('.lp-title');
-  const chips=doc.querySelectorAll('.lp-meta-chip');
-  html+=`<div class="lp-title">${titleEl?.textContent||title}</div>`;
-  html+=`<div class="meta-row">${Array.from(chips).map(c=>`<span class="chip">${c.textContent}</span>`).join('')}</div>`;
-
-  // Overview
-  const overview=doc.querySelector('.lp-overview-text');
-  if(overview?.textContent?.trim())html+=`<div class="section"><div class="section-label">📌 Overview</div><div class="overview">${overview.textContent}</div></div>`;
-
-  // Objectives
-  const objItems=doc.querySelectorAll('.obj-list li');
-  if(objItems.length)html+=`<div class="section"><div class="section-label">🎯 Learning Objectives</div><ul class="objs">${Array.from(objItems).map(li=>`<li>${li.textContent}</li>`).join('')}</ul></div>`;
-
-  // Timeline
-  const tlCards=doc.querySelectorAll('.tl-card');
-  if(tlCards.length){
-    html+=`<div class="section"><div class="section-label">⏱ Lesson Timeline</div>`;
-    tlCards.forEach(card=>{
-      const time=card.querySelector('.tl-time')?.textContent||'';
-      const phase=card.querySelector('.tl-phase')?.textContent||'';
-      const rows=card.querySelectorAll('.tl-row');
-      html+=`<div class="tl-card"><div class="tl-head"><span class="tl-time-badge">${time}</span><span class="tl-phase-name">${phase}</span></div>`;
-      rows.forEach(row=>{
-        const role=row.querySelector('.tl-role')?.textContent||'';
-        const txt=row.querySelector('.tl-text')?.textContent||'';
-        const cls=role.includes('Teacher')?'t-role':role.includes('Student')?'s-role':'m-role';
-        html+=`<div class="tl-row"><span class="role-badge ${cls}">${role}</span><span class="tl-txt">${txt}</span></div>`;
-      });
-      html+='</div>';
+  const lines=(doc.innerText||'').split('\n');
+  let body='';
+  lines.forEach((line,i)=>{
+    const t=line.trim();
+    if(!t){body+='<div style="height:5px"></div>';return;}
+    if(i===0){body+=`<div style="font-size:17px;font-weight:700;margin-bottom:6px">${t}</div>`;return;}
+    if(/^attendance:/i.test(t)){body+=`<div style="font-size:12px;color:#888;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #eee">${t}</div>`;return;}
+    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback)/i.test(t)){body+=`<div style="font-size:13px;font-weight:700;margin-top:18px;margin-bottom:5px">${t}</div>`;return;}
+    if(t.startsWith('⚡')){body+=`<div style="font-weight:700;color:#7c5cbf;margin-top:10px">${t}</div>`;return;}
+    if(/^[-•]/.test(t)){body+=`<div style="padding-left:14px;position:relative;margin:2px 0;font-size:12px">– ${t.replace(/^[-•]\s*/,'')}</div>`;return;}
+    if(t.startsWith('"')||t.startsWith('\u201C')){body+=`<div style="padding:3px 10px;margin:2px 0;border-left:3px solid #e2dff0;background:#f8f8f8;font-size:12px">${t}</div>`;return;}
+    if(t.includes('→')){const p=t.split('→');body+=`<div style="font-size:12px;margin:2px 0"><span style="text-decoration:line-through;color:#e53e3e;opacity:.7">${p[0].trim()}</span> → <span style="color:#276749;font-weight:600">${p.slice(1).join('→').trim()}</span></div>`;return;}
+    const linked=t.replace(/(https?:\/\/[^\s]+)/g,'<a href="$1" style="color:#7c5cbf">$1</a>');
+    body+=`<div style="font-size:12px;margin:1px 0">${linked}</div>`;
+  });
+  const html=`<html><head><meta charset="UTF-8"><style>body{font-family:Arial,sans-serif;max-width:720px;margin:30px auto;color:#1a1a1a;line-height:1.75;padding:0 20px}.footer{margin-top:28px;padding-top:10px;border-top:1px solid #eee;font-size:10px;color:#999;text-align:center}@media print{body{margin:10px}@page{margin:1.5cm}}</style></head><body>${body}<div class="footer">Generated with Tero Class · ${today}</div></body></html>`;
+  const w=window.open('','_blank');w.document.write(html);w.document.close();setTimeout(()=>w.print(),400);
+}
+// ══ UTILS ══
+// ══ SKILLS DRAG & DROP ══
+function initSkillsDrag(){
+  const list=document.getElementById('skills-priority-list');
+  if(!list)return;
+  let dragSrc=null;
+  list.querySelectorAll('.skill-drag-item').forEach(item=>{
+    item.addEventListener('dragstart',e=>{
+      dragSrc=item;item.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
     });
-    html+='</div>';
-  }
-
-  // Assessment + Materials side by side
-  const lpCards=doc.querySelectorAll('.lp-bottom-grid .lp-card');
-  if(lpCards.length){
-    html+=`<div class="two-col">`;
-    lpCards.forEach(card=>{
-      const label=card.querySelector('.lp-section-label')?.textContent||'';
-      const items=card.querySelectorAll('.plain-bullet,.plain-line');
-      html+=`<div class="section" style="margin-bottom:0"><div class="section-label">${label}</div>`;
-      items.forEach(item=>{
-        const isBullet=item.classList.contains('plain-bullet');
-        html+=isBullet?`<div class="bullet-item">${item.textContent}</div>`:`<div style="font-size:12px;color:#444;padding:2px 0">${item.textContent}</div>`;
-      });
-      html+='</div>';
+    item.addEventListener('dragend',()=>{
+      item.classList.remove('dragging');
+      list.querySelectorAll('.skill-drag-item').forEach(i=>i.classList.remove('drag-over'));
+      updateSkillRanks();
     });
-    html+='</div>';
-  }
-
-  // Methodology
-  const meth=doc.querySelector('.lp-methodology [contenteditable]');
-  if(meth?.textContent?.trim())html+=`<div class="section"><div class="section-label">🧠 Methodology Notes</div><div class="methodology">${meth.textContent}</div></div>`;
-
-  html+=`<div class="footer">Generated with Tero Class · ${today}</div></body></html>`;
-
-  const w=window.open('','_blank');
-  w.document.write(html);
-  w.document.close();
-  setTimeout(()=>w.print(),500);
+    item.addEventListener('dragover',e=>{
+      e.preventDefault();e.dataTransfer.dropEffect='move';
+      if(item!==dragSrc){item.classList.add('drag-over');}
+    });
+    item.addEventListener('dragleave',()=>item.classList.remove('drag-over'));
+    item.addEventListener('drop',e=>{
+      e.preventDefault();
+      if(dragSrc&&dragSrc!==item){
+        const items=[...list.querySelectorAll('.skill-drag-item')];
+        const srcIdx=items.indexOf(dragSrc);
+        const tgtIdx=items.indexOf(item);
+        if(srcIdx<tgtIdx)item.after(dragSrc);else item.before(dragSrc);
+      }
+      item.classList.remove('drag-over');
+    });
+  });
 }
 
-// ══ UTILS ══
+function updateSkillRanks(){
+  const list=document.getElementById('skills-priority-list');
+  if(!list)return;
+  list.querySelectorAll('.skill-drag-item').forEach((item,i)=>{
+    const skill=item.dataset.skill;
+    const rankEl=document.getElementById('skill-rank-'+skill);
+    if(rankEl)rankEl.textContent=i+1;
+  });
+}
+
+function getSkillsPriority(){
+  const list=document.getElementById('skills-priority-list');
+  if(!list)return['Speaking','Listening','Reading','Writing'];
+  return [...list.querySelectorAll('.skill-drag-item')].map(i=>i.dataset.skill);
+}
+
 function showToast(msg,type=''){const t=document.getElementById('toast');t.textContent=msg;t.className='toast '+type;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){closeSettings();closeModal('modal-settings');closeModal('modal-create-inst');};
