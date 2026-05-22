@@ -327,6 +327,52 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 .toast.show{transform:translateY(0);opacity:1}
 .toast.ok{background:#276749}
 .toast.err{background:var(--red)}
+
+/* ── LESSON PLAN DOCUMENT ── */
+.lp-doc{max-width:860px;margin:0 auto;padding-bottom:40px}
+.lp-header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:20px;padding:20px 24px;background:var(--white);border-radius:var(--radius-lg);border:1px solid var(--border)}
+.lp-header-left{flex:1}
+.lp-title{font-size:22px;font-weight:700;color:var(--ink);line-height:1.3;margin-bottom:10px;outline:none;border-radius:4px}
+.lp-title:focus{background:var(--bg);padding:2px 6px;margin:-2px -6px}
+.lp-meta-row{display:flex;flex-wrap:wrap;gap:6px}
+.lp-meta-chip{font-size:11px;font-weight:500;padding:3px 10px;border-radius:20px;background:var(--purple-tag-bg);color:var(--purple);border:1px solid var(--purple-tag-border)}
+.lp-header-actions{display:flex;gap:8px;flex-shrink:0;flex-direction:column;align-items:flex-end}
+.lp-section{background:var(--white);border-radius:var(--radius);border:1px solid var(--border);padding:18px 20px;margin-bottom:14px}
+.lp-section-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--brand-primary);margin-bottom:12px}
+.lp-overview{border-left:3px solid var(--brand-primary)}
+.lp-overview-text{font-size:14px;line-height:1.7;color:var(--ink-soft);outline:none}
+.lp-overview-text:focus{background:var(--bg);border-radius:6px;padding:6px;margin:-6px}
+
+/* Objectives */
+.obj-list{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:8px}
+.obj-list li{font-size:13px;line-height:1.6;color:var(--ink-soft);padding:8px 12px 8px 36px;background:var(--bg);border-radius:8px;position:relative}
+.obj-list li::before{content:'✓';position:absolute;left:12px;color:var(--brand-primary);font-weight:700;font-size:12px}
+.obj-container{outline:none}
+.obj-container:focus .obj-list li{background:var(--purple-tag-bg)}
+
+/* Timeline cards */
+.tl-container{display:flex;flex-direction:column;gap:10px}
+.tl-card{background:var(--bg);border-radius:10px;border:1px solid var(--border);overflow:hidden}
+.tl-header{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--ink);color:#fff}
+.tl-time{font-size:11px;font-weight:700;background:var(--brand-primary);color:#fff;padding:2px 8px;border-radius:20px;white-space:nowrap;flex-shrink:0}
+.tl-phase{font-size:13px;font-weight:600;color:#fff}
+.tl-row{display:flex;gap:10px;padding:8px 14px;align-items:flex-start;border-bottom:1px solid var(--border)}
+.tl-row:last-child{border-bottom:none}
+.tl-role{font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;white-space:nowrap;flex-shrink:0;margin-top:1px}
+.teacher-role{background:#FFF3CD;color:#856404}
+.student-role{background:#D1ECF1;color:#0C5460}
+.mat-role{background:#D4EDDA;color:#155724}
+.tl-text{font-size:13px;line-height:1.6;color:var(--ink-soft)}
+.tl-extra{padding:6px 14px 10px;font-size:12px;color:var(--ink-muted);line-height:1.6}
+.tl-body{font-size:13px;line-height:1.7;color:var(--ink-soft);padding:4px 0;white-space:pre-wrap}
+
+/* Bottom grid */
+.lp-bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.lp-card{margin-bottom:0!important}
+.plain-bullet{font-size:13px;line-height:1.6;color:var(--ink-soft);padding:4px 0 4px 16px;position:relative}
+.plain-bullet::before{content:'•';position:absolute;left:4px;color:var(--brand-primary)}
+.plain-line{font-size:13px;line-height:1.6;color:var(--ink-soft);padding:2px 0}
+.lp-methodology{border-left:3px solid #e2dff0;background:var(--purple-tag-bg)!important}
 </style>
 </head>
 <body>
@@ -1226,18 +1272,66 @@ function buildMethodologyBlock(p){
 }
 
 function buildUserPrompt(p){
-  return`Generate a complete class plan in ${p.language}.
-REQUEST: ${p.prompt}
-PARAMETERS: Subject(s): ${p.subjects.join(', ')||'General'} | Level: ${p.level} | Group: ${p.groupSize} students | Duration: ${p.duration}
-${buildMethodologyBlock(p)}
-Generate with EXACTLY these sections separated by "###":
-### TITLE
+  const active=METHODOLOGIES.filter(m=>p[m.key]>10).sort((a,b)=>p[b.key]-p[a.key]);
+  const methodStr=active.map(m=>`${m.label} (${p[m.key]}%)`).join(', ');
+  return`You are creating a PROFESSIONAL LESSON PLAN that a teacher will use directly in class today. 
+This must be practical, specific, and classroom-ready — not theoretical or generic.
+Write everything in ${p.language}.
+
+LESSON DETAILS:
+- Topic: ${p.prompt}
+- Subject: ${p.subjects.join(', ')||'General'}
+- Level: ${p.level}
+- Group size: ${p.groupSize} students
+- Total duration: ${p.duration}
+- Pedagogical approach (apply proportionally): ${methodStr||'Balanced'}
+
+OUTPUT FORMAT — respond with EXACTLY these 7 sections using "###" as separator. 
+Do NOT use markdown asterisks (**) or hashtags inside sections. Use plain text only.
+Write like a professional educator, not a chatbot.
+
+### LESSON TITLE
+One clear, specific title for this lesson.
+
+### OVERVIEW
+3 sentences maximum: what this lesson is about, what students will do, and what they will achieve by the end.
+
 ### LEARNING OBJECTIVES
-### ACTIVITIES
+List exactly 3-4 objectives. Each on its own line. Start each with an action verb (Identify / Analyze / Produce / Demonstrate / Compare / Apply). Example format:
+- Identify the key differences between active and passive voice in written texts
+- Produce at least 5 grammatically correct passive constructions in a real context
+
+### LESSON TIMELINE
+This is the HEART of the plan. Break the ${p.duration} into clear phases. 
+For EACH phase write it in this exact format (one phase per block, separated by a blank line):
+
+[TIME] Phase name
+Teacher action: What the teacher says/does specifically (be concrete, include exact instructions or questions)
+Student action: What students do specifically
+Materials: Any specific materials, tools, or resources needed for this phase
+
+Example:
+[0-5 min] Warm-up: Prior Knowledge Activation
+Teacher action: Display 3 images on the screen and ask "What do these images have in common?" Give students 60 seconds to discuss with a partner.
+Student action: Discuss in pairs, then share one idea with the class.
+Materials: 3 projected images (related to lesson topic)
+
+Create enough phases to fill the full ${p.duration}. Be specific and realistic.
+
 ### ASSESSMENT
-### RESOURCES
-### TEACHER NOTES
-### METHODOLOGY APPLIED`;
+Describe exactly how the teacher will know if students achieved the objectives. Include:
+- What to observe during the lesson (formative)
+- One specific end-of-lesson check (exit ticket, quick task, or question)
+- Success criteria: what "good" looks like
+
+### MATERIALS AND RESOURCES
+Complete list of everything needed to run this lesson:
+- Physical materials (printed worksheets, markers, etc.)
+- Digital tools (specific websites, apps, platforms)
+- Preparation tasks for the teacher before the lesson
+
+### METHODOLOGY NOTES
+In 4-6 sentences, explain specifically how the pedagogical approaches (${methodStr}) shaped this lesson design. Reference specific activities from the Timeline section.`;
 }
 
 async function callAzure(cfg,params){
@@ -1250,21 +1344,143 @@ async function callAzure(cfg,params){
 
 function displayResult(text,params){
   document.getElementById('ai-loading').classList.remove('visible');
+
   const SECS=[
-    {key:'TITLE',icon:'📋',label:'Title'},
+    {key:'LESSON TITLE',icon:'📋',label:'Lesson Title'},
+    {key:'OVERVIEW',icon:'📌',label:'Overview'},
     {key:'LEARNING OBJECTIVES',icon:'🎯',label:'Learning Objectives'},
-    {key:'ACTIVITIES',icon:'⚡',label:'Activities'},
+    {key:'LESSON TIMELINE',icon:'⏱',label:'Lesson Timeline'},
     {key:'ASSESSMENT',icon:'📊',label:'Assessment'},
-    {key:'RESOURCES',icon:'📚',label:'Resources'},
-    {key:'TEACHER NOTES',icon:'💡',label:'Teacher Notes'},
-    {key:'METHODOLOGY APPLIED',icon:'🧠',label:'Methodology Applied'},
+    {key:'MATERIALS AND RESOURCES',icon:'📚',label:'Materials & Resources'},
+    {key:'METHODOLOGY NOTES',icon:'🧠',label:'Methodology Notes'},
   ];
-  const parsed={};SECS.forEach(s=>{const m=text.match(new RegExp(`### ${s.key}\\s*([\\s\\S]*?)(?=###|$)`,'i'));parsed[s.key]=m?m[1].trim():''});
-  const title=parsed['TITLE']||params.prompt.substring(0,60);
+
+  const parsed={};
+  SECS.forEach(s=>{
+    const rx=new RegExp('###\\s*'+s.key+'\\s*([\\s\\S]*?)(?=###|$)','i');
+    const m=text.match(rx);
+    parsed[s.key]=m?m[1].trim():'';
+  });
+
+  const title=parsed['LESSON TITLE']||params.prompt.substring(0,60);
   currentResult={title,text,params,date:new Date().toISOString()};
+
+  // Build timeline cards
+  function renderTimeline(raw){
+    if(!raw)return'';
+    const blocks=raw.split(/\n(?=\[)/).filter(b=>b.trim());
+    if(blocks.length<2)return`<div class="tl-card"><div class="tl-body">${raw.replace(/\n/g,'<br>')}</div></div>`;
+    return blocks.map(block=>{
+      const lines=block.trim().split('\n');
+      const header=lines[0]||'';
+      const timeMatch=header.match(/\[([^\]]+)\]\s*(.*)/);
+      const time=timeMatch?timeMatch[1]:'';
+      const phase=timeMatch?timeMatch[2]:header;
+      let teacher='',student='',materials='',extra=[];
+      lines.slice(1).forEach(line=>{
+        if(/^teacher action:/i.test(line))teacher=line.replace(/^teacher action:\s*/i,'');
+        else if(/^student action:/i.test(line))student=line.replace(/^student action:\s*/i,'');
+        else if(/^materials:/i.test(line))materials=line.replace(/^materials:\s*/i,'');
+        else if(line.trim())extra.push(line.trim());
+      });
+      return`<div class="tl-card">
+        <div class="tl-header">
+          <span class="tl-time">${time}</span>
+          <span class="tl-phase">${phase}</span>
+        </div>
+        ${teacher?`<div class="tl-row"><span class="tl-role teacher-role">👩‍🏫 Teacher</span><span class="tl-text">${teacher}</span></div>`:''}
+        ${student?`<div class="tl-row"><span class="tl-role student-role">🧑‍🎓 Students</span><span class="tl-text">${student}</span></div>`:''}
+        ${materials?`<div class="tl-row"><span class="tl-role mat-role">📎 Materials</span><span class="tl-text">${materials}</span></div>`:''}
+        ${extra.length?`<div class="tl-extra">${extra.join('<br>')}</div>`:''}
+      </div>`;
+    }).join('');
+  }
+
+  // Build objectives list
+  function renderObjectives(raw){
+    if(!raw)return'';
+    const lines=raw.split('\n').filter(l=>l.trim());
+    return'<ul class="obj-list">'+lines.map(l=>`<li>${l.replace(/^[-•*]\s*/,'')}</li>`).join('')+'</ul>';
+  }
+
+  // Build plain sections
+  function renderPlain(raw){
+    if(!raw)return'';
+    return raw.split('\n').filter(l=>l.trim()).map(l=>{
+      if(/^[-•]/.test(l))return`<div class="plain-bullet">${l.replace(/^[-•]\s*/,'')}</div>`;
+      return`<div class="plain-line">${l}</div>`;
+    }).join('');
+  }
+
   const out=document.getElementById('ai-output');
-  out.innerHTML=`<div class="output-head"><div><div class="output-title">${title}</div><div class="output-tags">${params.subjects.map(s=>`<span class="output-tag">${s}</span>`).join('')}<span class="output-tag">${params.level}</span><span class="output-tag">${params.duration}</span></div></div><div class="output-btns"><button class="btn-out" onclick="savePlanning()">💾 Save</button><button class="btn-out" onclick="generatePlanning()">↺ Regenerate</button><button class="btn-out dark" onclick="exportPDF()">⬇ Export PDF</button></div></div>${SECS.slice(1).map(s=>parsed[s.key]?`<div class="out-section"><div class="out-section-head"><div class="out-section-icon">${s.icon}</div><div class="out-section-name">${s.label}</div></div><div class="out-section-body" contenteditable="true">${parsed[s.key]}</div></div>`:'').join('')}`;
-  out.classList.add('visible');showToast('Class plan generated ✓','ok');
+  out.innerHTML=`
+    <div class="lp-doc" id="lp-doc">
+
+      <!-- HEADER -->
+      <div class="lp-header">
+        <div class="lp-header-left">
+          <div class="lp-title" contenteditable="true">${title}</div>
+          <div class="lp-meta-row">
+            ${params.subjects.map(s=>`<span class="lp-meta-chip">${s}</span>`).join('')}
+            <span class="lp-meta-chip">${params.level}</span>
+            <span class="lp-meta-chip">⏱ ${params.duration}</span>
+            <span class="lp-meta-chip">👥 ${params.groupSize} students</span>
+            <span class="lp-meta-chip">🌐 ${params.language}</span>
+          </div>
+        </div>
+        <div class="lp-header-actions">
+          <button class="btn-out" onclick="savePlanning()">💾 Save</button>
+          <button class="btn-out" onclick="generatePlanning()">↺ Regenerate</button>
+          <button class="btn-out dark" onclick="exportPDF()">⬇ Export PDF</button>
+        </div>
+      </div>
+
+      <!-- OVERVIEW -->
+      ${parsed['OVERVIEW']?`
+      <div class="lp-section lp-overview">
+        <div class="lp-section-label">📌 Overview</div>
+        <div class="lp-overview-text" contenteditable="true">${parsed['OVERVIEW']}</div>
+      </div>`:''}
+
+      <!-- OBJECTIVES -->
+      ${parsed['LEARNING OBJECTIVES']?`
+      <div class="lp-section">
+        <div class="lp-section-label">🎯 Learning Objectives</div>
+        <div class="obj-container" contenteditable="true">${renderObjectives(parsed['LEARNING OBJECTIVES'])}</div>
+      </div>`:''}
+
+      <!-- TIMELINE -->
+      ${parsed['LESSON TIMELINE']?`
+      <div class="lp-section">
+        <div class="lp-section-label">⏱ Lesson Timeline</div>
+        <div class="tl-container">${renderTimeline(parsed['LESSON TIMELINE'])}</div>
+      </div>`:''}
+
+      <!-- BOTTOM GRID -->
+      <div class="lp-bottom-grid">
+        ${parsed['ASSESSMENT']?`
+        <div class="lp-section lp-card">
+          <div class="lp-section-label">📊 Assessment</div>
+          <div contenteditable="true">${renderPlain(parsed['ASSESSMENT'])}</div>
+        </div>`:''}
+        ${parsed['MATERIALS AND RESOURCES']?`
+        <div class="lp-section lp-card">
+          <div class="lp-section-label">📚 Materials & Resources</div>
+          <div contenteditable="true">${renderPlain(parsed['MATERIALS AND RESOURCES'])}</div>
+        </div>`:''}
+      </div>
+
+      <!-- METHODOLOGY -->
+      ${parsed['METHODOLOGY NOTES']?`
+      <div class="lp-section lp-methodology">
+        <div class="lp-section-label">🧠 Methodology Notes</div>
+        <div contenteditable="true" style="font-size:13px;line-height:1.7;color:var(--ink-soft)">${parsed['METHODOLOGY NOTES']}</div>
+      </div>`:''}
+
+    </div>`;
+
+  out.classList.add('visible');
+  showToast('Lesson plan ready ✓','ok');
 }
 
 // ══ SAVE & HISTORY ══
@@ -1284,10 +1500,102 @@ function renderClasses(){
 
 // ══ EXPORT ══
 function exportPDF(){
-  const title=currentResult?.title||'Class Plan';const sections=document.querySelectorAll('.out-section');
-  let html=`<html><head><meta charset="UTF-8"><style>body{font-family:Georgia,serif;max-width:760px;margin:36px auto;color:#1a1a1a;line-height:1.7}h1{font-size:24px;margin-bottom:6px}.meta{font-size:12px;color:#888;margin-bottom:28px}.sec{margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid #eee}h2{font-size:14px;color:#7c5cbf;margin-bottom:8px}pre{font-size:13px;white-space:pre-wrap;font-family:Georgia,serif}@media print{body{margin:20px}}</style></head><body><h1>${title}</h1><div class="meta">Generated with Tero Class · ${new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})}</div>`;
-  sections.forEach(s=>{html+=`<div class="sec"><h2>${s.querySelector('.out-section-name')?.textContent||''}</h2><pre>${s.querySelector('.out-section-body')?.textContent||''}</pre></div>`;});
-  html+='</body></html>';const w=window.open('','_blank');w.document.write(html);w.document.close();setTimeout(()=>w.print(),400);
+  const doc=document.getElementById('lp-doc');
+  if(!doc){showToast('Generate a lesson plan first.','err');return;}
+  const title=currentResult?.title||'Lesson Plan';
+  const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+  let html=`<html><head><meta charset="UTF-8"><title>${title}</title><style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:30px;color:#1a1a1a;font-size:13px;line-height:1.6}
+    .lp-title{font-size:22px;font-weight:700;margin-bottom:8px}
+    .meta-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px}
+    .chip{font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:#f3eeff;color:#7c5cbf;border:1px solid #d4c5f0}
+    .section{margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #eee}
+    .section-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#7c5cbf;margin-bottom:8px}
+    .overview{font-size:13px;line-height:1.7;color:#444;padding:10px 14px;background:#f3eeff;border-radius:6px;border-left:3px solid #7c5cbf}
+    ul.objs{list-style:none;padding:0}
+    ul.objs li{padding:6px 10px 6px 28px;position:relative;background:#f8f8f8;border-radius:5px;margin-bottom:5px}
+    ul.objs li::before{content:"✓";position:absolute;left:9px;color:#7c5cbf;font-weight:700}
+    .tl-card{margin-bottom:10px;border:1px solid #eee;border-radius:8px;overflow:hidden}
+    .tl-head{background:#1a1a1a;color:#fff;padding:8px 12px;display:flex;gap:10px;align-items:center}
+    .tl-time-badge{background:#7c5cbf;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px}
+    .tl-phase-name{font-size:12px;font-weight:600;color:#fff}
+    .tl-row{display:flex;gap:8px;padding:7px 12px;border-bottom:1px solid #f0f0f0;align-items:flex-start}
+    .tl-row:last-child{border-bottom:none}
+    .role-badge{font-size:9px;font-weight:700;padding:2px 6px;border-radius:20px;white-space:nowrap;flex-shrink:0;margin-top:1px}
+    .t-role{background:#FFF3CD;color:#856404}
+    .s-role{background:#D1ECF1;color:#0C5460}
+    .m-role{background:#D4EDDA;color:#155724}
+    .tl-txt{font-size:12px;line-height:1.5;color:#444}
+    .two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .bullet-item{padding:4px 0 4px 14px;position:relative;font-size:12px;color:#444}
+    .bullet-item::before{content:"•";position:absolute;left:3px;color:#7c5cbf}
+    .methodology{background:#f3eeff;padding:12px;border-radius:6px;font-size:12px;color:#444;line-height:1.7}
+    .footer{margin-top:24px;padding-top:12px;border-top:1px solid #eee;font-size:10px;color:#999;text-align:center}
+    @media print{body{padding:15px}@page{margin:1.5cm}}
+  </style></head><body>`;
+
+  // Title + meta
+  const titleEl=doc.querySelector('.lp-title');
+  const chips=doc.querySelectorAll('.lp-meta-chip');
+  html+=`<div class="lp-title">${titleEl?.textContent||title}</div>`;
+  html+=`<div class="meta-row">${Array.from(chips).map(c=>`<span class="chip">${c.textContent}</span>`).join('')}</div>`;
+
+  // Overview
+  const overview=doc.querySelector('.lp-overview-text');
+  if(overview?.textContent?.trim())html+=`<div class="section"><div class="section-label">📌 Overview</div><div class="overview">${overview.textContent}</div></div>`;
+
+  // Objectives
+  const objItems=doc.querySelectorAll('.obj-list li');
+  if(objItems.length)html+=`<div class="section"><div class="section-label">🎯 Learning Objectives</div><ul class="objs">${Array.from(objItems).map(li=>`<li>${li.textContent}</li>`).join('')}</ul></div>`;
+
+  // Timeline
+  const tlCards=doc.querySelectorAll('.tl-card');
+  if(tlCards.length){
+    html+=`<div class="section"><div class="section-label">⏱ Lesson Timeline</div>`;
+    tlCards.forEach(card=>{
+      const time=card.querySelector('.tl-time')?.textContent||'';
+      const phase=card.querySelector('.tl-phase')?.textContent||'';
+      const rows=card.querySelectorAll('.tl-row');
+      html+=`<div class="tl-card"><div class="tl-head"><span class="tl-time-badge">${time}</span><span class="tl-phase-name">${phase}</span></div>`;
+      rows.forEach(row=>{
+        const role=row.querySelector('.tl-role')?.textContent||'';
+        const txt=row.querySelector('.tl-text')?.textContent||'';
+        const cls=role.includes('Teacher')?'t-role':role.includes('Student')?'s-role':'m-role';
+        html+=`<div class="tl-row"><span class="role-badge ${cls}">${role}</span><span class="tl-txt">${txt}</span></div>`;
+      });
+      html+='</div>';
+    });
+    html+='</div>';
+  }
+
+  // Assessment + Materials side by side
+  const lpCards=doc.querySelectorAll('.lp-bottom-grid .lp-card');
+  if(lpCards.length){
+    html+=`<div class="two-col">`;
+    lpCards.forEach(card=>{
+      const label=card.querySelector('.lp-section-label')?.textContent||'';
+      const items=card.querySelectorAll('.plain-bullet,.plain-line');
+      html+=`<div class="section" style="margin-bottom:0"><div class="section-label">${label}</div>`;
+      items.forEach(item=>{
+        const isBullet=item.classList.contains('plain-bullet');
+        html+=isBullet?`<div class="bullet-item">${item.textContent}</div>`:`<div style="font-size:12px;color:#444;padding:2px 0">${item.textContent}</div>`;
+      });
+      html+='</div>';
+    });
+    html+='</div>';
+  }
+
+  // Methodology
+  const meth=doc.querySelector('.lp-methodology [contenteditable]');
+  if(meth?.textContent?.trim())html+=`<div class="section"><div class="section-label">🧠 Methodology Notes</div><div class="methodology">${meth.textContent}</div></div>`;
+
+  html+=`<div class="footer">Generated with Tero Class · ${today}</div></body></html>`;
+
+  const w=window.open('','_blank');
+  w.document.write(html);
+  w.document.close();
+  setTimeout(()=>w.print(),500);
 }
 
 // ══ UTILS ══
