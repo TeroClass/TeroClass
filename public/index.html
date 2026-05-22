@@ -484,6 +484,10 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
             </svg>
             <div class="ai-empty-title">Create your class by typing a prompt<br>and setting your preferences!</div>
           </div>
+          <div id="mp-status-bar" style="display:none;padding:6px 14px;background:#e6f7f7;border-top:1px solid #b2e0e0;font-size:11px;font-weight:500;color:#0891b2;display:flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span>🧠</span><span id="mp-status-text">Institution prompt active</span>
+            <span id="mp-status-detail" style="color:#64b5c4;font-weight:400;margin-left:4px"></span>
+          </div>
           <div class="prompt-bar">
             <button class="prompt-add-btn">+</button>
             <textarea id="prompt-input" class="prompt-textarea" placeholder="Create a complete lesson on the passive voice for intermediate learners…" rows="1" onkeydown="handlePromptKey(event)" oninput="autoResize(this)"></textarea>
@@ -1135,6 +1139,7 @@ function enterApp(){
   const cfg=getConfig();
   if(!cfg.apiKey&&!currentUser.isOrgAdmin&&!currentUser.isSuperAdmin)setTimeout(()=>{showSettings();showToast('Configure Azure OpenAI to start','err');},600);
   if(currentUser.isSuperAdmin){setTimeout(()=>{if(!Object.keys(getOrgs()).length){showPanel('superadmin');renderInstitutions();showToast('Welcome Super Admin! Create your first institution.','ok');}  },400);}
+  setTimeout(()=>buildSystemPrompt(),300); // show master prompt status on load
 }
 
 // ══ NAVIGATION ══
@@ -1148,6 +1153,7 @@ function showPanel(name){
   if(name==='admin')renderDashboard();
   if(name==='superadmin')renderInstitutions();
   if(name==='master')loadMasterSettings();
+  if(name==='ai')buildSystemPrompt(); // refresh master prompt indicator
 }
 
 // ══ CONFIG ══
@@ -1258,8 +1264,20 @@ async function generatePlanning(){
 function buildSystemPrompt(){
   const mp=getMasterPrompt();
   let sys='You are an expert pedagogy and curriculum design assistant generating high-quality, practical, ready-to-use class plans.';
-  if(mp.prompt)sys+='\n\nINSTITUTION REQUIREMENTS:\n'+mp.prompt;
-  if(mp.docText)sys+='\n\nCURRICULUM CONTEXT:\n'+mp.docText.substring(0,3000);
+  let parts=[];
+  if(mp.prompt){sys+='\n\nINSTITUTION REQUIREMENTS:\n'+mp.prompt;parts.push('system prompt');}
+  if(mp.docText&&mp.docName){sys+='\n\nCURRICULUM CONTEXT:\n'+mp.docText.substring(0,3000);parts.push('document: '+mp.docName);}
+  // Update UI indicator
+  const bar=document.getElementById('mp-status-bar');
+  const detail=document.getElementById('mp-status-detail');
+  if(bar&&detail){
+    if(parts.length){
+      bar.style.display='flex';
+      detail.textContent='('+parts.join(' + ')+')';
+    } else {
+      bar.style.display='none';
+    }
+  }
   return sys;
 }
 
@@ -1274,64 +1292,71 @@ function buildMethodologyBlock(p){
 function buildUserPrompt(p){
   const active=METHODOLOGIES.filter(m=>p[m.key]>10).sort((a,b)=>p[b.key]-p[a.key]);
   const methodStr=active.map(m=>`${m.label} (${p[m.key]}%)`).join(', ');
-  return`You are creating a PROFESSIONAL LESSON PLAN that a teacher will use directly in class today. 
-This must be practical, specific, and classroom-ready — not theoretical or generic.
-Write everything in ${p.language}.
+  return`You are an experienced teacher writing your OWN lesson plan to teach TODAY. 
+Write EVERYTHING in ${p.language}. This document must be so complete that ANY teacher can pick it up and run the class without preparation.
 
 LESSON DETAILS:
 - Topic: ${p.prompt}
 - Subject: ${p.subjects.join(', ')||'General'}
 - Level: ${p.level}
 - Group size: ${p.groupSize} students
-- Total duration: ${p.duration}
-- Pedagogical approach (apply proportionally): ${methodStr||'Balanced'}
+- Duration: ${p.duration}
+- Pedagogical blend: ${methodStr||'Balanced'}
 
-OUTPUT FORMAT — respond with EXACTLY these 7 sections using "###" as separator. 
-Do NOT use markdown asterisks (**) or hashtags inside sections. Use plain text only.
-Write like a professional educator, not a chatbot.
+CRITICAL RULES — READ BEFORE WRITING:
+1. Write the ACTUAL content of every activity. Not "do an exercise" — write THE exercise itself.
+2. Write the EXACT words the teacher says. Not "introduce the topic" — write what they actually say.
+3. Write the EXACT instructions students receive. Copy them as if printing a student handout.
+4. Include REAL examples, REAL sentences, REAL questions — specific to this exact topic.
+5. If there is a game, write the rules. If there is a role-play, write the roles and scenario cards. If there is a worksheet, write the worksheet.
+6. Do NOT use markdown asterisks (**) or hashtags (#) inside any section. Plain text only.
+7. Use the pedagogical weights to shape how you structure the class — not just mention them.
+
+Respond with EXACTLY these 7 sections separated by "###":
 
 ### LESSON TITLE
-One clear, specific title for this lesson.
+A specific, descriptive title for this lesson.
 
 ### OVERVIEW
-3 sentences maximum: what this lesson is about, what students will do, and what they will achieve by the end.
+2-3 sentences: what students will do and learn. Be concrete.
 
 ### LEARNING OBJECTIVES
-List exactly 3-4 objectives. Each on its own line. Start each with an action verb (Identify / Analyze / Produce / Demonstrate / Compare / Apply). Example format:
-- Identify the key differences between active and passive voice in written texts
-- Produce at least 5 grammatically correct passive constructions in a real context
+Exactly 3-4 objectives starting with action verbs (Bloom's taxonomy). One per line, starting with a dash.
 
 ### LESSON TIMELINE
-This is the HEART of the plan. Break the ${p.duration} into clear phases. 
-For EACH phase write it in this exact format (one phase per block, separated by a blank line):
+THIS IS THE CORE OF THE PLAN. Break ${p.duration} into phases. Write each phase like this:
 
-[TIME] Phase name
-Teacher action: What the teacher says/does specifically (be concrete, include exact instructions or questions)
-Student action: What students do specifically
-Materials: Any specific materials, tools, or resources needed for this phase
+[TIME] Phase Title
+Teacher says: Write the EXACT opening words or script for this phase. Include real questions, real instructions, real examples specific to the topic.
+Teacher does: Describe the physical/logistical action (writes on board, distributes handout, plays audio, etc.)
+Student task: Write the COMPLETE task instructions exactly as students would receive them. If it is a written exercise, include the full exercise with blanks, sentences, or prompts. If it is a speaking activity, write the prompt cards or scenario. If it is a game, write the rules and example round.
+Materials: List every item needed for this phase.
 
-Example:
-[0-5 min] Warm-up: Prior Knowledge Activation
-Teacher action: Display 3 images on the screen and ask "What do these images have in common?" Give students 60 seconds to discuss with a partner.
-Student action: Discuss in pairs, then share one idea with the class.
-Materials: 3 projected images (related to lesson topic)
+EXAMPLE of the detail level expected:
+[0-5 min] Warmer: True or False?
+Teacher says: "I am going to read 5 sentences. Write T for True and F for False in your notebook. Ready? Number 1: The Eiffel Tower was built in 1989."
+Teacher does: Reads sentences aloud slowly, pauses between each.
+Student task: Listen and write T or F for each sentence in their notebook. Then compare answers with the person next to them.
+Materials: Teacher's list of 5 true/false statements (prepared in advance).
 
-Create enough phases to fill the full ${p.duration}. Be specific and realistic.
+Write EVERY phase at this level. Fill the entire ${p.duration} with real content.
 
 ### ASSESSMENT
-Describe exactly how the teacher will know if students achieved the objectives. Include:
-- What to observe during the lesson (formative)
-- One specific end-of-lesson check (exit ticket, quick task, or question)
-- Success criteria: what "good" looks like
+Include ALL of the following:
+- Formative check during class: describe the exact moment and what to look for
+- Exit ticket: write the EXACT question or task students complete before leaving
+- Success criteria written as "I can..." statements for students
+- How to handle students who finish early (extension task — write it out)
 
 ### MATERIALS AND RESOURCES
-Complete list of everything needed to run this lesson:
-- Physical materials (printed worksheets, markers, etc.)
-- Digital tools (specific websites, apps, platforms)
-- Preparation tasks for the teacher before the lesson
+Full list organized by:
+- For the teacher (scripts, answer keys, timing notes)
+- For students (handouts, materials — write out any short handout content here)
+- Technology and setup needed
+- Preparation required before class
 
 ### METHODOLOGY NOTES
-In 4-6 sentences, explain specifically how the pedagogical approaches (${methodStr}) shaped this lesson design. Reference specific activities from the Timeline section.`;
+3-5 sentences explaining HOW the pedagogical weights (${methodStr}) shaped specific activities in this lesson. Name the actual activities from the Timeline.`;
 }
 
 async function callAzure(cfg,params){
