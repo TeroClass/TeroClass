@@ -32,3 +32,10 @@ against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/
 
 `tests/sql/run.sh` runs the database security suites (base guarantees + hierarchy permissions) on a local
 Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh`.
+
+## Live class (Aula en vivo)
+
+In-app video classroom, currently in **Demo mode** (simulated participants, sample insights, no cost).
+To connect real video set `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in Vercel.
+See `docs/live-class.md` (activation, costs, privacy checklist). Tests: `tests/e2e-live.cjs`,
+`tests/api-live.test.mjs`, `tests/sql/002_live_class_rls.sql`.
