@@ -444,7 +444,7 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
     <div class="topbar-search"><span class="search-icon">🔍</span><input type="text" placeholder="Search for classes, videos or images"></div>
     <div class="topbar-right">
       <button class="topbar-icon-btn">🔔</button>
-      <button class="btn-invite">👤+ Invite</button>
+      <button class="btn-invite" onclick="openInvite()">👤+ Invite</button>
       <button class="btn-new-class" onclick="showPanel('ai')">+ New class</button>
       <div class="user-avatar-sm" id="user-avatar">U</div>
     </div>
@@ -457,10 +457,9 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
       <button class="sib-btn" id="nav-superadmin" style="display:none" onclick="showPanel('superadmin')"><span>🏛️</span><span class="sib-tooltip">Institutions</span></button>
       <!-- Inst admin only -->
       <button class="sib-btn" id="nav-admin" style="display:none" onclick="showPanel('admin')"><span>📊</span><span class="sib-tooltip">Dashboard</span></button>
-      <button class="sib-btn" id="nav-branding" style="display:none" onclick="showPanel('branding')"><span>🎨</span><span class="sib-tooltip">Branding</span></button>
+      <button class="sib-btn" id="nav-branding" style="display:none" onclick="openBrandingNav()"><span>🎨</span><span class="sib-tooltip">Branding</span></button>
       <button class="sib-btn" id="nav-master" style="display:none" onclick="showPanel('master')"><span>🧠</span><span class="sib-tooltip">AI Settings</span></button>
       <div class="icon-sidebar-bottom">
-        <button class="sib-btn" onclick="showSettings()"><span>🔑</span><span class="sib-tooltip">Azure Settings</span></button>
         <div class="user-avatar-sm" style="width:32px;height:32px;font-size:11px;" id="sidebar-avatar">U</div>
       </div>
     </nav>
@@ -604,7 +603,6 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
           </div>
           <div class="smart-tools-scroll" id="sliders-container"></div>
           <div class="st-bottom">
-            <button class="btn-config" onclick="showSettings()">🔑 Azure Settings</button>
             <button class="btn-logout-sm" onclick="handleLogout()">Sign out</button>
           </div>
         </div>
@@ -785,13 +783,8 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
             <button class="btn-save-settings" onclick="saveMasterPrompt()">Save Prompt</button>
           </div>
           <div class="settings-card">
-            <div class="settings-card-title">Azure OpenAI Configuration</div>
-            <div class="settings-card-sub">Institution-wide Azure OpenAI credentials. All teachers in this institution use these automatically.</div>
-            <div class="settings-field"><label class="settings-label">Endpoint</label><input type="text" id="az-endpoint" class="settings-input" placeholder="https://teroclass.openai.azure.com/"></div>
-            <div class="settings-field"><label class="settings-label">API Key</label><input type="password" id="az-apikey" class="settings-input"></div>
-            <div class="settings-field"><label class="settings-label">Deployment</label><input type="text" id="az-deployment" class="settings-input" placeholder="gpt-4o"></div>
-            <div class="settings-field"><label class="settings-label">API Version</label><input type="text" id="az-apiversion" class="settings-input" value="2024-12-01-preview"></div>
-            <button class="btn-save-settings" onclick="saveAzureSettings()">Save Azure Config</button>
+            <div class="settings-card-title">AI engine</div>
+            <div class="settings-card-sub">Class plans are generated with Azure OpenAI (GPT-4o), managed centrally by Tero Class. No keys or setup needed for your institution or teachers.</div>
           </div>
         </div>
       </div>
@@ -800,19 +793,17 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
   </div><!-- /app-body -->
 </div><!-- /screen-app -->
 
-<!-- Azure Modal (teachers) -->
-<div class="modal-overlay" id="modal-settings">
+<!-- Invite Modal -->
+<div class="modal-overlay" id="modal-invite">
   <div class="modal">
-    <div class="modal-title">Azure OpenAI Configuration</div>
-    <div class="modal-sub">Connect your Azure account to generate class plans.</div>
-    <div class="modal-notice">🔒 Stored only in this browser. Never sent to third parties.</div>
-    <div class="modal-field"><label class="modal-label">Endpoint</label><input type="text" id="cfg-endpoint" class="modal-input" placeholder="https://...openai.azure.com/"></div>
-    <div class="modal-field"><label class="modal-label">API Key</label><input type="password" id="cfg-apikey" class="modal-input"></div>
-    <div class="modal-field"><label class="modal-label">Deployment</label><input type="text" id="cfg-deployment" class="modal-input" placeholder="gpt-4o"></div>
-    <div class="modal-field"><label class="modal-label">API Version</label><input type="text" id="cfg-apiversion" class="modal-input" value="2024-12-01-preview"></div>
+    <div class="modal-title">Invite to <span id="invite-org-name"></span></div>
+    <div class="modal-sub">If the person already has an account, they are added right away. If not, they join automatically when they register with this email.</div>
+    <div class="modal-notice">🔗 Registration link: <strong id="invite-link"></strong></div>
+    <div class="modal-field"><label class="modal-label">Email</label><input type="email" id="invite-email" class="modal-input" placeholder="teacher@school.edu"></div>
+    <div class="modal-field"><label class="modal-label">Role</label><select id="invite-role" class="modal-input"><option value="teacher">Teacher</option><option value="org_admin">Institution admin</option></select></div>
     <div class="modal-actions">
-      <button class="btn-modal-cancel" onclick="closeSettings()">Cancel</button>
-      <button class="btn-modal-save" onclick="saveSettings()">Save</button>
+      <button class="btn-modal-cancel" onclick="closeModal('modal-invite')">Cancel</button>
+      <button class="btn-modal-save" onclick="sendInvite()">Invite</button>
     </div>
   </div>
 </div>
@@ -842,6 +833,7 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 
 <div class="toast" id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
 <script>
 // ══ PEDAGOGICAL METHODOLOGIES ══
 const METHODOLOGIES = [
@@ -892,39 +884,51 @@ const METHODOLOGIES = [
 ];
 
 // ══ STATE ══
-let currentUser=null,plannings=[],currentResult=null,currentOrgId=null,wizardStep=1,selectedFont='Inter',wlLogoData=null;
-const USERS_KEY='tc_users',PLANS_KEY='tc_plans',CFG_KEY='tc_config',ORGS_KEY='tc_orgs',MP_KEY='tc_masterprompt';
+let currentUser=null,plannings=[],currentResult=null,currentOrgId=null,wizardStep=1,selectedFont='Inter',wlLogoData=null,wlLogoFile=null;
+let orgsCache={};      // id -> org (normalizado)
+let masterCache={prompt:'',docText:'',docName:''};
+
+// ══ SUPABASE ══
+const SUPABASE_URL='https://ppvqkjchhejjulrdqkdr.supabase.co';
+const SUPABASE_KEY='sb_publishable_D4ZATRSmyiURioJ4PvTb4A_rR_urilK';
+const sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+
+function normOrg(r){
+  if(!r)return null;
+  return {id:r.id,name:r.name,slug:r.slug,color:r.color||'#7c5cbf',bgColor:r.bg_color||'#f0eef8',font:r.font||'Inter',logo:r.logo_url||'',adminEmail:r.admin_email||'',
+    masterPrompt:r.master_prompt||'',docText:r.doc_text||'',docName:r.doc_name||''};
+}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function getOrgSlugFromUrl(){const m=window.location.pathname.match(/\/org\/([^/]+)/);return m?decodeURIComponent(m[1]).toLowerCase():null;}
 
 // ══ INIT ══
-window.onload=()=>{
+window.onload=async()=>{
   renderSliders();setupSubjectsInput();
-  // Detect org from URL
-  const path=window.location.pathname;
-  const orgMatch=path.match(/\/org\/([^/]+)/);
-  if(orgMatch){currentOrgId=orgMatch[1];applyOrgBranding(currentOrgId);}
-  const s=localStorage.getItem('tc_session');
-  if(s){currentUser=JSON.parse(s);enterApp();}
-  loadConfigIntoForm();loadMasterSettings();
+  const slug=getOrgSlugFromUrl();
+  if(slug)applyOrgBranding(slug);
+  const {data:{session}}=await sb.auth.getSession();
+  if(session)await enterApp();
 };
 
 // ══ ORG BRANDING ══
-function getOrgs(){return JSON.parse(localStorage.getItem(ORGS_KEY)||'{}');}
-function saveOrgs(o){localStorage.setItem(ORGS_KEY,JSON.stringify(o));}
+async function fetchOrgs(){
+  const {data,error}=await sb.from('institutions').select('*').order('created_at');
+  if(error){showToast('Error loading institutions: '+error.message,'err');return orgsCache;}
+  orgsCache={};(data||[]).forEach(r=>{orgsCache[r.id]=normOrg(r);});
+  return orgsCache;
+}
+function getOrgs(){return orgsCache;}
 
-function applyOrgBranding(slug){
-  const orgs=getOrgs();
-  const org=Object.values(orgs).find(o=>o.slug===slug);
-  if(!org)return;
-  document.documentElement.style.setProperty('--brand-primary',org.color||'#7c5cbf');
-  document.documentElement.style.setProperty('--brand-bg',org.bgColor||'#f0eef8');
+async function applyOrgBranding(slug){
+  const {data}=await sb.rpc('get_org_branding',{p_slug:slug});
+  const r=data&&data[0];if(!r)return;
+  const org=normOrg(r);
+  document.documentElement.style.setProperty('--brand-primary',org.color);
+  document.documentElement.style.setProperty('--brand-bg',org.bgColor);
   if(org.font)document.body.style.fontFamily=org.font;
   document.getElementById('auth-brand-name').textContent=org.name||'Tero Class';
   document.title=org.name||'Tero Class';
-  if(org.logo){
-    const authLogo=document.querySelector('.auth-logo');
-    const existImg=authLogo.querySelector('img');
-    if(existImg){existImg.src=org.logo;}
-  }
+  if(org.logo){const img=document.querySelector('.auth-logo img');if(img)img.src=org.logo;}
   const badge=document.getElementById('auth-org-badge');
   const orgName=document.getElementById('auth-org-name');
   if(badge&&orgName){badge.style.display='block';orgName.textContent=org.name;}
@@ -940,73 +944,59 @@ function applyOrgBrandingToApp(org){
   document.title=org.name||'Tero Class';
   if(org.logo){
     const area=document.getElementById('topbar-logo-area');
-    area.innerHTML=`<img src="${org.logo}" style="width:28px;height:28px;border-radius:7px;object-fit:contain;">`;
+    area.innerHTML=`<img src="${esc(org.logo)}" style="width:28px;height:28px;border-radius:7px;object-fit:contain;">`;
   }
 }
 
 // ══ INSTITUTIONS (SUPER ADMIN) ══
-function renderInstitutions(){
-  const orgs=getOrgs();const grid=document.getElementById('inst-grid');
-  const list=Object.values(orgs);
+let instStats={plans:{},teachers:{}};
+async function renderInstitutions(){
+  const grid=document.getElementById('inst-grid');
+  await fetchOrgs();
+  const [{data:profs},{data:plans}]=await Promise.all([
+    sb.from('profiles').select('institution_id,role'),
+    sb.from('plannings').select('institution_id')
+  ]);
+  instStats={plans:{},teachers:{}};
+  (plans||[]).forEach(p=>{if(p.institution_id)instStats.plans[p.institution_id]=(instStats.plans[p.institution_id]||0)+1;});
+  (profs||[]).forEach(p=>{if(p.institution_id&&p.role==='teacher')instStats.teachers[p.institution_id]=(instStats.teachers[p.institution_id]||0)+1;});
+  const list=Object.values(orgsCache);
   if(!list.length){grid.innerHTML='<div class="inst-empty"><h3>No institutions yet</h3><p>Create your first institution to get started.</p></div>';return;}
   grid.innerHTML=list.map(org=>{
-    const orgPlans=getOrgPlanCount(org.id);
-    const orgTeachers=getOrgTeacherCount(org.id);
-    const letter=(org.name||'?')[0].toUpperCase();
+    const letter=esc((org.name||'?')[0].toUpperCase());
     return `<div class="inst-card">
       <div class="inst-card-top">
-        <div class="inst-logo" style="background:${org.color||'#7c5cbf'}">${org.logo?`<img src="${org.logo}" style="width:40px;height:40px;border-radius:10px;object-fit:contain;">`:letter}</div>
-        <div><div class="inst-name">${org.name}</div><div class="inst-slug">/org/${org.slug}</div></div>
+        <div class="inst-logo" style="background:${esc(org.color)}">${org.logo?`<img src="${esc(org.logo)}" style="width:40px;height:40px;border-radius:10px;object-fit:contain;">`:letter}</div>
+        <div><div class="inst-name">${esc(org.name)}</div><div class="inst-slug">/org/${esc(org.slug)}</div></div>
       </div>
       <div class="inst-stats">
-        <div class="inst-stat"><div class="inst-stat-val">${orgTeachers}</div><div class="inst-stat-label">Teachers</div></div>
-        <div class="inst-stat"><div class="inst-stat-val">${orgPlans}</div><div class="inst-stat-label">Plans</div></div>
+        <div class="inst-stat"><div class="inst-stat-val">${getOrgTeacherCount(org.id)}</div><div class="inst-stat-label">Teachers</div></div>
+        <div class="inst-stat"><div class="inst-stat-val">${getOrgPlanCount(org.id)}</div><div class="inst-stat-label">Plans</div></div>
       </div>
-      <div class="inst-link">🔗 ${window.location.origin}/org/${org.slug}</div>
+      <div class="inst-link">🔗 ${esc(window.location.origin)}/org/${esc(org.slug)}</div>
       <div class="inst-actions">
-        <div class="btn-inst-action" onclick="copyLink('${org.slug}')">Copy Link</div>
+        <div class="btn-inst-action" onclick="copyLink('${esc(org.slug)}')">Copy Link</div>
         <div class="btn-inst-action" onclick="editInstitution('${org.id}')">Edit</div>
         <div class="btn-inst-action primary" onclick="loginAsAdmin('${org.id}')">View</div>
       </div>
     </div>`;
   }).join('');
 }
-
-function getOrgPlanCount(orgId){
-  const users=getUsers();
-  let count=0;
-  Object.keys(users).forEach(email=>{
-    if(users[email].orgId===orgId){
-      count+=JSON.parse(localStorage.getItem(PLANS_KEY+'_'+email)||'[]').length;
-    }
-  });
-  return count;
-}
-
-function getOrgTeacherCount(orgId){
-  const users=getUsers();
-  return Object.values(users).filter(u=>u.orgId===orgId&&!u.isOrgAdmin).length;
-}
+function getOrgPlanCount(orgId){return instStats.plans[orgId]||0;}
+function getOrgTeacherCount(orgId){return instStats.teachers[orgId]||0;}
 
 function showCreateInstitution(){document.getElementById('modal-create-inst').classList.add('active');}
 
-function createInstitution(){
+async function createInstitution(){
   const name=document.getElementById('new-inst-name').value.trim();
   const slug=document.getElementById('new-inst-slug').value.trim().toLowerCase().replace(/[^a-z0-9-]/g,'');
   const adminEmail=document.getElementById('new-inst-admin').value.trim();
   const color=document.getElementById('new-inst-color').value;
   if(!name||!slug||!adminEmail){showToast('Fill all fields.','err');return;}
-  const orgs=getOrgs();
-  if(Object.values(orgs).find(o=>o.slug===slug)){showToast('Slug already exists.','err');return;}
-  const id='org_'+Date.now();
-  orgs[id]={id,name,slug,adminEmail,color,bgColor:'#f0eef8',font:'Inter',logo:'',createdAt:new Date().toISOString()};
-  saveOrgs(orgs);
-  // Create admin user for this org
-  const users=getUsers();
-  if(!users[adminEmail]){users[adminEmail]={name:name+' Admin',password:btoa('changeme123'),isOrgAdmin:true,orgId:id};saveUsers(users);}
-  closeModal('modal-create-inst');renderInstitutions();
-  showToast(`Institution "${name}" created! Share: /org/${slug}`,'ok');
-  // Clear form
+  const {error}=await sb.rpc('create_institution',{p_name:name,p_slug:slug,p_admin_email:adminEmail,p_color:color});
+  if(error){showToast(/duplicate|unique/i.test(error.message)?'Slug already exists.':'Error: '+error.message,'err');return;}
+  closeModal('modal-create-inst');await renderInstitutions();
+  showToast(`Institution "${name}" created! The admin (${adminEmail}) can register at /org/${slug}`,'ok');
   ['new-inst-name','new-inst-slug','new-inst-admin'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
 }
 
@@ -1015,15 +1005,25 @@ function copyLink(slug){
   navigator.clipboard.writeText(url).then(()=>showToast('Link copied!','ok'));
 }
 
-function editInstitution(orgId){
-  currentOrgId=orgId;showPanel('branding');loadBrandingForOrg(orgId);}
+function editInstitution(orgId){currentOrgId=orgId;showPanel('branding');loadBrandingForOrg(orgId);}
+
+// Súper admin: ver el panel de una institución
+function loginAsAdmin(orgId){
+  currentOrgId=orgId;
+  const org=orgsCache[orgId];
+  document.getElementById('admin-inst-badge').textContent=org?.name||'Institution';
+  showPanel('admin');
+}
 
 function loadBrandingForOrg(orgId){
-  const orgs=getOrgs();const org=orgs[orgId];if(!org)return;
+  const org=orgsCache[orgId];if(!org)return;
+  wlLogoData=org.logo||null;wlLogoFile=null;
   if(org.color){document.getElementById('wl-primary').value=org.color;document.getElementById('wl-primary-hex').value=org.color;}
   if(org.bgColor){document.getElementById('wl-bg').value=org.bgColor;document.getElementById('wl-bg-hex').value=org.bgColor;}
   if(org.name)document.getElementById('wl-name').value=org.name;
   if(org.slug)document.getElementById('wl-slug').value=org.slug;
+  const ae=document.getElementById('wl-admin-email');if(ae)ae.value=org.adminEmail||'';
+  selectedFont=org.font||'Inter';
   updatePreview();
 }
 
@@ -1054,17 +1054,6 @@ function selectFont(el){
   updatePreview();
 }
 
-function handleWlLogoUpload(input){
-  const file=input.files[0];if(!file)return;
-  const reader=new FileReader();
-  reader.onload=e=>{
-    wlLogoData=e.target.result;
-    document.getElementById('wl-logo-success').style.display='block';
-    document.getElementById('wl-logo-success').textContent='✓ '+file.name;
-    updatePreview();
-  };reader.readAsDataURL(file);
-}
-
 let previewMode='admin';
 function setPreviewMode(mode){
   previewMode=mode;
@@ -1092,27 +1081,57 @@ function updatePreview(){
   else urlBox.style.display='none';
 }
 
-function saveBranding(){
+function handleWlLogoUpload(input){
+  const file=input.files[0];if(!file)return;
+  if(file.size>2*1024*1024){showToast('Logo must be under 2MB.','err');return;}
+  wlLogoFile=file;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    wlLogoData=e.target.result;
+    document.getElementById('wl-logo-success').style.display='block';
+    document.getElementById('wl-logo-success').textContent='✓ '+file.name;
+    updatePreview();
+  };reader.readAsDataURL(file);
+}
+
+async function saveBranding(){
   const name=document.getElementById('wl-name').value.trim();
   const slug=document.getElementById('wl-slug').value.trim().toLowerCase().replace(/[^a-z0-9-]/g,'');
   const adminEmail=document.getElementById('wl-admin-email').value.trim();
   if(!name||!slug){showToast('Name and slug are required.','err');return;}
-  const orgs=getOrgs();
-  const orgId=currentOrgId||('org_'+Date.now());
-  orgs[orgId]={
-    id:orgId,name,slug,adminEmail,
-    color:document.getElementById('wl-primary').value,
-    bgColor:document.getElementById('wl-bg').value,
-    font:selectedFont,logo:wlLogoData||orgs[orgId]?.logo||'',
-    createdAt:orgs[orgId]?.createdAt||new Date().toISOString()
-  };
-  saveOrgs(orgs);
-  if(adminEmail){
-    const users=getUsers();
-    if(!users[adminEmail]){users[adminEmail]={name:name+' Admin',password:btoa('changeme123'),isOrgAdmin:true,orgId};saveUsers(users);}
+  const row={name,slug,color:document.getElementById('wl-primary').value,bg_color:document.getElementById('wl-bg').value,font:selectedFont};
+  if(adminEmail)row.admin_email=adminEmail.toLowerCase();
+  let orgId=currentOrgId;
+  if(orgId){
+    const {error}=await sb.from('institutions').update(row).eq('id',orgId);
+    if(error){showToast(/duplicate|unique/i.test(error.message)?'Slug already exists.':'Error: '+error.message,'err');return;}
+  }else{
+    const {data,error}=await sb.rpc('create_institution',{p_name:name,p_slug:slug,p_admin_email:adminEmail,p_color:row.color});
+    if(error){showToast(/duplicate|unique/i.test(error.message)?'Slug already exists.':'Error: '+error.message,'err');return;}
+    orgId=data;currentOrgId=orgId;
+    await sb.from('institutions').update({bg_color:row.bg_color,font:row.font}).eq('id',orgId);
   }
+  // Logo → almacenamiento
+  if(wlLogoFile){
+    const ext=(wlLogoFile.name.split('.').pop()||'png').toLowerCase();
+    const path=`${orgId}/logo-${Date.now()}.${ext}`;
+    const up=await sb.storage.from('logos').upload(path,wlLogoFile,{upsert:true,contentType:wlLogoFile.type});
+    if(up.error){showToast('Logo upload failed: '+up.error.message,'err');}
+    else{
+      const url=sb.storage.from('logos').getPublicUrl(path).data.publicUrl;
+      await sb.from('institutions').update({logo_url:url}).eq('id',orgId);
+      wlLogoFile=null;
+    }
+  }
+  // Admin de la institución
+  if(adminEmail&&orgsCache[orgId]?.adminEmail!==adminEmail.toLowerCase()){
+    const {error}=await sb.rpc('invite_member',{p_inst:orgId,p_email:adminEmail,p_role:'org_admin'});
+    if(error)showToast('Admin: '+error.message,'err');
+  }
+  await fetchOrgs();
+  if(currentUser.orgId===orgId)applyOrgBrandingToApp(orgsCache[orgId]);
   showToast(`Branding saved! Link: /org/${slug}`,'ok');
-  if(currentUser?.isSuperAdmin){showPanel('superadmin');renderInstitutions();}
+  if(currentUser?.isSuperAdmin){showPanel('superadmin');}
 }
 
 // ══ SLIDERS ══
@@ -1153,8 +1172,6 @@ function removeSubject(btn){btn.closest('.subject-tag').remove();}
 function getSubjects(){return Array.from(document.querySelectorAll('.subject-tag')).map(t=>t.dataset.val);}
 
 // ══ AUTH ══
-function getUsers(){return JSON.parse(localStorage.getItem(USERS_KEY)||'{}');}
-function saveUsers(u){localStorage.setItem(USERS_KEY,JSON.stringify(u));}
 function switchTab(tab){
   document.querySelectorAll('.auth-tab').forEach((t,i)=>t.classList.toggle('active',(i===0&&tab==='login')||(i===1&&tab==='register')));
   document.getElementById('tab-login').style.display=tab==='login'?'block':'none';
@@ -1162,71 +1179,77 @@ function switchTab(tab){
   document.getElementById('auth-error').style.display='none';
 }
 function showAuthError(msg){const el=document.getElementById('auth-error');el.textContent=msg;el.style.display='block';}
-function handleLogin(){
+function authErrorText(e){
+  const m=e?.message||'';
+  if(/invalid login/i.test(m))return 'Wrong email or password.';
+  if(/not confirmed/i.test(m))return 'Please confirm your email first (check your inbox).';
+  if(/already registered|already exists/i.test(m))return 'Account already exists. Sign in instead.';
+  return m||'Something went wrong.';
+}
+async function handleLogin(){
   const email=document.getElementById('login-email').value.trim();
   const pass=document.getElementById('login-password').value;
   if(!email||!pass){showAuthError('Complete all fields.');return;}
-  const users=getUsers();
-  if(!users[email]){showAuthError('No account with that email.');return;}
-  if(users[email].password!==btoa(pass)){showAuthError('Wrong password.');return;}
-  currentUser={email,name:users[email].name,...users[email]};
-  localStorage.setItem('tc_session',JSON.stringify(currentUser));
-  enterApp();
+  const {error}=await sb.auth.signInWithPassword({email,password:pass});
+  if(error){showAuthError(authErrorText(error));return;}
+  await enterApp();
 }
-function handleRegister(){
+async function handleRegister(){
   const name=document.getElementById('reg-name').value.trim();
   const email=document.getElementById('reg-email').value.trim();
   const pass=document.getElementById('reg-password').value;
   if(!name||!email||!pass){showAuthError('Complete all fields.');return;}
   if(pass.length<6){showAuthError('Password must be at least 6 characters.');return;}
-  const users=getUsers();
-  if(users[email]){showAuthError('Account already exists.');return;}
-  const allUsers=Object.keys(users);
-  const isSuperAdmin=allUsers.length===0;
-  // If registering via org link, associate with org
-  const path=window.location.pathname;
-  const orgMatch=path.match(/\/org\/([^/]+)/);
-  let orgId=null;
-  if(orgMatch){
-    const orgs=getOrgs();
-    const org=Object.values(orgs).find(o=>o.slug===orgMatch[1]);
-    if(org)orgId=org.id;
-  }
-  users[email]={name,password:btoa(pass),isSuperAdmin,isOrgAdmin:false,orgId};
-  saveUsers(users);
-  currentUser={email,name,isSuperAdmin,isOrgAdmin:false,orgId};
-  localStorage.setItem('tc_session',JSON.stringify(currentUser));
-  enterApp();
+  const {data,error}=await sb.auth.signUp({email,password:pass,options:{data:{name,org_slug:getOrgSlugFromUrl()||''},emailRedirectTo:window.location.href}});
+  if(error){showAuthError(authErrorText(error));return;}
+  if(!data.session){showAuthError('Account created! Check your email to confirm it, then sign in.');switchTab('login');document.getElementById('auth-error').style.display='block';return;}
+  await enterApp();
 }
-function handleLogout(){localStorage.removeItem('tc_session');currentUser=null;document.getElementById('screen-app').classList.remove('active');document.getElementById('screen-auth').style.display='flex';}
+async function handleLogout(){
+  await sb.auth.signOut();
+  currentUser=null;plannings=[];currentOrgId=null;orgsCache={};
+  window.location.reload();
+}
 
-function enterApp(){
+async function loadProfile(){
+  const {data:{user}}=await sb.auth.getUser();
+  if(!user)return null;
+  let {data:p}=await sb.from('profiles').select('*').eq('id',user.id).maybeSingle();
+  if(!p){ // por si el perfil tarda un instante en crearse
+    await new Promise(r=>setTimeout(r,800));
+    ({data:p}=await sb.from('profiles').select('*').eq('id',user.id).maybeSingle());
+  }
+  if(!p)return null;
+  return {id:p.id,email:p.email,name:p.name||p.email.split('@')[0],role:p.role,
+    isSuperAdmin:p.role==='superadmin',isOrgAdmin:p.role==='org_admin',orgId:p.institution_id};
+}
+
+async function enterApp(){
+  currentUser=await loadProfile();
+  if(!currentUser){showAuthError('Could not load your profile. Try again.');await sb.auth.signOut();return;}
   document.getElementById('screen-auth').style.display='none';
   document.getElementById('screen-app').classList.add('active');
   const initials=currentUser.name.split(' ').map(n=>n[0]).slice(0,2).join('').toUpperCase();
   document.getElementById('user-avatar').textContent=initials;
   document.getElementById('sidebar-avatar').textContent=initials;
-  // Show correct nav buttons
-  if(currentUser.isSuperAdmin){
-    document.getElementById('nav-superadmin').style.display='flex';
-  }
+  if(currentUser.isSuperAdmin)document.getElementById('nav-superadmin').style.display='flex';
   if(currentUser.isOrgAdmin||currentUser.isSuperAdmin){
     document.getElementById('nav-admin').style.display='flex';
     document.getElementById('nav-branding').style.display='flex';
     document.getElementById('nav-master').style.display='flex';
   }
-  // Apply org branding if user belongs to org
+  await fetchOrgs();
   if(currentUser.orgId){
-    const orgs=getOrgs();const org=orgs[currentUser.orgId];
+    const org=orgsCache[currentUser.orgId];
     if(org){applyOrgBrandingToApp(org);currentOrgId=currentUser.orgId;}
     document.getElementById('admin-inst-badge').textContent=org?.name||'Institution';
   }
-  loadPlannings();renderClasses();
+  await loadPlannings();renderClasses();
   setTimeout(()=>initSkillsDrag(),200);
-  const cfg=getConfig();
-  if(!cfg.apiKey&&!currentUser.isOrgAdmin&&!currentUser.isSuperAdmin)setTimeout(()=>{showSettings();showToast('Configure Azure OpenAI to start','err');},600);
-  if(currentUser.isSuperAdmin){setTimeout(()=>{if(!Object.keys(getOrgs()).length){showPanel('superadmin');renderInstitutions();showToast('Welcome Super Admin! Create your first institution.','ok');}  },400);}
-  setTimeout(()=>buildSystemPrompt(),300); // show master prompt status on load
+  if(currentUser.isSuperAdmin&&!Object.keys(orgsCache).length){
+    showPanel('superadmin');showToast('Welcome Super Admin! Create your first institution.','ok');
+  }
+  loadMasterSettings();
 }
 
 // ══ NAVIGATION ══
@@ -1238,80 +1261,87 @@ function showPanel(name){
   const nb=document.getElementById('nav-'+name);if(nb)nb.classList.add('active');
   if(name==='home')renderClasses();
   if(name==='admin')renderDashboard();
-  if(name==='superadmin')renderInstitutions();
+  if(name==='superadmin'){if(currentUser?.isSuperAdmin)currentOrgId=currentUser.orgId||null;renderInstitutions();}
   if(name==='master')loadMasterSettings();
-  if(name==='ai'){buildSystemPrompt();initSkillsDrag();} // refresh master prompt indicator
+  if(name==='ai'){buildSystemPrompt();initSkillsDrag();}
 }
-
-// ══ CONFIG ══
-function getConfig(){
-  // Check org config first
-  if(currentOrgId){
-    const orgCfg=localStorage.getItem(CFG_KEY+'_org_'+currentOrgId);
-    if(orgCfg)return JSON.parse(orgCfg);
+function openBrandingNav(){
+  if(currentUser.isSuperAdmin&&!currentUser.orgId){
+    currentOrgId=null;wlLogoData=null;wlLogoFile=null;
+    ['wl-name','wl-slug','wl-admin-email'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   }
-  return JSON.parse(localStorage.getItem(CFG_KEY)||'{}');
+  showPanel('branding');
+  if(currentOrgId)loadBrandingForOrg(currentOrgId);else updatePreview();
 }
-function loadConfigIntoForm(){const cfg=JSON.parse(localStorage.getItem(CFG_KEY)||'{}');if(cfg.endpoint)document.getElementById('cfg-endpoint').value=cfg.endpoint;if(cfg.apiKey)document.getElementById('cfg-apikey').value=cfg.apiKey;if(cfg.deployment)document.getElementById('cfg-deployment').value=cfg.deployment;if(cfg.apiVersion)document.getElementById('cfg-apiversion').value=cfg.apiVersion;}
-function showSettings(){loadConfigIntoForm();document.getElementById('modal-settings').classList.add('active');}
-function closeSettings(){document.getElementById('modal-settings').classList.remove('active');}
 function closeModal(id){document.getElementById(id).classList.remove('active');}
-function saveSettings(){
-  const cfg={endpoint:document.getElementById('cfg-endpoint').value.trim(),apiKey:document.getElementById('cfg-apikey').value.trim(),deployment:document.getElementById('cfg-deployment').value.trim()||'gpt-4o',apiVersion:document.getElementById('cfg-apiversion').value.trim()||'2024-12-01-preview'};
-  localStorage.setItem(CFG_KEY,JSON.stringify(cfg));closeSettings();showToast('Settings saved ✓','ok');
+
+// ══ INVITE ══
+function openInvite(){
+  const orgId=currentOrgId||currentUser?.orgId;
+  if(!(currentUser?.isOrgAdmin||currentUser?.isSuperAdmin)){showToast('Only institution admins can invite.','err');return;}
+  if(!orgId){showToast('Open an institution first (Institutions → View).','err');return;}
+  document.getElementById('invite-org-name').textContent=orgsCache[orgId]?.name||'';
+  document.getElementById('invite-link').textContent=window.location.origin+'/org/'+(orgsCache[orgId]?.slug||'');
+  document.getElementById('modal-invite').classList.add('active');
+}
+async function sendInvite(){
+  const orgId=currentOrgId||currentUser?.orgId;
+  const email=document.getElementById('invite-email').value.trim();
+  const role=document.getElementById('invite-role').value;
+  if(!email){showToast('Enter an email.','err');return;}
+  const {data,error}=await sb.rpc('invite_member',{p_inst:orgId,p_email:email,p_role:role});
+  if(error){showToast('Error: '+error.message,'err');return;}
+  closeModal('modal-invite');document.getElementById('invite-email').value='';
+  showToast(data==='added'?`${email} added to the institution ✓`:`Invitation saved ✓ — ask ${email} to register with the institution link`,'ok');
 }
 
-// ══ MASTER PROMPT ══
+// ══ MASTER PROMPT (por institución, guardado en la base) ══
+function masterOrgId(){return currentOrgId||currentUser?.orgId||null;}
 function getMasterPrompt(){
-  const key=currentOrgId?MP_KEY+'_'+currentOrgId:MP_KEY;
-  return JSON.parse(localStorage.getItem(key)||'{"prompt":"","docText":"","docName":""}');
+  const org=orgsCache[masterOrgId()];
+  return org?{prompt:org.masterPrompt,docText:org.docText,docName:org.docName}:{prompt:'',docText:'',docName:''};
 }
 function loadMasterSettings(){
-  const mp=getMasterPrompt();const cfg=getConfig();
-  if(mp.prompt)document.getElementById('mp-prompt').value=mp.prompt;
-  if(mp.docName){const p=document.getElementById('doc-preview');p.textContent='✓ '+mp.docName;p.style.display='block';}
-  if(cfg.endpoint)document.getElementById('az-endpoint').value=cfg.endpoint;
-  if(cfg.apiKey)document.getElementById('az-apikey').value=cfg.apiKey;
-  if(cfg.deployment)document.getElementById('az-deployment').value=cfg.deployment;
-  if(cfg.apiVersion)document.getElementById('az-apiversion').value=cfg.apiVersion;
-}
-function saveMasterPrompt(){
   const mp=getMasterPrompt();
-  mp.prompt=document.getElementById('mp-prompt').value;
-  const key=currentOrgId?MP_KEY+'_'+currentOrgId:MP_KEY;
-  localStorage.setItem(key,JSON.stringify(mp));
-  showToast('Master prompt saved ✓','ok');
+  const ta=document.getElementById('mp-prompt');if(ta)ta.value=mp.prompt||'';
+  const p=document.getElementById('doc-preview');
+  if(p){if(mp.docName){p.textContent='✓ '+mp.docName;p.style.display='block';}else p.style.display='none';}
 }
-function saveAzureSettings(){
-  const cfg={endpoint:document.getElementById('az-endpoint').value.trim(),apiKey:document.getElementById('az-apikey').value.trim(),deployment:document.getElementById('az-deployment').value.trim()||'gpt-4o',apiVersion:document.getElementById('az-apiversion').value.trim()||'2024-12-01-preview'};
-  const key=currentOrgId?CFG_KEY+'_org_'+currentOrgId:CFG_KEY;
-  localStorage.setItem(key,JSON.stringify(cfg));showToast('Azure config saved ✓','ok');
+async function saveMasterFields(fields){
+  const orgId=masterOrgId();
+  if(!orgId){showToast('Open an institution first (Institutions → View).','err');return false;}
+  const {error}=await sb.from('institutions').update(fields).eq('id',orgId);
+  if(error){showToast('Error: '+error.message,'err');return false;}
+  await fetchOrgs();return true;
+}
+async function saveMasterPrompt(){
+  if(await saveMasterFields({master_prompt:document.getElementById('mp-prompt').value}))showToast('Master prompt saved ✓','ok');
 }
 function handleDocUpload(input){
   const file=input.files[0];if(!file)return;
+  if(!file.name.toLowerCase().endsWith('.txt')){showToast('For now only .txt documents are read as context.','err');}
   const reader=new FileReader();
-  reader.onload=e=>{
-    const mp=getMasterPrompt();mp.docName=file.name;
-    mp.docText=file.name.endsWith('.txt')?e.target.result:`[Document: ${file.name} attached as curriculum context]`;
-    const key=currentOrgId?MP_KEY+'_'+currentOrgId:MP_KEY;
-    localStorage.setItem(key,JSON.stringify(mp));
-    const p=document.getElementById('doc-preview');p.textContent='✓ '+file.name;p.style.display='block';
+  reader.onload=async e=>{
+    const docText=file.name.toLowerCase().endsWith('.txt')?String(e.target.result).substring(0,20000):`[Document: ${file.name} attached as curriculum context]`;
+    if(await saveMasterFields({doc_name:file.name,doc_text:docText})){
+      const p=document.getElementById('doc-preview');p.textContent='✓ '+file.name;p.style.display='block';
+      showToast('Document saved ✓','ok');
+    }
   };
-  if(file.name.endsWith('.txt'))reader.readAsText(file);else reader.readAsDataURL(file);
+  reader.readAsText(file);
 }
 
 // ══ ADMIN DASHBOARD ══
-function renderDashboard(){
-  const users=getUsers();
-  // Filter to org if inst admin
-  const orgFilter=currentUser.isOrgAdmin?currentUser.orgId:null;
-  const relevantUsers=Object.entries(users).filter(([e,u])=>!orgFilter||u.orgId===orgFilter);
-  const teacherCount=relevantUsers.filter(([e,u])=>!u.isOrgAdmin&&!u.isSuperAdmin).length;
-  let allPlans=[];
-  relevantUsers.forEach(([email,u])=>{
-    const p=JSON.parse(localStorage.getItem(PLANS_KEY+'_'+email)||'[]');
-    allPlans=allPlans.concat(p.map(pl=>{return{...pl,teacher:u.name,email}}));
-  });
+async function renderDashboard(){
+  const orgFilter=currentOrgId||(currentUser.isOrgAdmin?currentUser.orgId:null);
+  if(orgFilter)document.getElementById('admin-inst-badge').textContent=orgsCache[orgFilter]?.name||'Institution';
+  let pq=sb.from('profiles').select('id,name,email,role,institution_id');
+  let lq=sb.from('plannings').select('owner_id,institution_id,data,created_at');
+  if(orgFilter){pq=pq.eq('institution_id',orgFilter);lq=lq.eq('institution_id',orgFilter);}
+  const [{data:profs},{data:rows}]=await Promise.all([pq,lq]);
+  const byId={};(profs||[]).forEach(p=>byId[p.id]=p);
+  const teacherCount=(profs||[]).filter(u=>u.role==='teacher').length;
+  const allPlans=(rows||[]).map(r=>({params:r.data?.params||{},date:r.created_at,email:byId[r.owner_id]?.email||r.owner_id,teacher:byId[r.owner_id]?.name||byId[r.owner_id]?.email||'—'}));
   document.getElementById('m-teachers').textContent=teacherCount;
   document.getElementById('m-plans').textContent=allPlans.length;
   document.getElementById('m-avg').textContent=teacherCount>0?Math.round(allPlans.length/teacherCount):0;
@@ -1319,13 +1349,13 @@ function renderDashboard(){
   const sortedS=Object.entries(subjects).sort((a,b)=>b[1]-a[1]);
   document.getElementById('m-top').textContent=sortedS[0]?.[0]||'—';
   const maxS=sortedS[0]?.[1]||1;
-  document.getElementById('subject-chart').innerHTML=sortedS.slice(0,6).map(([s,c])=>`<div class="bar-row"><span class="bar-label">${s}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.round(c/maxS*100)}%"></div></div><span class="bar-val">${c}</span></div>`).join('')||'<div style="font-size:12px;color:var(--ink-muted)">No data yet</div>';
+  document.getElementById('subject-chart').innerHTML=sortedS.slice(0,6).map(([s,c])=>`<div class="bar-row"><span class="bar-label">${esc(s)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.round(c/maxS*100)}%"></div></div><span class="bar-val">${c}</span></div>`).join('')||'<div style="font-size:12px;color:var(--ink-muted)">No data yet</div>';
   const levels={};allPlans.forEach(p=>{const l=p.params?.level||'Unknown';levels[l]=(levels[l]||0)+1;});
   const sortedL=Object.entries(levels).sort((a,b)=>b[1]-a[1]);
   const maxL=sortedL[0]?.[1]||1;
-  document.getElementById('level-chart').innerHTML=sortedL.map(([l,c])=>`<div class="bar-row"><span class="bar-label">${l}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.round(c/maxL*100)}%"></div></div><span class="bar-val">${c}</span></div>`).join('')||'<div style="font-size:12px;color:var(--ink-muted)">No data yet</div>';
+  document.getElementById('level-chart').innerHTML=sortedL.map(([l,c])=>`<div class="bar-row"><span class="bar-label">${esc(l)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.round(c/maxL*100)}%"></div></div><span class="bar-val">${c}</span></div>`).join('')||'<div style="font-size:12px;color:var(--ink-muted)">No data yet</div>';
   const byTeacher={};allPlans.forEach(p=>{if(!byTeacher[p.email])byTeacher[p.email]={name:p.teacher,count:0,last:p.date};byTeacher[p.email].count++;if(p.date>byTeacher[p.email].last)byTeacher[p.email].last=p.date;});
-  document.getElementById('teachers-table-body').innerHTML=Object.values(byTeacher).sort((a,b)=>b.count-a.count).slice(0,8).map(t=>`<tr><td><span class="status-dot"></span>${t.name}</td><td>${t.count}</td><td>${new Date(t.last).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</td></tr>`).join('')||'<tr><td colspan="3" style="font-size:12px;color:var(--ink-muted);padding-top:10px">No activity yet</td></tr>';
+  document.getElementById('teachers-table-body').innerHTML=Object.values(byTeacher).sort((a,b)=>b.count-a.count).slice(0,8).map(t=>`<tr><td><span class="status-dot"></span>${esc(t.name)}</td><td>${t.count}</td><td>${new Date(t.last).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</td></tr>`).join('')||'<tr><td colspan="3" style="font-size:12px;color:var(--ink-muted);padding-top:10px">No activity yet</td></tr>';
 }
 
 // ══ PROMPT UX ══
@@ -1334,8 +1364,6 @@ function handlePromptKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();
 
 // ══ AI GENERATION ══
 async function generatePlanning(){
-  const cfg=getConfig();
-  if(!cfg.apiKey||!cfg.endpoint){showToast('Configure Azure OpenAI first 🔑','err');showSettings();return;}
   const prompt=document.getElementById('prompt-input').value.trim();
   if(!prompt){showToast('Enter a topic or prompt first.','err');return;}
   const sliders=getSliderValues();
@@ -1343,7 +1371,7 @@ async function generatePlanning(){
   document.getElementById('ai-empty').style.display='none';document.getElementById('ai-output').classList.remove('visible');document.getElementById('ai-loading').classList.add('visible');document.getElementById('btn-generate').disabled=true;document.getElementById('btn-generate-text').textContent='…';
   const steps=['Analyzing pedagogical parameters…','Applying methodology weights…','Designing class structure…','Generating activities…','Crafting assessment…','Finalizing…'];
   let si=0;const st=setInterval(()=>{si=(si+1)%steps.length;document.getElementById('loading-step').textContent=steps[si];},1600);
-  try{const result=await callAzure(cfg,params);clearInterval(st);displayResult(result,params);}
+  try{const result=await callAI(params);clearInterval(st);displayResult(result,params);}
   catch(err){clearInterval(st);document.getElementById('ai-loading').classList.remove('visible');document.getElementById('ai-empty').style.display='flex';showToast('Error: '+err.message,'err');}
   document.getElementById('btn-generate').disabled=false;document.getElementById('btn-generate-text').textContent='Generate';
 }
@@ -1442,10 +1470,11 @@ DO NOT use ** or # for formatting. Use plain text, dashes, emojis, and the → a
 Write like a real teacher, warm and specific. Include emojis naturally. 😊`;
 }
 
-async function callAzure(cfg,params){
-  const res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({endpoint:cfg.endpoint,apiKey:cfg.apiKey,deployment:cfg.deployment,apiVersion:cfg.apiVersion,
-      messages:[{role:'system',content:buildSystemPrompt()},{role:'user',content:buildUserPrompt(params)}],max_tokens:3000,temperature:.7})});
+async function callAI(params){
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session)throw new Error('Your session expired. Please sign in again.');
+  const res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
+    body:JSON.stringify({messages:[{role:'system',content:buildSystemPrompt()},{role:'user',content:buildUserPrompt(params)}],max_tokens:3000,temperature:.7})});
   if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e?.error||`HTTP ${res.status}`);}
   const data=await res.json();return data.choices[0].message.content;
 }
@@ -1508,18 +1537,23 @@ function copyForGoogleDocs(){
 }
 
 // ══ SAVE & HISTORY ══
-function loadPlannings(){plannings=JSON.parse(localStorage.getItem(PLANS_KEY+'_'+currentUser.email)||'[]');}
-function saveToDB(){localStorage.setItem(PLANS_KEY+'_'+currentUser.email,JSON.stringify(plannings));}
-function savePlanning(){
+async function loadPlannings(){
+  const {data,error}=await sb.from('plannings').select('*').eq('owner_id',currentUser.id).order('created_at',{ascending:false});
+  if(error){showToast('Error loading classes: '+error.message,'err');plannings=[];return;}
+  plannings=(data||[]).map(r=>({id:r.id,title:r.title,params:r.data?.params||{},content:r.data?.content||'',date:r.created_at}));
+}
+async function savePlanning(){
   if(!currentResult){showToast('Nothing to save yet.','err');return;}
-  const bodies=Array.from(document.querySelectorAll('.out-section-body')).map(el=>el.textContent.trim());
-  plannings.unshift({id:Date.now().toString(),title:currentResult.title,params:currentResult.params,content:bodies.join('\n\n'),date:new Date().toISOString()});
-  saveToDB();renderClasses();showToast('Saved ✓','ok');
+  const doc=document.getElementById('lp-doc');
+  const content=(doc?.innerText||currentResult.text||'').trim();
+  const {error}=await sb.from('plannings').insert({owner_id:currentUser.id,institution_id:currentUser.orgId||null,title:currentResult.title,data:{params:currentResult.params,content}});
+  if(error){showToast('Error saving: '+error.message,'err');return;}
+  await loadPlannings();renderClasses();showToast('Saved ✓','ok');
 }
 function renderClasses(){
   const grid=document.getElementById('classes-grid');if(!grid)return;
   if(!plannings.length){grid.innerHTML='<div class="classes-empty"><h3>No classes yet</h3><p style="font-size:12px">Generate your first class plan and save it.</p></div>';return;}
-  grid.innerHTML=plannings.map(p=>`<div class="class-card"><div class="class-card-subject">${(p.params?.subjects||[]).join(', ')||'General'}</div><div class="class-card-title">${p.title}</div><div class="class-card-preview">${p.content?.substring(0,90)}…</div><div class="class-card-date">${new Date(p.date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div></div>`).join('');
+  grid.innerHTML=plannings.map(p=>`<div class="class-card"><div class="class-card-subject">${esc((p.params?.subjects||[]).join(', ')||'General')}</div><div class="class-card-title">${esc(p.title)}</div><div class="class-card-preview">${esc(p.content?.substring(0,90))}…</div><div class="class-card-date">${new Date(p.date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div></div>`).join('');
 }
 
 // ══ EXPORT ══
@@ -1597,7 +1631,7 @@ function getSkillsPriority(){
 
 function showToast(msg,type=''){const t=document.getElementById('toast');t.textContent=msg;t.className='toast '+type;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape'){closeSettings();closeModal('modal-settings');closeModal('modal-create-inst');};
+  if(e.key==='Escape'){closeModal('modal-invite');closeModal('modal-create-inst');};
   if(e.key==='Enter'&&document.getElementById('screen-auth').style.display!=='none'){document.getElementById('tab-login').style.display!=='none'?handleLogin():handleRegister();};
 });
 </script>
