@@ -1,76 +1,8 @@
 // Prueba de punta a punta con un Supabase simulado (no toca datos reales).
 // Uso: NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-mock.cjs
 const { chromium } = require('playwright');
-const fs = require('fs');
-const path = require('path');
 
-const ROOT = path.join(__dirname, '..');
-const HTML = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
-const SB_JS = fs.readFileSync(process.env.SB_JS || '/tmp/package/dist/umd/supabase.js', 'utf8');
-const SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
-
-const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [] };
-let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
-const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
-function session(u) {
-  return { access_token: 'tok-' + u.id, token_type: 'bearer', expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600,
-    refresh_token: 'r-' + u.id, user: { id: u.id, aud: 'authenticated', role: 'authenticated', email: u.email, user_metadata: u.meta, app_metadata: {} } };
-}
-function newUser(email, meta) {
-  const id = uid(); db.users[id] = { id, email, meta };
-  const inv = db.invitations.find(i => i.email === email.toLowerCase() && !i.accepted_at);
-  const bySlug = db.institutions.find(i => i.slug === meta.org_slug);
-  db.profiles.push({ id, email, name: meta.name || '', role: email.toLowerCase() === 'im.silveiratrabal@gmail.com' ? 'superadmin' : (inv ? inv.role : 'teacher'),
-    institution_id: inv ? inv.institution_id : (bySlug ? bySlug.id : null) });
-  if (inv) inv.accepted_at = new Date().toISOString();
-  return db.users[id];
-}
-function applyFilters(rows, url) {
-  for (const [k, v] of url.searchParams) {
-    if (['select', 'order', 'limit', 'columns'].includes(k)) continue;
-    if (v.startsWith('eq.')) rows = rows.filter(r => String(r[k]) === v.slice(3));
-  }
-  return rows;
-}
-async function handleSupabase(route) {
-  const req = route.request(); const url = new URL(req.url()); const p = url.pathname; const m = req.method();
-  const body = req.postData() ? JSON.parse(req.postData()) : null;
-  const json = (status, data) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data), headers: { 'access-control-allow-origin': '*' } });
-  const auth = (req.headers()['authorization'] || '').replace('Bearer ', '');
-  if (m === 'OPTIONS') return route.fulfill({ status: 200, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' } });
-  if (p === '/auth/v1/signup') {
-    if (Object.values(db.users).some(u => u.email === body.email)) return json(422, { msg: 'User already registered', error_code: 'user_already_exists' });
-    return json(200, session(newUser(body.email, body.data || {})));
-  }
-  if (p === '/auth/v1/token') { const u = Object.values(db.users).find(x => x.email === body.email); return u ? json(200, session(u)) : json(400, { error: 'invalid_grant', error_description: 'Invalid login credentials', msg: 'Invalid login credentials' }); }
-  if (p === '/auth/v1/user') { const u = tokUser(auth); return u ? json(200, session(u).user) : json(401, { msg: 'bad jwt' }); }
-  if (p === '/auth/v1/logout') return route.fulfill({ status: 204 });
-  const me = tokUser(auth);
-  if (p.startsWith('/rest/v1/rpc/')) {
-    const fn = p.split('/').pop();
-    if (fn === 'get_org_branding') { const i = db.institutions.find(x => x.slug === body.p_slug); return json(200, i ? [i] : []); }
-    if (fn === 'create_institution') {
-      const id = uid(); db.institutions.push({ id, name: body.p_name, slug: body.p_slug, color: body.p_color, bg_color: '#f0eef8', font: 'Inter', admin_email: body.p_admin_email, master_prompt: '', doc_text: '', doc_name: '', logo_url: null, created_at: new Date().toISOString() });
-      db.invitations.push({ email: body.p_admin_email.toLowerCase(), institution_id: id, role: 'org_admin' }); return json(200, id);
-    }
-    if (fn === 'invite_member') { const pr = db.profiles.find(x => x.email === body.p_email); if (pr) { pr.institution_id = body.p_inst; pr.role = body.p_role; return json(200, 'added'); } db.invitations.push({ email: body.p_email, institution_id: body.p_inst, role: body.p_role }); return json(200, 'invited'); }
-    return json(404, { message: 'no fn' });
-  }
-  if (p.startsWith('/rest/v1/')) {
-    if (!me) return json(401, { message: 'JWT required' });
-    const table = p.split('/').pop(); const rows = db[table];
-    if (m === 'GET') {
-      let out = applyFilters(rows, url);
-      const single = (req.headers()['accept'] || '').includes('vnd.pgrst.object');
-      if (single) return out.length ? json(200, out[0]) : json(406, { code: 'PGRST116', message: 'no rows' });
-      return json(200, out);
-    }
-    if (m === 'POST') { const r = { id: uid(), created_at: new Date().toISOString(), ...body }; rows.push(r); return json(201, (req.headers()['accept'] || '').includes('vnd.pgrst.object') ? r : [r]); }
-    if (m === 'DELETE') { const del = applyFilters(rows, url); db[table] = rows.filter(r => !del.includes(r)); return route.fulfill({ status: 204 }); }
-    if (m === 'PATCH') { applyFilters(rows, url).forEach(r => Object.assign(r, body)); return json(200, []); }
-  }
-  return json(404, { message: 'unmocked ' + m + ' ' + p });
-}
+const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.cjs');
 
 (async () => {
   const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
@@ -92,6 +24,7 @@ async function handleSupabase(route) {
     return r.fulfill({ contentType: 'text/html', body: HTML });
   });
   const page = await ctx.newPage();
+  page.on('dialog', d => d.accept()); // beforeunload (L13) never blocks reloads in the test
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
   page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
   const step = async (name, fn) => { try { await fn(); console.log('✓', name); } catch (e) { console.log('✗', name, '→', e.message.split('\n')[0]); process.exitCode = 1; } };
@@ -127,6 +60,10 @@ async function handleSupabase(route) {
     await page.click('#panel-master .btn-save-settings');
     await page.waitForTimeout(300);
     if (db.institutions[0].master_prompt !== 'Always use CEFR levels.') throw new Error('master prompt no guardado');
+    const badge = await page.textContent('#master-inst-badge'); if (!badge.includes('The English Coach')) throw new Error('AI Settings sin institución: ' + badge);
+    const dash = await page.evaluate(() => { showPanel('admin'); return new Promise(r => setTimeout(() => r(document.getElementById('admin-inst-badge').textContent), 300)); });
+    if (!dash.includes('The English Coach')) throw new Error('Dashboard sin institución: ' + dash);
+    await page.click('#nav-master');
   });
 
   await step('Subir playbook de la institución', async () => {
@@ -135,8 +72,37 @@ async function handleSupabase(route) {
     if (!db.institution_documents[0]?.summary?.includes('learning by doing')) throw new Error('resumen no guardado');
   });
 
+  await step('Procesar playbook pendiente (usa get_document_content)', async () => {
+    db.institution_documents.push({ id: 'doc-pending', institution_id: db.institutions[0].id, name: 'values.txt', content: 'We value curiosity and kindness. '.repeat(5), chars: 165, summary: null, created_at: new Date().toISOString() });
+    await page.evaluate(() => showPanel('master'));
+    await page.waitForSelector('[data-action="pb-process"]');
+    await page.evaluate(() => { document.getElementById('toast').textContent = ''; });
+    await page.click('[data-action="pb-process"]');
+    await page.waitForFunction(() => /Playbook ready|Error/.test(document.getElementById('toast').textContent));
+    if (!calls.rpc.some(c => c.fn === 'get_document_content' && c.body.p_id === 'doc-pending')) throw new Error('no usó get_document_content');
+    if (!db.institution_documents.find(d => d.id === 'doc-pending').summary) throw new Error('resumen no guardado');
+    const t = await page.textContent('#toast'); if (!/Playbook ready/.test(t)) throw new Error('sin aviso de éxito: ' + t);
+  });
+
+  await step('Marca: editar institución, registro abierto y badge "Editing"', async () => {
+    await page.click('#nav-branding');
+    await page.waitForSelector('#panel-branding.active');
+    const badge = await page.textContent('#branding-ctx-badge'); if (!badge.includes('The English Coach')) throw new Error('sin badge: ' + badge);
+    if (await page.inputValue('#wl-name') !== 'The English Coach') throw new Error('no cargó la institución');
+    await page.uncheck('#wl-open-reg');
+    await page.evaluate(() => saveBranding());
+    await page.waitForFunction(() => document.getElementById('panel-superadmin').classList.contains('active'));
+    if (db.institutions[0].open_registration !== false) throw new Error('open_registration no guardado');
+    db.institutions[0].open_registration = true;
+    const invs = db.invitations.filter(i => i.email === 'dire@tec.com').length; if (invs !== 1) throw new Error('invitación de admin duplicada: ' + invs);
+    await page.click('.btn-inst-action.primary');
+  });
+
   await step('Invitar docente', async () => {
     await page.click('.btn-invite');
+    await page.fill('#invite-email', 'im.silveiratrabal@gmail.com');
+    await page.click('#modal-invite .btn-modal-save');
+    await page.waitForFunction(() => /platform owner/.test(document.getElementById('toast').textContent));
     await page.fill('#invite-email', 'profe@tec.com');
     await page.click('#modal-invite .btn-modal-save');
     await page.waitForTimeout(300);
@@ -216,6 +182,14 @@ async function handleSupabase(route) {
     await page.waitForSelector('#screen-app.active');
   });
 
+  await step('Menú de usuario con nombre, email, rol y salir', async () => {
+    await page.click('#user-avatar');
+    await page.waitForSelector('#user-menu.open');
+    const t = await page.textContent('#user-menu'); if (!t.includes('im.silveiratrabal@gmail.com') || !/Platform owner/.test(t)) throw new Error(t);
+    await page.click('body', { position: { x: 400, y: 400 } });
+    if (await page.isVisible('#user-menu')) throw new Error('el menú no se cierra');
+  });
+
   await step('Docente invitado se registra desde /org/tec con la marca', async () => {
     await page.evaluate(() => handleLogout());
     await page.goto('http://teroclass.test/org/tec');
@@ -226,10 +200,31 @@ async function handleSupabase(route) {
     await page.waitForSelector('#screen-app.active');
     const brand = await page.textContent('#topbar-brand-name'); if (brand !== 'The English Coach') throw new Error('marca: ' + brand);
     if (await page.isVisible('#nav-admin')) throw new Error('docente ve dashboard');
+    if (await page.isVisible('#btn-invite-top')) throw new Error('docente ve Invitar');
     await page.click('#nav-home');
     if (await page.$('.class-card')) throw new Error('docente ve clases ajenas');
   });
   await shot(4);
+
+  await step('Admin: cambiar rol y quitar docente (RPC, doble clic sin confirm())', async () => {
+    await page.evaluate(() => handleLogout());
+    await page.goto('http://teroclass.test/');
+    await page.fill('#login-email', 'im.silveiratrabal@gmail.com'); await page.fill('#login-password', 'secreto123');
+    await page.click('#tab-login .auth-btn');
+    await page.waitForSelector('#screen-app.active');
+    await page.click('#nav-superadmin'); await page.click('.btn-inst-action.primary');
+    await page.waitForSelector('#members-card select.member-role');
+    const profe = db.profiles.find(p => p.email === 'profe@tec.com');
+    await page.selectOption(`select[data-id="${profe.id}"]`, 'org_admin');
+    await page.waitForFunction(() => /Role updated/.test(document.getElementById('toast').textContent));
+    if (profe.role !== 'org_admin') throw new Error('rol no cambiado');
+    await page.click(`button.member-remove[data-id="${profe.id}"]`);
+    if (profe.institution_id === null) throw new Error('quitó sin confirmar');
+    await page.click(`button.member-remove[data-id="${profe.id}"]`);
+    await page.waitForFunction(() => /Removed/.test(document.getElementById('toast').textContent));
+    if (profe.institution_id !== null) throw new Error('no se quitó');
+    if (!calls.rpc.some(c => c.fn === 'remove_member')) throw new Error('no llamó remove_member');
+  });
 
   const real = errors.filter(e => !/favicon|ERR_FAILED|Failed to load resource/.test(e));
   console.log(real.length ? 'Errores en consola:\n' + real.join('\n') : 'Sin errores de consola');
