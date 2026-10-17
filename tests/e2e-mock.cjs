@@ -138,6 +138,7 @@ async function handleSupabase(route) {
   await step('Generar y guardar clase', async () => {
     await page.click('#nav-ai');
     await page.fill('#subjects-input', 'Chemistry'); await page.press('#subjects-input', 'Enter');
+    await page.selectOption('#st-language', 'Spanish'); await page.selectOption('#st-age', '15-17 years old');
     await page.fill('#prompt-input', 'Chemical reactions');
     await page.click('#btn-generate');
     await page.waitForSelector('#lp-doc');
@@ -146,6 +147,9 @@ async function handleSupabase(route) {
     if (!aiCall.body.messages[1].content.includes('REQUIREMENTS')) throw new Error('las barras no llegan al prompt');
     if (!aiCall.body.messages[1].content.includes('NOT a language class')) throw new Error('no respeta la disciplina');
     if (!aiCall.body.messages[1].content.includes('GOLDEN RULE')) throw new Error('falta materiales listos');
+    const up = aiCall.body.messages[1].content;
+    if (!up.includes('100% of the document in Spanish') || !up.includes('Semana X - Clase X') || !up.includes('Objetivos de hoy')) throw new Error('no fuerza el idioma');
+    if (!up.includes("STUDENTS' AGE: 15-17 years old")) throw new Error('no usa la edad');
     if (JSON.stringify(aiCall.body).includes('apiKey')) throw new Error('se envía apiKey desde el navegador');
     await page.waitForFunction(() => document.getElementById('lp-doc-student')?.innerText.includes('You will be able'));
     if (studentCalls !== 1) throw new Error('no se pidió el material del alumno');
@@ -177,6 +181,21 @@ async function handleSupabase(route) {
     if (studentCalls !== 1) throw new Error('regeneró el material del alumno al abrir');
     if (db.plannings.length !== 1) throw new Error('se duplicó: ' + db.plannings.length);
     if (!db.plannings[0].data.content.includes('Extra note')) throw new Error('no se guardó la edición');
+  });
+
+  await step('Cambiar la interfaz a español sin tocar la clase', async () => {
+    await page.click('.topbar-right .lang-toggle button[data-lang="es"]');
+    await page.click('#nav-ai');
+    await shot(5);
+    const gen = await page.textContent('#btn-generate'); if (!/Generar/.test(gen)) throw new Error('botón no traducido: ' + gen);
+    const tab = await page.textContent('#tab-student'); if (!/Material del alumno/.test(tab)) throw new Error('pestaña no traducida');
+    const doc = await page.textContent('#lp-doc'); if (/Objetivos de hoy/.test(doc) && !/Objectives/.test(doc)) throw new Error('tradujo la clase');
+    if (!/Objectives/.test(doc)) throw new Error('la clase cambió');
+    const val = await page.$eval('#st-level', e => e.value); if (val !== 'Intermediate') throw new Error('cambió el valor enviado: ' + val);
+    await page.click('#nav-home');
+    await page.waitForFunction(() => /Tus clases/.test(document.body.innerText));
+    await page.click('.topbar-right .lang-toggle button[data-lang="en"]');
+    await page.waitForFunction(() => /Your Classes/.test(document.body.innerText));
   });
 
   await step('Salir y entrar de nuevo', async () => {
