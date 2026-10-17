@@ -177,6 +177,16 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.waitForFunction(() => document.querySelector('.lc-share-tile') || /cancelled|not available/.test(document.getElementById('toast').textContent), null, { timeout: 8000 });
     if (await page.$('.lc-share-tile')) {
       await page.waitForFunction(() => document.getElementById('lc-share-video').srcObject);
+      if (!/You are presenting/.test(await text('.lc-share-tile'))) throw new Error('etiqueta de presentación');
+      // chat stays usable as a side panel next to the shared screen
+      await page.click('#lc-ctl-chat');
+      await page.waitForSelector('#lc-side-chat:not([hidden])');
+      const lay = await page.evaluate(() => { const st = document.querySelector('.lc-stage').getBoundingClientRect(), sd = document.getElementById('lc-side').getBoundingClientRect(), sh = document.querySelector('.lc-share-tile').getBoundingClientRect(); return { sideLeft: sd.left, stageRight: st.right, sideH: sd.height, shareW: sh.width, shareRight: sh.right }; });
+      if (lay.sideLeft < lay.stageRight - 1 || lay.shareRight > lay.sideLeft + 1 || lay.sideH < 300 || lay.shareW < 300) throw new Error('chat no es panel lateral junto a la pantalla: ' + JSON.stringify(lay));
+      await page.fill('#lc-chat-input', 'Mirad la diapositiva');
+      await page.press('#lc-chat-input', 'Enter');
+      await page.waitForFunction(() => /Mirad la diapositiva/.test(document.getElementById('lc-chat-list').innerText));
+      if (!(await page.$('.lc-share-tile'))) throw new Error('el chat cortó la pantalla compartida');
       await page.click('#lc-ctl-share');
       await page.waitForFunction(() => !document.querySelector('.lc-share-tile'));
     } else console.log('   (getDisplayMedia no disponible en headless: se mostró el aviso)');
@@ -297,6 +307,15 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     if (!/Not recorded/.test(await text('.lc-tile[data-pid="local"] .lc-tile-top'))) throw new Error('badge no grabado');
     if (!/Leave/.test(await text('#lc-ctl-end'))) throw new Error('botón salir');
     await page.waitForSelector('#lc-rec[data-state="on"]', { timeout: 6000 });
+    // the (simulated) teacher shares a slide: students see it as a large tile with a live video track
+    await page.waitForSelector('.lc-share-tile.remote[data-pid="screen-sim-t"] video', { timeout: 8000 });
+    await page.waitForFunction(() => { const v = document.querySelector('.lc-share-tile.remote video'); return v && v.srcObject && v.srcObject.getVideoTracks()[0]?.readyState === 'live'; });
+    if (!/Prof\. Laura Méndez/.test(await text('.lc-share-tile.remote')) || !/is presenting/.test(await text('.lc-share-tile.remote'))) throw new Error('etiqueta pantalla remota');
+    await page.waitForFunction(() => /is sharing their screen/.test(document.getElementById('toast').textContent), null, { timeout: 4000 }).catch(() => {});
+    { const box = await page.$eval('.lc-share-tile.remote', e => e.getBoundingClientRect().width); const tile = await page.$eval('.lc-tile[data-pid="local"]', e => e.getBoundingClientRect().width); if (box <= tile) throw new Error('la pantalla compartida no es la vista grande'); }
+    if (await page.isHidden('#lc-side-chat')) await page.click('#lc-ctl-chat'); // students start with the chat open
+    await page.waitForSelector('#lc-side-chat:not([hidden])');
+    if (!(await page.$('.lc-share-tile.remote'))) throw new Error('abrir el chat oculta la pantalla');
     await page.click('#lc-ctl-plan');
     const secs = await page.$$eval('.lc-sec-planned', x => x.map(e => e.textContent)); if (secs.join(',') !== '10 min,15 min,5 min') throw new Error('secciones: ' + secs);
     if (await page.$('.lc-plan-doc b, .lc-plan-doc img, .lc-plan-doc script')) throw new Error('plan sin escapar');
@@ -454,6 +473,27 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     if (errs2.length) throw new Error(errs2.join(' | '));
     console.log('   (SDK: ' + (process.env.LK_UMD ? 'livekit-client real' : 'stub') + ')');
     await c2.close();
+  });
+
+  await step('LiveKit: pantallas compartidas por otros → evento "screens" y attachScreen (sala simulada)', async () => {
+    const r = await page.evaluate(() => {
+      const attached = [];
+      const pub = (track, muted = false) => ({ track, isMuted: muted });
+      const part = (identity, name, pubs) => ({ identity, name, metadata: '{"role":"student"}', getTrackPublication: src => pubs[src] || null });
+      const P = new LiveClass.providers.LiveKitProvider();
+      P.LK = { Track: { Source: { Camera: 'camera', Microphone: 'microphone', ScreenShare: 'screen_share' } } };
+      const screenTrack = { attach: el => attached.push(el.id) };
+      P.room = { localParticipant: part('me', 'Me', {}), remoteParticipants: new Map([
+        ['u2', part('u2', 'Ana <b>Prof</b>', { screen_share: pub(screenTrack) })],
+        ['u3', part('u3', 'Beto', { screen_share: pub({ attach() {} }, true) })],
+        ['u4', part('u4', 'Caro', { camera: pub({ attach() {} }) })]]) };
+      const seen = []; P.on('screens', l => seen.push(l));
+      P._sync();
+      const el = document.createElement('video'); el.id = 'v-u2';
+      return { screens: seen[0], ok: P.attachScreen('u2', el), none: P.attachScreen('u4', document.createElement('video')), attached };
+    });
+    if (JSON.stringify(r.screens) !== JSON.stringify([{ id: 'u2', name: 'Ana <b>Prof</b>' }])) throw new Error('screens: ' + JSON.stringify(r.screens));
+    if (!r.ok || r.none || r.attached.join() !== 'v-u2') throw new Error(JSON.stringify(r));
   });
 
   const real = errors.filter(e => !/favicon|ERR_FAILED|Failed to load resource/.test(e));

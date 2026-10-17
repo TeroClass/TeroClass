@@ -361,9 +361,10 @@ Cierre y ticket de salida (5 min)
   //   connect({room,name,role,consent,recorded,minor,guardianOk,localStream}) → Promise
   //   disconnect(), setMicrophoneEnabled(on), setCameraEnabled(on),
   //   startScreenShare(stream), stopScreenShare(), sendChat(text), setHandRaised(up),
-  //   setRecording('on'|'paused'|'off'), attachVideo(participantId, videoEl), participants()
+  //   setRecording('on'|'paused'|'off'), attachVideo(participantId, videoEl), participants(),
+  //   attachScreen(participantId, videoEl) (someone else's shared screen)
   // Events (on/off): 'participants' (list), 'speaking' (Set of ids), 'chat' ({from,name,text,ts}),
-  //   'hand' ({id,up}), 'recording' (state), 'disconnected'.
+  //   'hand' ({id,up}), 'recording' (state), 'screens' ([{id,name}] of remote screen shares), 'disconnected'.
   // ════════════════════════════════════════════════════════════════════════════════════════
   class LiveProvider {
     constructor() { this._h = {}; this._list = []; }
@@ -382,6 +383,7 @@ Cierre y ticket de salida (5 min)
     async setHandRaised() {}
     async setRecording() {}
     attachVideo() { return false; }
+    attachScreen() { return false; }
   }
 
   // ── Demo: simulated classmates, nothing leaves the browser ──
@@ -410,10 +412,32 @@ Cierre y ticket de salida (5 min)
       this._later(11000, () => this._setHand('sim-2', true));
       this._later(26000, () => this._setHand('sim-2', false));
       if (o.role !== 'teacher') this._later(3000, () => this.emit('recording', 'on'));
+      if (o.role !== 'teacher') this._later(4000, () => this._startSimShare(o));
       await new Promise(r => setTimeout(r, 250)); // feels like a connection
       this.emit('participants', this._list);
     }
     _later(ms, fn) { this._timers.push(setTimeout(fn, ms)); }
+    // Demo: "Prof. Laura Méndez" shares a slide (a canvas stream), so students see a shared screen
+    _startSimShare(o) {
+      const c = document.createElement('canvas'); c.width = 1280; c.height = 720;
+      if (!c.captureStream) return;
+      const g = c.getContext('2d'); const t0 = Date.now();
+      const draw = () => {
+        g.fillStyle = '#f7f5fc'; g.fillRect(0, 0, 1280, 720);
+        g.fillStyle = '#7c5cbf'; g.fillRect(0, 0, 1280, 96);
+        g.fillStyle = '#fff'; g.font = '600 40px Inter, sans-serif'; g.fillText(String(o.title || 'Class').slice(0, 48), 48, 62);
+        g.fillStyle = '#1a1a1a'; g.font = '32px Inter, sans-serif';
+        ['• 1 ✓', '• 2 …', '• 3'].forEach((l, i) => g.fillText(l, 64, 200 + i * 64));
+        const sec = Math.floor((Date.now() - t0) / 1000); g.fillStyle = '#888'; g.font = '24px Inter, sans-serif';
+        g.fillText(`${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`, 1160, 690);
+      };
+      draw();
+      this._screenStream = c.captureStream(5);
+      this._timers.push(setInterval(draw, 500));
+      this._screens = [{ id: 'sim-t', name: 'Prof. Laura Méndez' }];
+      this.emit('screens', this._screens);
+    }
+    attachScreen(id, el) { if (id === 'sim-t' && this._screenStream) { el.srcObject = this._screenStream; return true; } return false; }
     _setHand(id, up) { const p = this._list.find(x => x.id === id); if (!p) return; p.hand = up; this.emit('hand', { id, up }); this.emit('participants', this._list); }
     _tick() {
       if (this._hold-- > 0 && this._speaker) { this.emit('speaking', new Set([this._speaker])); return; }
@@ -428,7 +452,7 @@ Cierre y ticket de salida (5 min)
       this._speaker = next; this._hold = 1 + Math.floor(Math.random() * 4);
       this.emit('speaking', new Set(next ? [next] : []));
     }
-    async disconnect() { (this._timers || []).forEach(t => { clearInterval(t); clearTimeout(t); }); this._timers = []; this._h = {}; }
+    async disconnect() { (this._timers || []).forEach(t => { clearInterval(t); clearTimeout(t); }); this._timers = []; this._h = {}; if (this._screenStream) { this._screenStream.getTracks().forEach(t => t.stop()); this._screenStream = null; } }
     _local() { return this._list.find(p => p.isLocal); }
     async setMicrophoneEnabled(on) { const l = this._local(); if (l) l.mic = on; this.emit('participants', this._list); }
     async setCameraEnabled(on) { const l = this._local(); if (l) l.cam = on; this.emit('participants', this._list); }
@@ -497,8 +521,20 @@ Cierre y ticket de salida (5 min)
           minor: !!m.minor, guardianOk: !!m.guardian_consent, hand: !!(this._hands && this._hands[isLocal ? 'local' : p.identity]),
         };
       };
-      this._list = [toP(this.room.localParticipant, true), ...Array.from(this.room.remoteParticipants.values()).map(p => toP(p, false))];
+      const remotes = Array.from(this.room.remoteParticipants.values());
+      this._list = [toP(this.room.localParticipant, true), ...remotes.map(p => toP(p, false))];
       this.emit('participants', this._list);
+      // remote screen shares (subscribed and not muted) → their own large tile
+      this._screens = remotes.filter(p => { const sp = p.getTrackPublication(S.ScreenShare); return !!(sp && sp.track && !sp.isMuted); })
+        .map(p => ({ id: p.identity, name: p.name || p.identity }));
+      this.emit('screens', this._screens);
+    }
+    attachScreen(id, el) {
+      if (!this.room) return false;
+      const p = this.room.remoteParticipants.get(id);
+      const pub = p && p.getTrackPublication(this.LK.Track.Source.ScreenShare);
+      if (pub && pub.track) { pub.track.attach(el); return true; }
+      return false;
     }
     attachVideo(id, el) {
       if (!this.room || id === 'local') return false;
@@ -912,7 +948,7 @@ Cierre y ticket de salida (5 min)
       kind, provider: null, role: L.role, name: L.name, stream: L.stream, screen: null,
       mic: L.mic && !!L.stream?.getAudioTracks().length, cam: L.cam && !!L.stream?.getVideoTracks().length,
       consent: { ...L.consent }, recorded, minor: L.minor, guardianOk: guardianOk(L),
-      hand: false, rec: { state: 'off', secs: 0, everOn: false }, secs: 0,
+      hand: false, rec: { state: 'off', secs: 0, everOn: false }, secs: 0, remoteScreens: [],
       chat: [], unread: 0, side: isNarrow() ? null : (L.role === 'teacher' ? 'plan' : 'chat'),
       speaking: new Set(), talk: { teacher: 0, students: 0 }, plan, running: -1, participants: [],
       roomName: `${roomOwnerKey()}-${S.planning?.id ? String(S.planning.id).replace(/-/g, '').slice(0, 10) : randId()}`,
@@ -921,7 +957,7 @@ Cierre y ticket de salida (5 min)
     const connectOpts = provider => ({
       room: R.roomName, name: R.name, role: R.role, consent: R.consent, recorded, minor: R.minor, guardianOk: R.guardianOk,
       guardian: R.minor ? { name: L.guardian.name.trim(), email: L.guardian.email.trim(), consent: L.guardian.consent } : null,
-      localStream: R.stream, mic: R.mic, cam: R.cam, provider,
+      localStream: R.stream, mic: R.mic, cam: R.cam, provider, title: S.sessionTitle,
     });
     let provider = createProvider(kind);
     wireProvider(provider, R);
@@ -963,6 +999,14 @@ Cierre y ticket de salida (5 min)
       if (S.room !== R) return;
       if (R.role !== 'teacher' && was !== state) toast(state === 'on' ? (R.recorded ? 'The teacher started recording. You are being recorded.' : 'The teacher started recording. You are not being recorded.') : state === 'paused' ? 'Recording paused' : 'Recording stopped');
       updateRoomUi();
+    });
+    p.on('screens', list => {
+      const before = R.remoteScreens.map(x => x.id).join('|');
+      R.remoteScreens = (list || []).slice();
+      if (S.room !== R || R.remoteScreens.map(x => x.id).join('|') === before) return;
+      const fresh = R.remoteScreens.filter(x => !before.split('|').includes(x.id));
+      fresh.forEach(x => toast('🖥️ ' + x.name + ' — ' + tr('is sharing their screen')));
+      renderGrid();
     });
     p.on('disconnected', () => { if (S.room === R && S.view === 'room') { toast('You were disconnected.', 'err'); } });
   }
@@ -1063,11 +1107,13 @@ Cierre y ticket de salida (5 min)
     const R = S.room; const g = document.getElementById('lc-grid'); if (!R || !g) return;
     const list = R.participants.length ? R.participants : [{ id: 'local', isLocal: true, name: R.name, role: R.role, mic: R.mic, cam: R.cam, recorded: R.recorded, minor: R.minor }];
     const share = R.screen ? `<div class="lc-tile lc-share-tile" data-pid="screen"><video class="lc-video" id="lc-share-video" autoplay muted playsinline></video><div class="lc-tile-bar"><span aria-hidden="true">🖥️</span> <span>You are presenting</span> <button type="button" class="lc-btn lc-sm" data-lc="share">Stop sharing</button></div></div>` : '';
-    g.innerHTML = share + list.map(tileHtml).join('');
-    g.dataset.count = String(list.length + (R.screen ? 1 : 0));
+    const remoteShares = (R.remoteScreens || []).map(sc => `<div class="lc-tile lc-share-tile remote" data-pid="screen-${esc(sc.id)}" role="group" aria-label="${esc(sc.name)}"><video class="lc-video" data-screen="${esc(sc.id)}" autoplay muted playsinline></video><div class="lc-tile-bar"><span aria-hidden="true">🖥️</span> <span data-no-i18n>${esc(sc.name)}</span> <span>is presenting</span></div></div>`).join('');
+    g.innerHTML = remoteShares + share + list.map(tileHtml).join('');
+    g.dataset.count = String(list.length + (R.screen ? 1 : 0) + (R.remoteScreens || []).length);
+    $$('video[data-screen]', g).forEach(v => { try { R.provider?.attachScreen(v.dataset.screen, v); } catch (e) { /* ignore */ } });
     const lv = document.getElementById('lc-local-video'); if (lv && R.stream && R.stream.getVideoTracks().length) lv.srcObject = R.stream;
     const sv = document.getElementById('lc-share-video'); if (sv && R.screen) sv.srcObject = R.screen;
-    if (R.kind === 'livekit') $$('.lc-tile[data-pid] video.lc-video', g).forEach(v => { const id = v.closest('.lc-tile').dataset.pid; if (id !== 'local' && id !== 'screen') R.provider?.attachVideo(id, v); });
+    if (R.kind === 'livekit') $$('.lc-tile[data-pid] video.lc-video', g).forEach(v => { const id = v.closest('.lc-tile').dataset.pid; if (id !== 'local' && !id.startsWith('screen')) R.provider?.attachVideo(id, v); });
     updateTiles();
   }
   function updateTiles() {
@@ -1225,7 +1271,7 @@ Cierre y ticket de salida (5 min)
       s.getVideoTracks().forEach(t => { t.onended = () => { if (S.room === R && R.screen === s) stopShare(); }; });
       try { await R.provider.startScreenShare(s); } catch (e) { console.warn(e); }
       renderGrid(); updateRoomUi();
-      toast('You are sharing your screen (demo: only you can see it).', 'ok');
+      toast(R.kind === 'livekit' ? 'You are sharing your screen with the class.' : 'You are sharing your screen (demo: only you can see it).', 'ok');
     } catch (e) {
       if (e && e.name !== 'NotAllowedError' && e.name !== 'AbortError') console.warn('share', e);
       toast('Screen sharing was cancelled.');
@@ -1271,7 +1317,8 @@ Cierre y ticket de salida (5 min)
   function openEndModal() {
     const m = document.getElementById('lc-end-modal'); if (!m) return;
     m.hidden = false; S.room.endOpen = true; S.room.lastFocus = document.activeElement;
-    setTimeout(() => document.getElementById('lc-end-cancel')?.focus(), 20);
+    document.getElementById('lc-end-cancel')?.focus();
+    setTimeout(() => { if (S.room?.endOpen && !m.contains(document.activeElement)) document.getElementById('lc-end-cancel')?.focus(); }, 20);
   }
   function closeEndModal() {
     const m = document.getElementById('lc-end-modal'); if (m) m.hidden = true;
@@ -1819,6 +1866,7 @@ Cierre y ticket de salida (5 min)
     'You joined without being recorded.': 'Entraste sin ser grabado/a.', 'You were disconnected.': 'Se perdió la conexión.',
     'Screen sharing is not available in this browser.': 'Este navegador no permite compartir pantalla.', 'Screen sharing was cancelled.': 'Se canceló compartir pantalla.',
     'You are sharing your screen (demo: only you can see it).': 'Estás compartiendo tu pantalla (demo: solo la ves vos).',
+    'You are sharing your screen with the class.': 'Estás compartiendo tu pantalla con la clase.', 'is presenting': 'está presentando', 'is sharing their screen': 'está compartiendo su pantalla',
     'Could not connect to the live classroom — opening the demo instead.': 'No se pudo conectar al aula en vivo: se abre la demo.',
     'A live class is already in progress.': 'Ya hay una clase en vivo en curso.', 'Message not sent.': 'No se envió el mensaje.',
     // processing
