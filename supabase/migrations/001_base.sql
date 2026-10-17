@@ -90,6 +90,85 @@ create table if not exists public.ai_usage (
   primary key (user_id, day)
 );
 
+-- ========== PLAN Y CONSUMO: tablas ==========
+-- Cada institución madre (parent_id null) es una "cuenta": compra ASIENTOS y recibe una
+-- ASIGNACIÓN MENSUAL de tokens de IA; las sub-unidades usan la cuenta de su madre.
+-- Agotada la asignación, se usan los tokens EXTRA (paquetes comprados, no vencen).
+-- Sin pagos en la app: comprar crea una SOLICITUD que el súper admin aprueba tras cobrar afuera.
+-- Ninguna de estas tablas se escribe desde la app: solo funciones del servidor.
+
+-- Ajustes de la plataforma (una sola fila; los edita el súper admin con update_platform_settings)
+create table if not exists public.platform_settings (
+  id boolean primary key default true check (id),
+  pack_tokens bigint not null default 2000000 check (pack_tokens between 1000 and 1000000000),
+  pack_price numeric(12,2) not null default 11.99 check (pack_price >= 0 and pack_price <= 1000000),
+  currency text not null default 'USD' check (currency ~ '^[A-Z]{3}$'),
+  personal_monthly_tokens bigint not null default 200000 check (personal_monthly_tokens between 0 and 100000000000),
+  default_seats integer not null default 10 check (default_seats between 0 and 1000000),
+  default_monthly_tokens bigint not null default 2000000 check (default_monthly_tokens between 0 and 100000000000),
+  updated_by uuid references auth.users(id) on delete set null,
+  updated_at timestamptz not null default now()
+);
+insert into public.platform_settings (id) values (true) on conflict (id) do nothing;
+
+-- Plan de cada cuenta (una fila por institución madre; se crea al crear la madre o al primer uso)
+create table if not exists public.billing_accounts (
+  root_id uuid primary key references public.institutions(id) on delete cascade,
+  seats integer not null check (seats between 0 and 1000000),
+  monthly_tokens bigint not null check (monthly_tokens between 0 and 100000000000),
+  extra_tokens_balance bigint not null default 0 check (extra_tokens_balance >= 0),
+  updated_at timestamptz not null default now()
+);
+
+-- Consumo por mes calendario (UTC). scope 'institution' → account_id = madre; 'personal' → usuario sin institución.
+--   used = tokens contados contra la asignación del mes (puede pasarla por el último pedido)
+--   extra_used = tokens descontados del saldo extra
+create table if not exists public.token_usage_monthly (
+  scope text not null check (scope in ('institution','personal')),
+  account_id uuid not null,
+  month date not null,
+  used bigint not null default 0,
+  extra_used bigint not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (scope, account_id, month)
+);
+
+-- Registro de cada pedido a la IA (lo escribe solo ai_record_usage, con la clave del servidor)
+create table if not exists public.ai_request_log (
+  id bigserial primary key,
+  user_id uuid references auth.users(id) on delete set null,
+  root_id uuid references public.institutions(id) on delete set null,
+  inst_id uuid references public.institutions(id) on delete set null,
+  scope text not null check (scope in ('institution','personal','unlimited')),
+  prompt_tokens integer not null default 0,
+  completion_tokens integer not null default 0,
+  total_tokens integer not null default 0,
+  from_extra bigint not null default 0,
+  kind text not null default 'generate',
+  created_at timestamptz not null default now()
+);
+create index if not exists ai_request_log_root_idx on public.ai_request_log (root_id, created_at);
+create index if not exists ai_request_log_user_idx on public.ai_request_log (user_id, created_at);
+
+-- Solicitudes de compra de paquetes de tokens (se aprueban a mano)
+create table if not exists public.token_purchase_requests (
+  id uuid primary key default gen_random_uuid(),
+  root_id uuid references public.institutions(id) on delete set null,
+  root_name text not null default '',
+  requested_by uuid references auth.users(id) on delete set null,
+  pack_tokens bigint not null check (pack_tokens > 0),
+  price numeric(12,2) not null check (price >= 0),
+  currency text not null default 'USD',
+  status text not null default 'pending' check (status in ('pending','approved','rejected')),
+  note text not null default '',
+  created_at timestamptz not null default now(),
+  decided_by uuid references auth.users(id) on delete set null,
+  decided_at timestamptz
+);
+-- Una sola solicitud pendiente por cuenta
+create unique index if not exists token_purchase_one_pending on public.token_purchase_requests (root_id) where status = 'pending';
+create index if not exists token_purchase_root_idx on public.token_purchase_requests (root_id, created_at);
+
 -- ========== LIMPIEZA DE DATOS + REGLAS DE FORMATO ==========
 -- Slug, logo, colores y tipografía se muestran en pantallas de otros usuarios
 -- (incluido el súper admin): solo se aceptan formatos seguros.
@@ -222,6 +301,72 @@ $$ select public.is_superadmin() or (inst is not null and exists (
       where p.id = auth.uid() and p.role = 'org_admin' and p.institution_id is not null
         and p.institution_id in (select c.id from public.institution_chain(inst) c))) $$;
 
+-- ===== Plan y consumo: ayudas internas (sin acceso desde la app) =====
+-- Mes de consumo: primer día del mes calendario en UTC
+create or replace function public.billing_month() returns date
+language sql stable set search_path = public as
+$$ select date_trunc('month', now() at time zone 'utc')::date $$;
+
+-- Cuenta de una unidad = su institución madre (la cima de la cadena)
+create or replace function public.billing_root(p_inst uuid) returns uuid
+language sql stable security definer set search_path = public as
+$$ select c.id from public.institution_chain(p_inst) c order by c.depth desc limit 1 $$;
+
+-- Asientos en uso: docentes + admins de toda la cuenta (madre y todo lo que cuelga)
+create or replace function public.seats_used(p_root uuid) returns integer
+language sql stable security definer set search_path = public as
+$$ select count(*)::int from public.profiles
+    where role in ('teacher','org_admin') and institution_id is not null
+      and (institution_id = p_root or institution_id in (select public.institution_descendants(p_root))) $$;
+
+-- Plan vigente (si la cuenta todavía no tiene fila, valen los valores por defecto)
+create or replace function public.billing_seats(p_root uuid) returns integer
+language sql stable security definer set search_path = public as
+$$ select coalesce((select a.seats from public.billing_accounts a where a.root_id = p_root),
+                   (select s.default_seats from public.platform_settings s where s.id)) $$;
+
+create or replace function public.seat_available(p_root uuid) returns boolean
+language sql stable security definer set search_path = public as
+$$ select p_root is not null and public.seats_used(p_root) < public.billing_seats(p_root) $$;
+
+-- Crea la fila del plan con los valores por defecto si falta (uso interno, escribe)
+create or replace function public.ensure_billing_account(p_root uuid) returns void
+language sql volatile security definer set search_path = public as
+$$ insert into public.billing_accounts (root_id, seats, monthly_tokens)
+   select p_root, s.default_seats, s.default_monthly_tokens from public.platform_settings s
+    where s.id and p_root is not null and exists (select 1 from public.institutions i where i.id = p_root and i.parent_id is null)
+   on conflict (root_id) do nothing $$;
+
+-- Antes de sumar a alguien a una unidad: ¿queda un asiento en la cuenta? (si ya ocupa uno en la
+-- misma cuenta, moverlo no cuesta otro). Error claro si no.
+create or replace function public.assert_seat_for(p_inst uuid, p_user uuid default null) returns void
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_root uuid := public.billing_root(p_inst); v_used int; v_seats int;
+begin
+  if v_root is null then return; end if;
+  if p_user is not null and exists (
+       select 1 from public.profiles p
+        where p.id = p_user and p.role in ('teacher','org_admin') and p.institution_id is not null
+          and public.billing_root(p.institution_id) = v_root) then
+    return;
+  end if;
+  perform public.ensure_billing_account(v_root);
+  perform 1 from public.billing_accounts where root_id = v_root for update; -- una alta a la vez por cuenta
+  v_used := public.seats_used(v_root); v_seats := public.billing_seats(v_root);
+  if v_used >= v_seats then
+    raise exception 'No quedan asientos disponibles en el plan de la institución (% de % en uso)', v_used, v_seats;
+  end if;
+end $$;
+
+revoke all on function public.billing_month() from public, anon, authenticated;
+revoke all on function public.billing_root(uuid) from public, anon, authenticated;
+revoke all on function public.seats_used(uuid) from public, anon, authenticated;
+revoke all on function public.billing_seats(uuid) from public, anon, authenticated;
+revoke all on function public.seat_available(uuid) from public, anon, authenticated;
+revoke all on function public.ensure_billing_account(uuid) from public, anon, authenticated;
+revoke all on function public.assert_seat_for(uuid, uuid) from public, anon, authenticated;
+
 -- Al registrarse: crear perfil y aplicar invitación pendiente (o slug abierto).
 -- Todo se basa en auth.users.email (el email real de la cuenta), nunca en profiles.email.
 create or replace function public.handle_new_user() returns trigger
@@ -248,6 +393,12 @@ begin
     select id into v_inst from public.institutions
      where slug = v_slug and open_registration
      limit 1;
+  end if;
+
+  -- Plan: sin asiento libre en la cuenta, la persona queda sin institución (el alta no falla)
+  -- y la invitación sigue pendiente. La pantalla /org/<slug> ya avisa antes de registrarse.
+  if v_inst is not null and not public.seat_available(public.billing_root(v_inst)) then
+    v_inst := null; v_role := 'teacher'; inv := null;
   end if;
 
   -- Súper admin: solo con email confirmado, o si todavía no hay ninguno (primer arranque)
@@ -563,11 +714,13 @@ $$ select json_build_object(
      'path',     (select string_agg(i.name, ' › ' order by c.depth desc) from public.institution_chain(p_id) c join public.institutions i on i.id = c.id)) $$;
 revoke all on function public.institution_branding(uuid) from public, anon, authenticated;
 
+-- seats_full: la cuenta no tiene asientos libres (la pantalla de registro avisa antes de crear la cuenta)
 drop function if exists public.get_org_branding(text);
 create function public.get_org_branding(p_slug text)
-returns table (name text, slug text, color text, bg_color text, font text, logo_url text, open_registration boolean, path text)
+returns table (name text, slug text, color text, bg_color text, font text, logo_url text, open_registration boolean, path text, seats_full boolean)
 language sql stable security definer set search_path = public as
-$$ select i.name, i.slug, b->>'color', b->>'bg_color', b->>'font', b->>'logo_url', i.open_registration, b->>'path'
+$$ select i.name, i.slug, b->>'color', b->>'bg_color', b->>'font', b->>'logo_url', i.open_registration, b->>'path',
+          not public.seat_available(public.billing_root(i.id))
      from public.institutions i
      cross join lateral (select public.institution_branding(i.id)::jsonb as b) x
     where i.slug = lower(trim(p_slug)) limit 1 $$;
@@ -697,10 +850,12 @@ begin
     if prof.role = 'org_admin' and (prof.institution_id is distinct from p_inst or p_role <> 'org_admin') then
       perform public.assert_not_last_admin(prof.institution_id);
     end if;
+    perform public.assert_seat_for(p_inst, prof.id);
     update public.profiles set institution_id = p_inst, role = p_role where id = prof.id;
     return 'added';
   end if;
 
+  perform public.assert_seat_for(p_inst, null);
   delete from public.invitations
    where lower(email) = v_email and institution_id = p_inst and accepted_at is null;
   insert into public.invitations (email, institution_id, role, invited_by)
@@ -787,6 +942,7 @@ begin
     insert into public.institutions (name, slug, color, admin_email, created_by)
     values (left(trim(p_name), 120), v_slug, coalesce(v_color, '#7c5cbf'), nullif(v_email, ''), auth.uid())
     returning id into new_id;
+    perform public.ensure_billing_account(new_id); -- plan por defecto (asientos + tokens/mes)
   else
     insert into public.institutions (name, slug, color, bg_color, font, admin_email, created_by, parent_id)
     values (left(trim(p_name), 120), v_slug, v_color, null, null, nullif(v_email, ''), auth.uid(), p_parent)
@@ -964,5 +1120,366 @@ begin
 end $$;
 revoke all on function public.get_document_content(uuid) from public, anon;
 grant execute on function public.get_document_content(uuid) to authenticated;
+
+-- ========== PLAN Y CONSUMO: seguridad y funciones ==========
+-- Nadie escribe estas tablas desde la app. Lectura directa solo del registro de pedidos
+-- y de las solicitudes de compra (admins de la cuenta / súper admin); el resto, vía funciones.
+alter table public.platform_settings       enable row level security;
+alter table public.billing_accounts        enable row level security;
+alter table public.token_usage_monthly     enable row level security;
+alter table public.ai_request_log          enable row level security;
+alter table public.token_purchase_requests enable row level security;
+revoke all on public.platform_settings, public.billing_accounts, public.token_usage_monthly,
+              public.ai_request_log, public.token_purchase_requests from anon, authenticated;
+revoke all on sequence public.ai_request_log_id_seq from anon, authenticated;
+grant select on public.ai_request_log, public.token_purchase_requests to authenticated;
+
+-- Registro: el súper admin todo; cada uno sus pedidos; los admins, los de sus unidades (y las de abajo)
+drop policy if exists ailog_select on public.ai_request_log;
+create policy ailog_select on public.ai_request_log for select
+  using (public.is_superadmin() or user_id = auth.uid()
+         or (inst_id is not null and public.is_admin_of(inst_id)));
+-- Solicitudes: el súper admin todas; los admins de cualquier unidad de la cuenta, las de su cuenta
+drop policy if exists tpr_select on public.token_purchase_requests;
+create policy tpr_select on public.token_purchase_requests for select
+  using (public.is_superadmin()
+         or (root_id is not null and public.my_role() = 'org_admin' and public.in_my_chain(root_id)));
+
+-- ── Funciones del SERVIDOR (solo service_role: api/generate.js con SUPABASE_SERVICE_ROLE_KEY) ──
+-- ¿Puede este usuario usar la IA ahora? Devuelve
+-- {allowed, scope:'institution'|'personal'|'unlimited', root_id, allowance, used_month, extra_balance,
+--  remaining, warn (quedan ≤ 20% de la asignación del mes), is_admin, can_buy, month, resets_on}
+create or replace function public.ai_budget_check(p_user uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare
+  p public.profiles%rowtype;
+  v_month date := public.billing_month();
+  v_root uuid; v_allow bigint; v_used bigint := 0; v_extra bigint := 0; v_rem bigint;
+  s public.platform_settings%rowtype;
+begin
+  if p_user is null then raise exception 'Usuario requerido'; end if;
+  select * into p from public.profiles where id = p_user;
+  select * into s from public.platform_settings where id;
+  if p.role = 'superadmin' then
+    return json_build_object('allowed', true, 'scope', 'unlimited', 'root_id', null, 'allowance', null,
+      'used_month', null, 'extra_balance', null, 'remaining', null, 'warn', false,
+      'is_admin', true, 'can_buy', false, 'month', v_month, 'resets_on', (v_month + interval '1 month')::date);
+  end if;
+  if p.institution_id is null then
+    v_allow := s.personal_monthly_tokens;
+    select coalesce(sum(used), 0) into v_used from public.token_usage_monthly
+     where scope = 'personal' and account_id = p_user and month = v_month;
+  else
+    v_root := public.billing_root(p.institution_id);
+    select coalesce(a.monthly_tokens, s.default_monthly_tokens), coalesce(a.extra_tokens_balance, 0)
+      into v_allow, v_extra
+      from (select 1) x left join public.billing_accounts a on a.root_id = v_root;
+    select coalesce(sum(used), 0) into v_used from public.token_usage_monthly
+     where scope = 'institution' and account_id = v_root and month = v_month;
+  end if;
+  v_rem := greatest(v_allow - v_used, 0) + v_extra;
+  return json_build_object(
+    'allowed', v_rem > 0,
+    'scope', case when v_root is null then 'personal' else 'institution' end,
+    'root_id', v_root, 'allowance', v_allow, 'used_month', v_used, 'extra_balance', v_extra,
+    'remaining', v_rem,
+    'warn', case when v_allow > 0 then v_rem <= v_allow * 0.2 else v_rem <= 0 end,
+    'is_admin', v_root is not null and p.role = 'org_admin',
+    'can_buy', v_root is not null and p.role = 'org_admin' and p.institution_id = v_root,
+    'month', v_month, 'resets_on', (v_month + interval '1 month')::date);
+end $$;
+revoke all on function public.ai_budget_check(uuid) from public, anon, authenticated;
+grant execute on function public.ai_budget_check(uuid) to service_role;
+
+-- Anota el consumo real de un pedido (tokens que informó Azure): primero la asignación del mes,
+-- después el saldo extra. Si el último pedido se pasa de todo, el exceso queda en el mes (el saldo
+-- extra nunca baja de 0). Devuelve el mismo json que ai_budget_check, ya actualizado.
+create or replace function public.ai_record_usage(p_user uuid, p_prompt integer, p_completion integer, p_kind text default 'generate')
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare
+  v_prompt int := least(greatest(coalesce(p_prompt, 0), 0), 2000000);
+  v_comp   int := least(greatest(coalesce(p_completion, 0), 0), 2000000);
+  v_total  bigint := v_prompt + v_comp;
+  v_kind   text := left(coalesce(nullif(regexp_replace(lower(coalesce(p_kind, '')), '[^a-z0-9_-]', '', 'g'), ''), 'generate'), 40);
+  v_month  date := public.billing_month();
+  p public.profiles%rowtype; a public.billing_accounts%rowtype;
+  v_scope text; v_root uuid; v_used bigint; v_take bigint := 0; v_extra bigint := 0;
+begin
+  if p_user is null then raise exception 'Usuario requerido'; end if;
+  select * into p from public.profiles where id = p_user;
+  if p.role = 'superadmin' then v_scope := 'unlimited';
+  elsif p.institution_id is null then v_scope := 'personal';
+  else v_scope := 'institution'; v_root := public.billing_root(p.institution_id);
+  end if;
+
+  if v_scope = 'institution' then
+    perform public.ensure_billing_account(v_root);
+    select * into a from public.billing_accounts where root_id = v_root for update; -- serializa la cuenta
+    select coalesce(sum(used), 0) into v_used from public.token_usage_monthly
+     where scope = 'institution' and account_id = v_root and month = v_month;
+    v_take  := least(v_total, greatest(a.monthly_tokens - v_used, 0));
+    v_extra := least(v_total - v_take, a.extra_tokens_balance);
+    if v_extra > 0 then
+      update public.billing_accounts set extra_tokens_balance = extra_tokens_balance - v_extra, updated_at = now()
+       where root_id = v_root;
+    end if;
+  end if;
+  if v_scope <> 'unlimited' then
+    insert into public.token_usage_monthly as t (scope, account_id, month, used, extra_used)
+    values (v_scope, coalesce(v_root, p_user), v_month, v_total - v_extra, v_extra)
+    on conflict (scope, account_id, month) do update
+      set used = t.used + excluded.used, extra_used = t.extra_used + excluded.extra_used, updated_at = now();
+  end if;
+  insert into public.ai_request_log (user_id, root_id, inst_id, scope, prompt_tokens, completion_tokens, total_tokens, from_extra, kind)
+  values (p_user, v_root, p.institution_id, v_scope, v_prompt, v_comp, v_total, v_extra, v_kind);
+  return public.ai_budget_check(p_user);
+end $$;
+revoke all on function public.ai_record_usage(uuid, integer, integer, text) from public, anon, authenticated;
+grant execute on function public.ai_record_usage(uuid, integer, integer, text) to service_role;
+
+-- Para api/billing/status: confirma que la clave del servidor funciona y que este script corrió
+create or replace function public.billing_service_ping() returns boolean
+language sql stable security definer set search_path = public as $$ select true $$;
+revoke all on function public.billing_service_ping() from public, anon, authenticated;
+grant execute on function public.billing_service_ping() to service_role;
+
+-- ── Funciones para la APP (con permisos) ──
+-- ¿Quién ve el consumo de una cuenta? El súper admin y los org_admin de cualquier unidad de esa cuenta.
+create or replace function public.can_view_billing(p_root uuid) returns boolean
+language sql stable security definer set search_path = public as
+$$ select p_root is not null and (public.is_superadmin() or (
+     public.my_role() = 'org_admin' and public.my_institution() is not null
+     and public.billing_root(public.my_institution()) = p_root)) $$;
+revoke all on function public.can_view_billing(uuid) from public, anon, authenticated;
+
+-- Asientos de una cuenta: {root_id, seats, used, available, full}
+create or replace function public.get_seat_status(p_root uuid default null) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_root uuid := public.billing_root(coalesce(p_root, public.my_institution())); v_used int; v_seats int;
+begin
+  if not public.can_view_billing(v_root) then raise exception 'No autorizado'; end if;
+  v_used := public.seats_used(v_root); v_seats := public.billing_seats(v_root);
+  return json_build_object('root_id', v_root, 'seats', v_seats, 'used', v_used,
+                           'available', greatest(v_seats - v_used, 0), 'full', v_used >= v_seats);
+end $$;
+revoke all on function public.get_seat_status(uuid) from public, anon;
+grant execute on function public.get_seat_status(uuid) to authenticated;
+
+-- Resumen de "Plan y consumo" de la cuenta de una unidad (por defecto, la mía).
+-- Totales de la cuenta para todos sus admins; el detalle por unidad y por docente, solo de lo que
+-- cada admin administra (el admin de una sede no ve a los docentes de otra sede).
+create or replace function public.get_billing_summary(p_inst uuid default null) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare
+  v_inst  uuid := coalesce(p_inst, public.my_institution());
+  v_root  uuid := public.billing_root(v_inst);
+  v_month date := public.billing_month();
+  s public.platform_settings%rowtype;
+  v_seats int; v_allow bigint; v_extra bigint; v_used bigint := 0; v_xused bigint := 0;
+  v_scope uuid[];
+begin
+  if v_inst is null or v_root is null then raise exception 'No autorizado'; end if;
+  if not public.can_view_billing(v_root) then raise exception 'No autorizado'; end if;
+  select * into s from public.platform_settings where id;
+  select coalesce(a.seats, s.default_seats), coalesce(a.monthly_tokens, s.default_monthly_tokens), coalesce(a.extra_tokens_balance, 0)
+    into v_seats, v_allow, v_extra
+    from (select 1) x left join public.billing_accounts a on a.root_id = v_root;
+  select coalesce(sum(used), 0), coalesce(sum(extra_used), 0) into v_used, v_xused
+    from public.token_usage_monthly where scope = 'institution' and account_id = v_root and month = v_month;
+  -- unidades cuyo detalle puede ver quien pregunta
+  select array_agg(i.id) into v_scope from public.institutions i
+   where (i.id = v_root or i.id in (select public.institution_descendants(v_root))) and public.is_admin_of(i.id);
+  return json_build_object(
+    'root_id', v_root,
+    'root_name', (select name from public.institutions where id = v_root),
+    'month', v_month, 'resets_on', (v_month + interval '1 month')::date,
+    'seats', v_seats, 'seats_used', public.seats_used(v_root),
+    'monthly_tokens', v_allow, 'used_month', v_used, 'extra_used_month', v_xused,
+    'extra_balance', v_extra, 'remaining', greatest(v_allow - v_used, 0) + v_extra,
+    'pack_tokens', s.pack_tokens, 'pack_price', s.pack_price, 'currency', s.currency,
+    'can_request', public.my_role() = 'org_admin' and public.my_institution() = v_root,
+    'full_detail', coalesce(array_length(v_scope, 1), 0) > 0 and v_root = any(v_scope),
+    'pending', (select json_build_object('id', r.id, 'pack_tokens', r.pack_tokens, 'price', r.price, 'currency', r.currency, 'created_at', r.created_at)
+                  from public.token_purchase_requests r where r.root_id = v_root and r.status = 'pending' limit 1),
+    'by_unit', coalesce((select json_agg(x order by x.used desc) from (
+        select l.inst_id as id, i.name, sum(l.total_tokens)::bigint as used, count(*)::int as requests
+          from public.ai_request_log l join public.institutions i on i.id = l.inst_id
+         where l.root_id = v_root and l.created_at >= v_month and l.inst_id = any(v_scope)
+         group by l.inst_id, i.name) x), '[]'::json),
+    'by_teacher', coalesce((select json_agg(x order by x.used desc) from (
+        select l.user_id, coalesce(nullif(p.name, ''), p.email, '—') as name, p.email, sum(l.total_tokens)::bigint as used, count(*)::int as requests
+          from public.ai_request_log l left join public.profiles p on p.id = l.user_id
+         where l.root_id = v_root and l.created_at >= v_month and l.inst_id = any(v_scope)
+         group by l.user_id, p.name, p.email
+         order by sum(l.total_tokens) desc limit 10) x), '[]'::json),
+    'requests', coalesce((select json_agg(x order by x.created_at desc) from (
+        select r.id, r.pack_tokens, r.price, r.currency, r.status, r.note, r.created_at, r.decided_at,
+               coalesce(nullif(p.name, ''), p.email, '') as requested_by_name
+          from public.token_purchase_requests r left join public.profiles p on p.id = r.requested_by
+         where r.root_id = v_root order by r.created_at desc limit 20) x), '[]'::json));
+end $$;
+revoke all on function public.get_billing_summary(uuid) from public, anon;
+grant execute on function public.get_billing_summary(uuid) to authenticated;
+
+-- Pedir un paquete de tokens (queda pendiente hasta que el súper admin confirme el pago).
+-- Solo los admins de la institución madre. Una solicitud pendiente a la vez.
+create or replace function public.request_token_pack() returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_root uuid := public.my_institution(); s public.platform_settings%rowtype; r public.token_purchase_requests%rowtype;
+begin
+  if public.my_role() is distinct from 'org_admin' or v_root is null
+     or exists (select 1 from public.institutions where id = v_root and parent_id is not null) then
+    raise exception 'No autorizado: solo los admins de la institución madre pueden comprar tokens';
+  end if;
+  perform 1 from public.institutions where id = v_root for update; -- una solicitud a la vez
+  if exists (select 1 from public.token_purchase_requests where root_id = v_root and status = 'pending') then
+    raise exception 'Ya hay una solicitud de compra pendiente para esta institución';
+  end if;
+  select * into s from public.platform_settings where id;
+  insert into public.token_purchase_requests (root_id, root_name, requested_by, pack_tokens, price, currency)
+  values (v_root, (select name from public.institutions where id = v_root), auth.uid(), s.pack_tokens, s.pack_price, s.currency)
+  returning * into r;
+  return json_build_object('id', r.id, 'pack_tokens', r.pack_tokens, 'price', r.price, 'currency', r.currency, 'status', r.status, 'created_at', r.created_at);
+end $$;
+revoke all on function public.request_token_pack() from public, anon;
+grant execute on function public.request_token_pack() to authenticated;
+
+-- Solicitudes de compra: súper admin todas (o por estado); admins, las de su cuenta.
+create or replace function public.list_purchase_requests(p_status text default null) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_root uuid;
+begin
+  if p_status is not null and p_status not in ('pending','approved','rejected') then raise exception 'Estado inválido'; end if;
+  if not public.is_superadmin() then
+    if public.my_role() is distinct from 'org_admin' or public.my_institution() is null then raise exception 'No autorizado'; end if;
+    v_root := public.billing_root(public.my_institution());
+  end if;
+  return coalesce((select json_agg(x order by (x.status = 'pending') desc, x.created_at desc) from (
+    select r.id, r.root_id, coalesce(i.name, r.root_name) as root_name, i.slug as root_slug, r.pack_tokens, r.price, r.currency,
+           r.status, r.note, r.created_at, r.decided_at,
+           coalesce(nullif(p.name, ''), p.email, '') as requested_by_name, p.email as requested_by_email
+      from public.token_purchase_requests r
+      left join public.institutions i on i.id = r.root_id
+      left join public.profiles p on p.id = r.requested_by
+     where (v_root is null or r.root_id = v_root) and (p_status is null or r.status = p_status)
+     order by (r.status = 'pending') desc, r.created_at desc limit 200) x), '[]'::json);
+end $$;
+revoke all on function public.list_purchase_requests(text) from public, anon;
+grant execute on function public.list_purchase_requests(text) to authenticated;
+
+-- Súper admin: aprobar (suma el paquete al saldo extra de la cuenta, una sola vez) o rechazar.
+create or replace function public.decide_purchase_request(p_id uuid, p_approve boolean, p_note text default '') returns text
+language plpgsql volatile security definer set search_path = public as
+$$
+declare r public.token_purchase_requests%rowtype; v_note text := left(trim(coalesce(p_note, '')), 500);
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_approve is null then raise exception 'Decisión requerida'; end if;
+  select * into r from public.token_purchase_requests where id = p_id for update;
+  if r.id is null then raise exception 'Solicitud no encontrada'; end if;
+  if r.status <> 'pending' then raise exception 'Esta solicitud ya fue resuelta'; end if;
+  if p_approve then
+    if r.root_id is null then raise exception 'La institución de esta solicitud ya no existe'; end if;
+    perform public.ensure_billing_account(r.root_id);
+    update public.billing_accounts set extra_tokens_balance = extra_tokens_balance + r.pack_tokens, updated_at = now()
+     where root_id = r.root_id;
+  end if;
+  update public.token_purchase_requests
+     set status = case when p_approve then 'approved' else 'rejected' end,
+         note = v_note, decided_by = auth.uid(), decided_at = now()
+   where id = p_id;
+  return case when p_approve then 'approved' else 'rejected' end;
+end $$;
+revoke all on function public.decide_purchase_request(uuid, boolean, text) from public, anon;
+grant execute on function public.decide_purchase_request(uuid, boolean, text) to authenticated;
+
+-- Súper admin: asientos y tokens por mes de una institución madre
+create or replace function public.set_institution_plan(p_root uuid, p_seats integer, p_monthly_tokens bigint) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if not exists (select 1 from public.institutions where id = p_root and parent_id is null) then
+    raise exception 'El plan se define en la institución madre';
+  end if;
+  if p_seats is null or p_seats < 0 or p_seats > 1000000 then raise exception 'Cantidad de asientos inválida'; end if;
+  if p_monthly_tokens is null or p_monthly_tokens < 0 or p_monthly_tokens > 100000000000 then raise exception 'Cantidad de tokens inválida'; end if;
+  perform public.ensure_billing_account(p_root);
+  update public.billing_accounts set seats = p_seats, monthly_tokens = p_monthly_tokens, updated_at = now() where root_id = p_root;
+  return json_build_object('root_id', p_root, 'seats', p_seats, 'monthly_tokens', p_monthly_tokens);
+end $$;
+revoke all on function public.set_institution_plan(uuid, integer, bigint) from public, anon;
+grant execute on function public.set_institution_plan(uuid, integer, bigint) to authenticated;
+
+-- Súper admin: ajustes de la plataforma (paquete, precio, moneda, asignación personal, valores por defecto)
+create or replace function public.update_platform_settings(p_pack_tokens bigint, p_pack_price numeric, p_currency text,
+  p_personal_monthly_tokens bigint, p_default_seats integer, p_default_monthly_tokens bigint) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_cur text := upper(trim(coalesce(p_currency, '')));
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_pack_tokens is null or p_pack_tokens < 1000 or p_pack_tokens > 1000000000 then raise exception 'Tamaño de paquete inválido (de 1.000 a 1.000.000.000 tokens)'; end if;
+  if p_pack_price is null or p_pack_price < 0 or p_pack_price > 1000000 then raise exception 'Precio inválido'; end if;
+  if v_cur !~ '^[A-Z]{3}$' then raise exception 'Moneda inválida (código de 3 letras, ej. USD)'; end if;
+  if p_personal_monthly_tokens is null or p_personal_monthly_tokens < 0 or p_personal_monthly_tokens > 100000000000
+     or p_default_monthly_tokens is null or p_default_monthly_tokens < 0 or p_default_monthly_tokens > 100000000000 then
+    raise exception 'Cantidad de tokens inválida';
+  end if;
+  if p_default_seats is null or p_default_seats < 0 or p_default_seats > 1000000 then raise exception 'Cantidad de asientos inválida'; end if;
+  update public.platform_settings
+     set pack_tokens = p_pack_tokens, pack_price = round(p_pack_price, 2), currency = v_cur,
+         personal_monthly_tokens = p_personal_monthly_tokens, default_seats = p_default_seats,
+         default_monthly_tokens = p_default_monthly_tokens, updated_by = auth.uid(), updated_at = now()
+   where id;
+  return (select row_to_json(x) from (select pack_tokens, pack_price, currency, personal_monthly_tokens, default_seats, default_monthly_tokens
+                                        from public.platform_settings where id) x);
+end $$;
+revoke all on function public.update_platform_settings(bigint, numeric, text, bigint, integer, bigint) from public, anon;
+grant execute on function public.update_platform_settings(bigint, numeric, text, bigint, integer, bigint) to authenticated;
+
+-- Súper admin: ajustes + plan y consumo del mes de cada institución madre + consumo personal
+create or replace function public.platform_billing_overview() returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_month date := public.billing_month(); s public.platform_settings%rowtype;
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  select * into s from public.platform_settings where id;
+  return json_build_object(
+    'month', v_month,
+    'settings', json_build_object('pack_tokens', s.pack_tokens, 'pack_price', s.pack_price, 'currency', s.currency,
+      'personal_monthly_tokens', s.personal_monthly_tokens, 'default_seats', s.default_seats, 'default_monthly_tokens', s.default_monthly_tokens),
+    'accounts', coalesce((select json_agg(x order by x.name) from (
+      select i.id, i.name, i.slug,
+             coalesce(a.seats, s.default_seats) as seats, public.seats_used(i.id) as seats_used,
+             coalesce(a.monthly_tokens, s.default_monthly_tokens) as monthly_tokens,
+             coalesce(a.extra_tokens_balance, 0) as extra_balance,
+             coalesce(u.used, 0) as used_month, coalesce(u.extra_used, 0) as extra_used_month,
+             exists (select 1 from public.token_purchase_requests r where r.root_id = i.id and r.status = 'pending') as pending
+        from public.institutions i
+        left join public.billing_accounts a on a.root_id = i.id
+        left join public.token_usage_monthly u on u.scope = 'institution' and u.account_id = i.id and u.month = v_month
+       where i.parent_id is null) x), '[]'::json),
+    'personal', (select json_build_object('users', count(*), 'used_month', coalesce(sum(used), 0))
+                   from public.token_usage_monthly where scope = 'personal' and month = v_month),
+    'pending_requests', (select count(*) from public.token_purchase_requests where status = 'pending'));
+end $$;
+revoke all on function public.platform_billing_overview() from public, anon;
+grant execute on function public.platform_billing_overview() to authenticated;
+
+-- Cuentas que ya existían: plan por defecto para cada institución madre sin fila
+insert into public.billing_accounts (root_id, seats, monthly_tokens)
+select i.id, s.default_seats, s.default_monthly_tokens
+  from public.institutions i cross join public.platform_settings s
+ where i.parent_id is null and s.id
+on conflict (root_id) do nothing;
 
 select 'TeroClass: base creada OK' as resultado;
