@@ -65,7 +65,7 @@ async function handleSupabase(route) {
       if (single) return out.length ? json(200, out[0]) : json(406, { code: 'PGRST116', message: 'no rows' });
       return json(200, out);
     }
-    if (m === 'POST') { const r = { id: uid(), created_at: new Date().toISOString(), ...body }; rows.push(r); return json(201, [r]); }
+    if (m === 'POST') { const r = { id: uid(), created_at: new Date().toISOString(), ...body }; rows.push(r); return json(201, (req.headers()['accept'] || '').includes('vnd.pgrst.object') ? r : [r]); }
     if (m === 'PATCH') { applyFilters(rows, url).forEach(r => Object.assign(r, body)); return json(200, []); }
   }
   return json(404, { message: 'unmocked ' + m + ' ' + p });
@@ -83,7 +83,7 @@ async function handleSupabase(route) {
     const u = new URL(r.request().url());
     if (u.pathname === '/api/generate') {
       aiCall = { auth: r.request().headers()['authorization'], body: JSON.parse(r.request().postData()) };
-      return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'Week 1 - Class 1 - Test - Small talk\nAttendance:\n\nToday\'s Objectives:\n- Practice greetings\n- Ask questions' } }] }) });
+      return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'Week 1 - Class 1 - Test - Small talk\nAttendance:\n\nToday\'s Objectives:\n- Practice greetings <img src=x onerror=window.__xss=1>\n- Ask questions' } }] }) });
     }
     return r.fulfill({ contentType: 'text/html', body: HTML });
   });
@@ -143,6 +143,7 @@ async function handleSupabase(route) {
     await page.click('.cls-doc-actions .btn-out');
     await page.waitForTimeout(400);
     if (db.plannings.length !== 1 || !db.plannings[0].data.content.includes('greetings')) throw new Error('clase no guardada con contenido');
+    if (await page.evaluate(() => window.__xss)) throw new Error('HTML del modelo se ejecutó');
   });
   await shot(3);
 
@@ -151,6 +152,17 @@ async function handleSupabase(route) {
     await page.waitForSelector('#screen-app.active');
     await page.click('#nav-home');
     await page.waitForSelector('.class-card');
+  });
+
+  await step('Abrir clase guardada, editarla y guardar cambios (sin duplicar)', async () => {
+    await page.click('.class-card');
+    await page.waitForSelector('#lp-doc');
+    const txt = await page.textContent('#lp-doc'); if (!txt.includes('greetings')) throw new Error('contenido no cargado');
+    await page.evaluate(() => { document.getElementById('lp-doc').insertAdjacentHTML('beforeend', '<div class="cls-line">Extra note</div>'); });
+    await page.click('.cls-doc-actions .btn-out');
+    await page.waitForTimeout(400);
+    if (db.plannings.length !== 1) throw new Error('se duplicó: ' + db.plannings.length);
+    if (!db.plannings[0].data.content.includes('Extra note')) throw new Error('no se guardó la edición');
   });
 
   await step('Salir y entrar de nuevo', async () => {

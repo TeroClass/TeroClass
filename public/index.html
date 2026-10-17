@@ -1479,22 +1479,24 @@ async function callAI(params){
   const data=await res.json();return data.choices[0].message.content;
 }
 
-function displayResult(text,params){
+function displayResult(text,params,opts={}){
   document.getElementById('ai-loading').classList.remove('visible');
+  document.getElementById('ai-empty').style.display='none';
   const firstLine=text.split('\n')[0].trim();
-  currentResult={title:firstLine||params.prompt.substring(0,60),text,params,date:new Date().toISOString()};
+  currentResult={id:opts.id||null,title:opts.title||firstLine||(params?.prompt||'').substring(0,60)||'Class',text,params:params||{},date:opts.date||new Date().toISOString()};
 
   function fmtLine(line,idx){
-    const t=line.trim();
-    if(!t)return '<div style="height:7px"></div>';
+    const raw=line.trim();
+    const t=esc(raw);
+    if(!raw)return '<div style="height:7px"></div>';
     if(idx===0)return `<div class="cls-title">${t}</div>`;
-    if(/^attendance:/i.test(t))return `<div class="cls-attendance">${t}</div>`;
-    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback)/i.test(t))return `<div class="cls-section-head">${t}</div>`;
-    if(t.startsWith('\u26A1'))return `<div class="cls-challenge">${t}</div>`;
-    if(/^[-•]/.test(t))return `<div class="cls-bullet">${t.replace(/^[-•]\s*/,'')}</div>`;
-    if(t.startsWith('"')||t.startsWith('\u201C'))return `<div class="cls-quote">${t}</div>`;
-    if(t.includes('\u2192')){const p=t.split('\u2192');return `<div class="cls-correction"><span class="cls-wrong">${p[0].trim()}</span> <span class="cls-arrow">→</span> <span class="cls-right">${p.slice(1).join('→').trim()}</span></div>`;}
-    if(t.match(/https?:\/\//)){const linked=t.replace(/(https?:\/\/[^\s]+)/g,'<a href="$1" target="_blank" class="cls-link">$1</a>');return `<div class="cls-line">${linked}</div>`;}
+    if(/^attendance:/i.test(raw))return `<div class="cls-attendance">${t}</div>`;
+    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback)/i.test(raw))return `<div class="cls-section-head">${t}</div>`;
+    if(raw.startsWith('\u26A1'))return `<div class="cls-challenge">${t}</div>`;
+    if(/^[-•]/.test(raw))return `<div class="cls-bullet">${esc(raw.replace(/^[-•]\s*/,''))}</div>`;
+    if(raw.startsWith('"')||raw.startsWith('\u201C'))return `<div class="cls-quote">${t}</div>`;
+    if(raw.includes('\u2192')){const p=raw.split('\u2192');return `<div class="cls-correction"><span class="cls-wrong">${esc(p[0].trim())}</span> <span class="cls-arrow">→</span> <span class="cls-right">${esc(p.slice(1).join('→').trim())}</span></div>`;}
+    if(raw.match(/https?:\/\//)){const linked=t.replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener" class="cls-link">$1</a>');return `<div class="cls-line">${linked}</div>`;}
     return `<div class="cls-line">${t}</div>`;
   }
 
@@ -1503,7 +1505,7 @@ function displayResult(text,params){
   const out=document.getElementById('ai-output');
   out.innerHTML=`<div class="cls-doc-wrapper">
     <div class="cls-doc-actions">
-      <button class="btn-out" onclick="savePlanning()">💾 Save</button>
+      <button class="btn-out" onclick="savePlanning()">💾 ${currentResult.id?'Save changes':'Save'}</button>
       <button class="btn-out" onclick="generatePlanning()">↺ Regenerate</button>
       <button class="btn-out" onclick="copyForGoogleDocs()" id="btn-copy">📋 Copy for Google Docs</button>
       <button class="btn-out dark" onclick="exportPDF()">⬇ Export PDF</button>
@@ -1511,7 +1513,7 @@ function displayResult(text,params){
     <div class="cls-doc" id="lp-doc" contenteditable="true">${html}</div>
   </div>`;
   out.classList.add('visible');
-  showToast('Class plan ready ✓','ok');
+  if(!opts.silent)showToast('Class plan ready ✓','ok');
 }
 
 function copyForGoogleDocs(){
@@ -1546,14 +1548,28 @@ async function savePlanning(){
   if(!currentResult){showToast('Nothing to save yet.','err');return;}
   const doc=document.getElementById('lp-doc');
   const content=(doc?.innerText||currentResult.text||'').trim();
-  const {error}=await sb.from('plannings').insert({owner_id:currentUser.id,institution_id:currentUser.orgId||null,title:currentResult.title,data:{params:currentResult.params,content}});
+  const title=(content.split('\n')[0]||currentResult.title||'').trim().substring(0,200);
+  let error;
+  if(currentResult.id){
+    ({error}=await sb.from('plannings').update({title,data:{params:currentResult.params,content}}).eq('id',currentResult.id));
+  }else{
+    const r=await sb.from('plannings').insert({owner_id:currentUser.id,institution_id:currentUser.orgId||null,title,data:{params:currentResult.params,content}}).select('id').single();
+    error=r.error;if(!error)currentResult.id=r.data.id;
+  }
   if(error){showToast('Error saving: '+error.message,'err');return;}
+  currentResult.title=title;currentResult.text=content;
+  const btn=document.querySelector('.cls-doc-actions .btn-out');if(btn)btn.textContent='💾 Save changes';
   await loadPlannings();renderClasses();showToast('Saved ✓','ok');
+}
+function openClass(id){
+  const p=plannings.find(x=>x.id===id);if(!p)return;
+  showPanel('ai');
+  displayResult(p.content||p.title||'',p.params,{id:p.id,title:p.title,date:p.date,silent:true});
 }
 function renderClasses(){
   const grid=document.getElementById('classes-grid');if(!grid)return;
   if(!plannings.length){grid.innerHTML='<div class="classes-empty"><h3>No classes yet</h3><p style="font-size:12px">Generate your first class plan and save it.</p></div>';return;}
-  grid.innerHTML=plannings.map(p=>`<div class="class-card"><div class="class-card-subject">${esc((p.params?.subjects||[]).join(', ')||'General')}</div><div class="class-card-title">${esc(p.title)}</div><div class="class-card-preview">${esc(p.content?.substring(0,90))}…</div><div class="class-card-date">${new Date(p.date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div></div>`).join('');
+  grid.innerHTML=plannings.map(p=>`<div class="class-card" style="cursor:pointer" onclick="openClass('${p.id}')"><div class="class-card-subject">${esc((p.params?.subjects||[]).join(', ')||'General')}</div><div class="class-card-title">${esc(p.title)}</div><div class="class-card-preview">${esc(p.content?.substring(0,90))}…</div><div class="class-card-date">${new Date(p.date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div></div>`).join('');
 }
 
 // ══ EXPORT ══
