@@ -49,7 +49,7 @@ export default async function handler(req, res) {
       headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
       body: JSON.stringify({
         messages: messages.map(m => ({ role: m.role === 'system' ? 'system' : 'user', content: String(m.content || '') })),
-        max_tokens: 3000,
+        max_tokens: 6000,
         temperature: typeof temperature === 'number' ? Math.min(Math.max(temperature, 0), 1.2) : 0.7,
         user: user.id,
       }),

@@ -530,7 +530,7 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 
             <!-- TOP ROW: Language + Group size -->
             <div class="st-row">
-              <div class="st-field"><label class="st-label">Language</label><select id="st-language" class="st-select"><option>English</option><option>Spanish</option><option>Portuguese</option><option>French</option><option>German</option><option>Italian</option></select></div>
+              <div class="st-field"><label class="st-label">Teaching language</label><select id="st-language" class="st-select"><option>English</option><option>Spanish</option><option>Portuguese</option><option>French</option><option>German</option><option>Italian</option></select></div>
               <div class="st-field"><label class="st-label">Group size</label><input type="number" id="st-groupsize" class="st-input" value="25" min="1" max="200"></div>
             </div>
 
@@ -557,7 +557,6 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
             <div class="st-field" style="margin-bottom:6px">
               <label class="st-label">Subjects</label>
               <div class="subjects-container" style="min-height:34px;padding:5px 7px" onclick="document.getElementById('subjects-input').focus()">
-                <div class="subject-tag" data-val="English">English <button class="subject-tag-remove" onclick="removeSubject(this)">✕</button></div>
                 <input type="text" id="subjects-input" class="subjects-input" placeholder="">
               </div>
               <div class="subjects-hint">Press enter to add</div>
@@ -1405,49 +1404,59 @@ function buildMethodologyBlock(p){
     `\n\nRules for the weights:\n- Higher weight = more class time and more activities built around it.\n- Teacher Talking Time vs Student Talking Time: distribute class time according to their ratio.\n- At the very end add a section titled exactly "Methodology applied:" with one line per weight above, saying concretely where and how it appears in this class (activity name + time).`;
 }
 
+const LANGUAGE_SUBJECTS=/^(english|ingl[eé]s|spanish|espa[nñ]ol|castellano|lengua|portugu[eê]s|portuguese|french|franc[eé]s|german|alem[aá]n|italian|italiano|esl|efl|ele|literature|literatura)\b/i;
 function buildUserPrompt(p){
   const skills=getSkillsPriority();
   const subjects=p.subjects.join(', ')||'General';
+  const isLanguageClass=p.subjects.length>0&&p.subjects.every(x=>LANGUAGE_SUBJECTS.test(x.trim()));
   const today=new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
-  return `You are an experienced teacher writing your own lesson plan for TODAY.
-This is a real class document — not a template. Make it specific, human, and ready to use.
+  const disciplineRules=!p.subjects.length
+    ? `Subject not specified: infer the discipline from the topic. If it is a language-learning topic, treat it as a language class (skills priority: ${skills.join(' → ')}). Otherwise make it a class of that discipline (its concepts, problems, procedures) and do NOT turn it into a language class.`
+    : isLanguageClass
+    ? `This is a LANGUAGE class (${subjects}). Skills priority: ${skills.map((s,i)=>`${i+1}. ${s}`).join(' → ')}.`
+    : `This is a ${subjects.toUpperCase()} class, taught in ${p.language}. It is NOT a language class.
+- Content, activities, examples, problems and vocabulary must come from ${subjects} (concepts, procedures, phenomena, problems, experiments, sources, data — whatever the discipline uses).
+- Do NOT create grammar, pronunciation or general-language activities. "Key concepts" means the technical/disciplinary terms of ${subjects}.
+- Interpret every pedagogical weight in ${subjects} terms (e.g. Communicative Approach = students explaining and arguing ${subjects} ideas to each other; Task-Based = solving a real ${subjects} task).
+- If there is any practical/lab activity, include materials and safety notes.`;
+  return `You are an experienced ${!p.subjects.length?'':isLanguageClass?subjects+' language ':subjects+' '}teacher writing your own lesson plan for TODAY.
+This is a real, complete class — not a template. The teacher must be able to walk into the classroom with ONLY this document.
 Write everything in ${p.language}.
 
 CLASS INFO:
 - Date: ${today}
 - Topic: ${p.prompt}
-- Subject: ${subjects}
+- Subject / discipline: ${subjects}
 - Level: ${p.level}
 - Students: ${p.groupSize}
 - Duration: ${p.duration} (activity times must add up to this)
-- Skills priority: ${skills.map((s,i)=>`${i+1}. ${s}`).join(' → ')}
+
+${disciplineRules}
 
 ${buildMethodologyBlock(p)}
 
-FORMAT (keep this structure, adapt the content to the subject — if the subject is not a language class, the "Vocabulary" section becomes key terms/concepts of the subject):
+GOLDEN RULE — EVERYTHING READY TO USE:
+Never tell the teacher to prepare, create, write, find or think of something. If an activity uses cards, role cards, worksheets, questions, problems, texts, case studies, quiz items, images descriptions, data sets, game boards or exit tickets, YOU write every single one in full in the "Materials" section, numbered and ready to print or project, plus answer keys/solutions where relevant. Example: if an activity says "give each student a card", the Materials section contains Card 1, Card 2, ... with the complete text of each card (one per student, or per group if that is the design).
+
+FORMAT (adapt section contents to the discipline):
 1. First line: "Week X - Class X - ${today} - [Topic]" then a line "Attendance:"
 2. Today's Objectives: 3-4 short bullet points
-3. Vocabulary: 3-6 key terms or phrases (use "wrong → right" only for language corrections)
-4. Warm-up (with minutes): write ALL the actual prompts/questions, not descriptions
-5. 2-3 Main activities (with minutes): write the COMPLETE content — questions, sentences, role cards, instructions. Name each activity and make clear which pedagogical weight it serves.
+3. Key concepts: 3-6 key terms of the discipline with a one-line student-friendly definition${isLanguageClass?' (use "wrong → right" for language corrections)':''}
+4. Warm-up (with minutes): all the actual prompts/questions
+5. 2-3 Main activities (with minutes): step-by-step instructions for the teacher, grouping, timing, and which pedagogical weight each serves. Refer to the materials by name (e.g. "Card 1-6", "Worksheet A").
 6. ⚡ Final challenge: a short high-energy task, fully written out
-7. Optional: 1-2 real resources relevant to the topic
-8. Methodology applied: (see rules above)
+7. Materials: EVERY card, worksheet, text, problem set and answer key, complete
+8. Optional: 1-2 real resources relevant to the topic
+9. Methodology applied: (see rules above)
 
-STYLE REFERENCE (tone only — do NOT copy its activity types; the weights above decide the activities):
-"Warm-up (5 min) — Tag Questions Recap:
-\\"You've used AI to generate production code...\\" 😅
-⚡ Final Challenge — React FAST using a tag question:
-\\"Meetings are longer online, aren't they?\\" 🗣️"
-
-DO NOT use ** or # for formatting. Use plain text, dashes, emojis and the → arrow. Write like a real teacher, warm and specific.`;
+Tone: warm, specific, human, with some emojis. DO NOT use ** or # for formatting. Use plain text, dashes, emojis and the → arrow.`;
 }
 
 async function callAI(params){
   const {data:{session}}=await sb.auth.getSession();
   if(!session)throw new Error('Your session expired. Please sign in again.');
   const res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
-    body:JSON.stringify({messages:[{role:'system',content:buildSystemPrompt()},{role:'user',content:buildUserPrompt(params)}],max_tokens:3000,temperature:.7})});
+    body:JSON.stringify({messages:[{role:'system',content:buildSystemPrompt()},{role:'user',content:buildUserPrompt(params)}],max_tokens:6000,temperature:.7})});
   if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e?.error||`HTTP ${res.status}`);}
   const data=await res.json();return data.choices[0].message.content;
 }
@@ -1464,7 +1473,7 @@ function displayResult(text,params,opts={}){
     if(!raw)return '<div style="height:7px"></div>';
     if(idx===0)return `<div class="cls-title">${t}</div>`;
     if(/^attendance:/i.test(raw))return `<div class="cls-attendance">${t}</div>`;
-    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|activity \d|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback|methodology applied)/i.test(raw))return `<div class="cls-section-head">${t}</div>`;
+    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|activity \d|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback|methodology applied|key concepts|materials|answer key|solutions|card \d|worksheet)/i.test(raw))return `<div class="cls-section-head">${t}</div>`;
     if(raw.startsWith('\u26A1'))return `<div class="cls-challenge">${t}</div>`;
     if(/^[-•]/.test(raw))return `<div class="cls-bullet">${esc(raw.replace(/^[-•]\s*/,''))}</div>`;
     if(raw.startsWith('"')||raw.startsWith('\u201C'))return `<div class="cls-quote">${t}</div>`;
@@ -1557,7 +1566,7 @@ function exportPDF(){
     if(!t){body+='<div style="height:5px"></div>';return;}
     if(i===0){body+=`<div style="font-size:17px;font-weight:700;margin-bottom:6px">${t}</div>`;return;}
     if(/^attendance:/i.test(t)){body+=`<div style="font-size:12px;color:#888;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #eee">${t}</div>`;return;}
-    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|activity \d|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback|methodology applied)/i.test(t)){body+=`<div style="font-size:13px;font-weight:700;margin-top:18px;margin-bottom:5px">${t}</div>`;return;}
+    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|activity \d|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback|methodology applied|key concepts|materials|answer key|solutions|card \d|worksheet)/i.test(t)){body+=`<div style="font-size:13px;font-weight:700;margin-top:18px;margin-bottom:5px">${t}</div>`;return;}
     if(t.startsWith('⚡')){body+=`<div style="font-weight:700;color:#7c5cbf;margin-top:10px">${t}</div>`;return;}
     if(/^[-•]/.test(t)){body+=`<div style="padding-left:14px;position:relative;margin:2px 0;font-size:12px">– ${t.replace(/^[-•]\s*/,'')}</div>`;return;}
     if(t.startsWith('"')||t.startsWith('\u201C')){body+=`<div style="padding:3px 10px;margin:2px 0;border-left:3px solid #e2dff0;background:#f8f8f8;font-size:12px">${t}</div>`;return;}
