@@ -1,7 +1,10 @@
 // Vercel serverless: genera la planificación con Azure OpenAI.
 // La clave de Azure vive SOLO aquí (variables de entorno de Vercel), nunca en el navegador.
 // Solo usuarios con sesión iniciada en TeroClass (Supabase) pueden usarla, con un
-// límite diario de usos por persona (función consume_ai_quota en Supabase).
+// límite diario de usos por persona (función consume_ai_quota en Supabase) y, si está la
+// clave del servidor (SUPABASE_SERVICE_ROLE_KEY), con el saldo de tokens del plan:
+// asignación mensual de la institución (o personal) y después los paquetes comprados.
+import { serviceKey, budgetCheck, recordUsage, publicBudget, budgetError, warnNotConfigured } from './_lib/billing.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://ppvqkjchhejjulrdqkdr.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_D4ZATRSmyiURioJ4PvTb4A_rR_urilK';
@@ -90,7 +93,7 @@ export default async function handler(req, res) {
     }
 
     // Validar antes de gastar cupo
-    const { messages, temperature, max_tokens: maxTokensIn } = req.body || {};
+    const { messages, temperature, max_tokens: maxTokensIn, kind } = req.body || {};
     if (!Array.isArray(messages) || !messages.length || messages.length > MAX_MESSAGES) {
       return res.status(400).json({ error: 'Invalid request.', code: 'invalid' });
     }
@@ -114,6 +117,19 @@ export default async function handler(req, res) {
       });
     }
 
+    // Saldo de tokens del plan (con la clave del servidor; el usuario no lo puede falsear).
+    // Sin la clave: la app sigue funcionando sin límites de tokens (aviso en los logs y en Plataforma).
+    const billingOn = !!serviceKey();
+    if (billingOn) {
+      const budget = await budgetCheck(user.id);
+      if (!budget) {
+        return res.status(503).json({ error: 'Could not check your AI token balance. Please try again.', code: 'budget_check' });
+      }
+      if (!budget.allowed) return res.status(402).json(budgetError(budget));
+    } else {
+      warnNotConfigured();
+    }
+
     const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
     let response;
     try {
@@ -133,6 +149,11 @@ export default async function handler(req, res) {
     }
 
     const data = response.data;
+    // Anotar el consumo real que informa Azure (si la anotación falla, la respuesta igual llega)
+    let after = null;
+    if (billingOn && response.ok && data?.usage) {
+      after = await recordUsage(user.id, data.usage, kind);
+    }
     if (!response.ok) {
       if (isContentFilterError(data)) return res.status(422).json(FILTER_ERROR);
       const status = response.status === 429 ? 429 : (response.status >= 500 ? 502 : response.status);
@@ -149,7 +170,7 @@ export default async function handler(req, res) {
       return res.status(422).json(FILTER_ERROR);
     }
     // Respuesta completa de Azure (incluye choices[0].finish_reason, p. ej. 'length')
-    return res.status(200).json({ ...data, quota: { used: quota.used, limit: quota.limit } });
+    return res.status(200).json({ ...data, quota: { used: quota.used, limit: quota.limit }, budget: publicBudget(after) });
   } catch (err) {
     if (err instanceof TimeoutError) return res.status(504).json(TIMEOUT_ERROR);
     return res.status(500).json({ error: err?.message || 'Server error', code: 'server' });
