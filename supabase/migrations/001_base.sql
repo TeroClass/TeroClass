@@ -1482,4 +1482,7 @@ select i.id, s.default_seats, s.default_monthly_tokens
  where i.parent_id is null and s.id
 on conflict (root_id) do nothing;
 
+-- Que la API de Supabase vea enseguida las funciones nuevas
+notify pgrst, 'reload schema';
+
 select 'TeroClass: base creada OK' as resultado;
