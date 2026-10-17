@@ -1789,8 +1789,11 @@ Cierre y ticket de salida (5 min)
     window.addEventListener('pagehide', () => { teardownRoom(); teardownLobby(); });
   }
 
+  // Leave any lobby/room and go back to the live-class home (used when "View as" starts or ends).
+  function reset() { teardownRoom(); teardownLobby(); S.lobby = null; S.view = 'home'; }
+
   window.LiveClass = {
-    open: openLiveClass, openFromDoc, onDocShown,
+    open: openLiveClass, openFromDoc, onDocShown, reset,
     providers: { LiveProvider, DemoProvider, LiveKitProvider }, detectProviderKind,
     parsePlanSections, pickSampleKey, SAMPLES, LK_CDN, CONSENT_VERSION,
     get state() { return S; },

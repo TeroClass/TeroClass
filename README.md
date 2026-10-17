@@ -40,6 +40,18 @@ Institutions form a hierarchy of up to 3 levels: main institution › campus/fac
 (`institutions.parent_id`). Admins of a unit manage everything below it; sub-units inherit branding,
 master prompt, playbooks and learning-approach bars (`get_effective_config`).
 
+## View as (super admin only)
+
+The platform owner can see the app exactly as an institution sees it, without creating accounts:
+*Platform → 👁 View as…*, the account menu, or *👁 View as* on any unit in *Structure*. Pick a unit (any level),
+a perspective (institution admin or teacher) and optionally a person of that unit (to see their saved classes).
+The whole UI then behaves as that role in that unit (navigation, mode switch, inherited branding, learning-approach
+bars, prompt/playbook chain, Structure limited to that subtree, Plan & usage, Dashboard, Live class, Home).
+It is a client-side overlay (auth is not touched) and strictly **read-only**: every save/invite/role change/upload/
+purchase/approval is blocked ("View as is read-only"), also at the Supabase-client and fetch level. Generating a
+class is allowed as a preview with that unit's settings; it is never saved and the AI tokens count to the owner.
+A persistent banner shows who you are viewing as; *Exit* restores your session; a reload always starts normally.
+
 ## Plan & usage (seats + AI tokens)
 
 Each main institution is a billing account: **seats** (teachers + admins in its whole tree) and a **monthly AI token
@@ -52,7 +64,7 @@ institutions are set in *Platform → Plans & pricing*. Token accounting happens
 
 ## Tests
 
-`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs` and `tests/e2e-billing.cjs` run the app in a headless browser
+`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs` and `tests/e2e-viewas.cjs` run the app in a headless browser
 against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/<file>`).
 
 `tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage) on a local
