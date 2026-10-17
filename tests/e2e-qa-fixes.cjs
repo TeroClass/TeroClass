@@ -8,6 +8,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const TEACHER_DOC = "Week 1 - Class 1 - Test\nAttendance:\n\nToday's Objectives:\n- Practice greetings <img src=x onerror=window.__xss=1>\n- \"quote\" & <b>bold</b>\n\nMaterials:\n- Card 1: Hello → Hi\n- https://example.com/a?b=\"c\"";
 let failed = 0;
 
+// Admins have "Admin mode" | "Teacher mode": a sidebar button of the other mode is hidden, so switch first.
+const TEACHER_NAV = ['#nav-home', '#nav-ai'];
+async function nav(page, sel) {
+  if (!(await page.isVisible(sel)) && (await page.isVisible('#mode-switch'))) await page.click(`#mode-switch [data-mode="${TEACHER_NAV.includes(sel) ? 'teacher' : 'admin'}"]`);
+  await page.click(sel);
+}
 async function setup(browser, { ai } = {}) {
   M.resetDb();
   const ctx = await browser.newContext();
@@ -46,7 +52,7 @@ async function register(page, email, path = '/') {
 const clearToast = page => page.evaluate(() => { document.getElementById('toast').textContent = ''; });
 const waitToast = (page, re) => page.waitForFunction(src => new RegExp(src).test(document.getElementById('toast').textContent), re.source, { timeout: 8000 });
 async function generate(page, prompt = 'Greetings') {
-  await page.click('#nav-ai'); await page.fill('#prompt-input', prompt); await page.click('#btn-generate');
+  await nav(page, '#nav-ai'); await page.fill('#prompt-input', prompt); await page.click('#btn-generate');
   await page.waitForSelector('#lp-doc');
 }
 async function run(name, browser, opts, fn) {
@@ -80,19 +86,19 @@ async function run(name, browser, opts, fn) {
     M.seedInstitution({ name: '<img src=x onerror=window.__x1=1>', slug: "a');window.__x2=1;('", logo_url: 'javascript:window.__x3=1' });
     M.seedInstitution({ name: 'Logo" onerror="window.__x4=1', slug: 'b', logo_url: 'https://x.test/l.png" onerror="window.__x5=1' });
     await register(page, M.SUPERADMIN_EMAIL);
-    await page.click('#nav-superadmin'); await page.waitForSelector('.inst-card');
+    await nav(page, '#nav-superadmin'); await page.waitForSelector('.inst-card');
     if (await page.$('[onclick*="copyLink"],[onclick*="loginAsAdmin"],[onclick*="editInstitution"],[onclick*="openClass"]')) throw new Error('inline handlers with data remain');
     await clearToast(page);
     await page.click('.inst-card [data-action="copy-link"]');
     await waitToast(page, /Link copied|Copy this link/);
-    await page.click('#nav-ai'); await page.fill('#subjects-input', '<img src=x onerror=window.__x6=1>'); await page.press('#subjects-input', 'Enter');
+    await nav(page, '#nav-ai'); await page.fill('#subjects-input', '<img src=x onerror=window.__x6=1>'); await page.press('#subjects-input', 'Enter');
     if (await page.$('.subjects-container img')) throw new Error('subject tag rendered HTML');
     const tag = await page.textContent('.subject-tag'); if (!tag.includes('<img')) throw new Error('subject text lost: ' + tag);
     await page.evaluate(() => { wlLogoData = 'javascript:alert(1)'; updatePreview(); });
     if (await page.$('#prev-logo-box img')) throw new Error('unsafe logo url rendered');
     await page.evaluate(() => { wlLogoData = 'data:image/png;base64,iVBORw0KGgo="onerror="window.__x7=1'; updatePreview(); });
     const src = await page.getAttribute('#prev-logo-box img', 'src'); if (!src || !src.includes('"onerror=')) throw new Error('logo attribute not escaped: ' + src);
-    await page.click('#nav-superadmin');
+    await nav(page, '#nav-superadmin');
     await page.click('.inst-card:nth-child(1) [data-action="view-inst"]');
     await page.waitForSelector('#panel-admin.active');
     await sleep(300);
@@ -102,7 +108,7 @@ async function run(name, browser, opts, fn) {
 
   await run('H1 skills drag gives the right order after many panel switches', browser, {}, async ({ page }) => {
     await register(page, 't2@x.com');
-    for (let i = 0; i < 4; i++) { await page.click('#nav-home'); await page.click('#nav-ai'); }
+    for (let i = 0; i < 4; i++) { await nav(page, '#nav-home'); await nav(page, '#nav-ai'); }
     await page.dragAndDrop('.skill-drag-item[data-skill="Writing"]', '.skill-drag-item[data-skill="Speaking"]');
     const order = await page.evaluate(() => getSkillsPriority().join(','));
     if (order !== 'Writing,Speaking,Listening,Reading') throw new Error(order);
@@ -165,7 +171,7 @@ async function run(name, browser, opts, fn) {
   await run('M1 Enter spam starts one generation; M2 double save inserts once; L13 unsaved work tracked', browser, { ai: aiModes }, async ({ page, st }) => {
     await register(page, 't4@x.com');
     mode = 'slow';
-    await page.click('#nav-ai'); await page.fill('#prompt-input', 'Greetings');
+    await nav(page, '#nav-ai'); await page.fill('#prompt-input', 'Greetings');
     await page.press('#prompt-input', 'Enter'); await page.press('#prompt-input', 'Enter'); await page.press('#prompt-input', 'Enter');
     if (!(await page.evaluate(() => hasUnsavedWork()))) throw new Error('generation not counted as unsaved work');
     await page.waitForSelector('#lp-doc', { timeout: 10000 });
@@ -186,9 +192,9 @@ async function run(name, browser, opts, fn) {
       data: { params: { prompt: 'Fractions with pizza', language: 'Portuguese', level: 'Primary', age: '9 years old', groupSize: '18', duration: '60 min', subjects: ['Math', 'Art'], skills: ['Reading', 'Writing', 'Speaking', 'Listening'], gamification: 80 }, content: 'Saved fractions class\nAttendance:\n- slices', student: 'Fractions\n- ____' } });
     await page.evaluate(() => loadPlannings().then(renderClasses));
     mode = 'slow';
-    await page.click('#nav-ai'); await page.fill('#prompt-input', 'Other topic'); await page.click('#btn-generate');
+    await nav(page, '#nav-ai'); await page.fill('#prompt-input', 'Other topic'); await page.click('#btn-generate');
     await sleep(300);
-    await page.click('#nav-home'); await page.click('.class-card[data-id="p-old"]');
+    await nav(page, '#nav-home'); await page.click('.class-card[data-id="p-old"]');
     await page.waitForSelector('#lp-doc');
     await clearToast(page);
     await waitToast(page, /Previous generation discarded/);
@@ -207,7 +213,7 @@ async function run(name, browser, opts, fn) {
     db.plannings.push({ id: 'p2', owner_id: db.profiles[0].id, title: 'Stored', created_at: new Date().toISOString(), data: { params: {}, content: 'Stored\n- x', student: 'Stored handout OK' } });
     await page.evaluate(() => loadPlannings().then(renderClasses));
     await generate(page); // starts handout (will fail after 1.5s)
-    await page.click('#nav-home'); await page.click('.class-card[data-id="p2"]');
+    await nav(page, '#nav-home'); await page.click('.class-card[data-id="p2"]');
     await sleep(2200);
     const s = await page.evaluate(() => document.getElementById('lp-doc-student').innerText);
     if (!s.includes('Stored handout OK')) throw new Error('handout overwritten: ' + s);
@@ -230,18 +236,18 @@ async function run(name, browser, opts, fn) {
     M.seedInstitution({ name: 'Colegio Uno', slug: 'uno', font: 'Georgia', open_registration: false });
     M.seedInstitution({ name: 'Colegio Dos', slug: 'dos' });
     await register(page, M.SUPERADMIN_EMAIL);
-    await page.click('#nav-master');
+    await nav(page, '#nav-master');
     if (!(await page.isVisible('#master-no-inst'))) throw new Error('no notice without institution');
-    await page.click('#nav-superadmin'); await page.click('.inst-card:nth-child(1) [data-action="view-inst"]');
-    await page.click('#nav-superadmin'); // going back to the list keeps the context
-    await page.click('#nav-branding');
+    await nav(page, '#nav-superadmin'); await page.click('.inst-card:nth-child(1) [data-action="view-inst"]');
+    await nav(page, '#nav-superadmin'); // going back to the list keeps the context
+    await nav(page, '#nav-branding');
     if (await page.inputValue('#wl-name') !== 'Colegio Uno') throw new Error('branding lost the viewed institution');
     if (!(await page.textContent('#branding-ctx-badge')).includes('Colegio Uno')) throw new Error('badge');
     if (await page.isChecked('#wl-open-reg')) throw new Error('open_registration not loaded');
     const font = await page.getAttribute('.font-option.selected', 'data-font'); if (font !== 'Georgia') throw new Error('font not highlighted: ' + font);
-    await page.click('#nav-master');
+    await nav(page, '#nav-master');
     if (!(await page.textContent('#master-inst-badge')).includes('Colegio Uno')) throw new Error('AI settings badge');
-    await page.click('#nav-superadmin'); await page.click('.inst-card:nth-child(2) [data-action="edit-inst"]');
+    await nav(page, '#nav-superadmin'); await page.click('.inst-card:nth-child(2) [data-action="edit-inst"]');
     if (await page.inputValue('#wl-name') !== 'Colegio Dos' || !(await page.isChecked('#wl-open-reg'))) throw new Error('L2 fields not reset');
     if ((await page.getAttribute('.font-option.selected', 'data-font')) !== 'Inter') throw new Error('L2 font not reset');
     await page.click('#btn-new-inst');
@@ -269,7 +275,7 @@ async function run(name, browser, opts, fn) {
     await page.fill('#new-inst-admin', 'a@b.com'); await page.click('#modal-create-inst .btn-modal-save');
     await page.waitForSelector('.inst-card');
     if (db.institutions[0].slug !== 'liceo-guemes-ano' || db.institutions[0].color !== '#445566') throw new Error(JSON.stringify(db.institutions[0]));
-    await page.click('#nav-ai'); await page.fill('#st-groupsize', '0'); await page.dispatchEvent('#st-groupsize', 'change');
+    await nav(page, '#nav-ai'); await page.fill('#st-groupsize', '0'); await page.dispatchEvent('#st-groupsize', 'change');
     if (await page.inputValue('#st-groupsize') !== '1') throw new Error('group size not clamped');
   });
 
@@ -292,7 +298,7 @@ async function run(name, browser, opts, fn) {
     await page.evaluate(() => localStorage.setItem('tc_ui_lang', 'en'));
     await register(page, 'teacher@x.com', '/org/home');
     if (await page.textContent('#topbar-brand-name') !== 'Home') throw new Error('brand');
-    await page.click('#nav-ai'); await page.fill('#subjects-input', 'Speaking'); await page.press('#subjects-input', 'Enter');
+    await nav(page, '#nav-ai'); await page.fill('#subjects-input', 'Speaking'); await page.press('#subjects-input', 'Enter');
     await page.fill('#prompt-input', 'x'); await page.click('#btn-generate'); await page.waitForSelector('#lp-doc');
     await page.click('.topbar-right .lang-toggle button[data-lang="es"]');
     if (await page.textContent('#topbar-brand-name') !== 'Home') throw new Error('brand name translated');
@@ -300,7 +306,7 @@ async function run(name, browser, opts, fn) {
     const ph = await page.evaluate(() => document.getElementById('lp-doc-student').innerText);
     if (!/Preparando el material del alumno/.test(ph)) throw new Error('handout status not translated: ' + ph);
     await page.click('#btn-save'); await page.waitForFunction(() => /Guardado/.test(document.getElementById('toast').textContent));
-    await page.click('#nav-home');
+    await nav(page, '#nav-home');
     const date = await page.textContent('.class-card-date');
     const expected = await page.evaluate(() => new Date().toLocaleDateString('es-UY', { month: 'short', day: 'numeric', year: 'numeric' }));
     if (date !== expected) throw new Error('date ' + date + ' vs ' + expected);
@@ -312,7 +318,7 @@ async function run(name, browser, opts, fn) {
 
   await run('Branding preview Admin/Teacher toggle switches the preview', browser, {}, async ({ page }) => {
     await register(page, M.SUPERADMIN_EMAIL);
-    await page.click('#nav-branding');
+    await nav(page, '#nav-branding');
     const vis = () => page.isVisible('#preview-box .preview-metrics');
     if (!(await vis())) throw new Error('admin view missing metrics');
     await page.click('#prev-teacher'); if (await vis()) throw new Error('teacher view shows admin metrics');
@@ -321,7 +327,7 @@ async function run(name, browser, opts, fn) {
 
   await run('L12 logo input reset after error', browser, {}, async ({ page }) => {
     await register(page, M.SUPERADMIN_EMAIL);
-    await page.click('#nav-branding');
+    await nav(page, '#nav-branding');
     await page.setInputFiles('#wl-logo-upload', { name: 'big.png', mimeType: 'image/png', buffer: Buffer.alloc(2 * 1024 * 1024 + 10) });
     await waitToast(page, /under 2MB/);
     if (await page.evaluate(() => document.getElementById('wl-logo-upload').value)) throw new Error('input not reset');

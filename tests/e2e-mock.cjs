@@ -4,6 +4,12 @@ const { chromium } = require('playwright');
 
 const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.cjs');
 
+// Admins have "Admin mode" | "Teacher mode": a sidebar button of the other mode is hidden, so switch first.
+const TEACHER_NAV = ['#nav-home', '#nav-ai'];
+async function nav(page, sel) {
+  if (!(await page.isVisible(sel)) && (await page.isVisible('#mode-switch'))) await page.click(`#mode-switch [data-mode="${TEACHER_NAV.includes(sel) ? 'teacher' : 'admin'}"]`);
+  await page.click(sel);
+}
 (async () => {
   const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
   const ctx = await browser.newContext();
@@ -56,7 +62,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
   await step('Ver institución → dashboard + AI settings', async () => {
     await page.click('.btn-inst-action.primary');
     await page.waitForSelector('#panel-admin.active');
-    await page.click('#nav-master');
+    await nav(page, '#nav-master');
     await page.fill('#mp-prompt', 'Always use CEFR levels.');
     await page.click('#panel-master .btn-save-settings');
     await page.waitForTimeout(300);
@@ -64,7 +70,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
     const badge = await page.textContent('#master-inst-badge'); if (!badge.includes('The English Coach')) throw new Error('AI Settings sin institución: ' + badge);
     const dash = await page.evaluate(() => { showPanel('admin'); return new Promise(r => setTimeout(() => r(document.getElementById('admin-inst-badge').textContent), 300)); });
     if (!dash.includes('The English Coach')) throw new Error('Dashboard sin institución: ' + dash);
-    await page.click('#nav-master');
+    await nav(page, '#nav-master');
   });
 
   await step('Subir playbook de la institución', async () => {
@@ -86,7 +92,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
   });
 
   await step('Marca: editar institución, registro abierto y badge "Editing"', async () => {
-    await page.click('#nav-branding');
+    await nav(page, '#nav-branding');
     await page.waitForSelector('#panel-branding.active');
     const badge = await page.textContent('#branding-ctx-badge'); if (!badge.includes('The English Coach')) throw new Error('sin badge: ' + badge);
     if (await page.inputValue('#wl-name') !== 'The English Coach') throw new Error('no cargó la institución');
@@ -111,7 +117,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
   });
 
   await step('Generar y guardar clase', async () => {
-    await page.click('#nav-ai');
+    await nav(page, '#nav-ai');
     await page.fill('#subjects-input', 'Chemistry'); await page.press('#subjects-input', 'Enter');
     await page.selectOption('#st-language', 'Spanish'); await page.selectOption('#st-age', '15 years old');
     await page.fill('#prompt-input', 'Chemical reactions');
@@ -146,7 +152,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
   await step('Recargar: sesión y clases persisten', async () => {
     await page.reload();
     await page.waitForSelector('#screen-app.active');
-    await page.click('#nav-home');
+    await nav(page, '#nav-home');
     await page.waitForSelector('.class-card');
   });
 
@@ -164,14 +170,14 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
 
   await step('Cambiar la interfaz a español sin tocar la clase', async () => {
     await page.click('.topbar-right .lang-toggle button[data-lang="es"]');
-    await page.click('#nav-ai');
+    await nav(page, '#nav-ai');
     await shot(5);
     const gen = await page.textContent('#btn-generate'); if (!/Generar/.test(gen)) throw new Error('botón no traducido: ' + gen);
     const tab = await page.textContent('#tab-student'); if (!/Material del alumno/.test(tab)) throw new Error('pestaña no traducida');
     const doc = await page.textContent('#lp-doc'); if (/Objetivos de hoy/.test(doc) && !/Objectives/.test(doc)) throw new Error('tradujo la clase');
     if (!/Objectives/.test(doc)) throw new Error('la clase cambió');
     const val = await page.$eval('#st-level', e => e.value); if (val !== 'Intermediate') throw new Error('cambió el valor enviado: ' + val);
-    await page.click('#nav-home');
+    await nav(page, '#nav-home');
     await page.waitForFunction(() => /Tus clases/.test(document.body.innerText));
     await page.click('.topbar-right .lang-toggle button[data-lang="en"]');
     await page.waitForFunction(() => /Your Classes/.test(document.body.innerText));
@@ -204,7 +210,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
     const brand = await page.textContent('#topbar-brand-name'); if (brand !== 'The English Coach') throw new Error('marca: ' + brand);
     if (await page.isVisible('#nav-admin')) throw new Error('docente ve dashboard');
     if (await page.isVisible('#btn-invite-top')) throw new Error('docente ve Invitar');
-    await page.click('#nav-home');
+    await nav(page, '#nav-home');
     if (await page.$('.class-card')) throw new Error('docente ve clases ajenas');
   });
   await shot(4);
@@ -215,7 +221,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
     await page.fill('#login-email', 'im.silveiratrabal@gmail.com'); await page.fill('#login-password', 'secreto123');
     await page.click('#tab-login .auth-btn');
     await page.waitForSelector('#screen-app.active');
-    await page.click('#nav-superadmin'); await page.click('.btn-inst-action.primary');
+    await nav(page, '#nav-superadmin'); await page.click('.btn-inst-action.primary');
     await page.waitForSelector('#members-card select.member-role');
     const profe = db.profiles.find(p => p.email === 'profe@tec.com');
     await page.selectOption(`select[data-id="${profe.id}"]`, 'org_admin');
