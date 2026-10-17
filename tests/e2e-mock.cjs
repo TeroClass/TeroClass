@@ -8,7 +8,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
   const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
   const ctx = await browser.newContext();
   const errors = [];
-  let aiCall = null; let studentCalls = 0;
+  let aiCall = null; let studentCalls = 0; let verifierCalls = 0;
   await ctx.route('https://cdn.jsdelivr.net/**', r => r.fulfill({ contentType: 'application/javascript', body: SB_JS }));
   await ctx.route(SB + '/**', handleSupabase);
   await ctx.route('https://fonts.googleapis.com/**', r => r.fulfill({ body: '' }));
@@ -18,6 +18,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
       const b = JSON.parse(r.request().postData());
       if (JSON.stringify(b).includes('STUDENT HANDOUT')) { studentCalls++; return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'Chemical reactions\nToday\'s goals:\n- You will be able to balance equations\nCard 1: H2 + O2 → ________\nAnswer: 2H2 + O2 → 2H2O\nAnswer key\n1. 2, 1, 2' } }] }) }); }
       if (JSON.stringify(b).includes("institution's CORE")) { return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: '- Pedagogical principles: learning by doing, always end with reflection' } }] }) }); }
+      if (JSON.stringify(b).includes('exam reviewer')) { verifierCalls++; return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'NO_CHANGES' }, finish_reason: 'stop' }] }) }); }
       aiCall = { auth: r.request().headers()['authorization'], body: b };
       return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'Week 1 - Class 1 - Test - Small talk\nAttendance:\n\nToday\'s Objectives:\n- Practice greetings <img src=x onerror=window.__xss=1>\n- Ask questions' } }] }) });
     }
@@ -118,7 +119,9 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = require('./mock-supabase.
     await page.waitForSelector('#lp-doc');
     if (!aiCall?.auth?.startsWith('Bearer tok-')) throw new Error('la IA no recibió la sesión');
     if (process.env.SHOW_PROMPT) console.log(aiCall.body.messages[1].content);
-    if (!aiCall.body.messages[1].content.includes('REQUIREMENTS')) throw new Error('las barras no llegan al prompt');
+    if (!aiCall.body.messages[1].content.includes('PEDAGOGICAL APPROACH')) throw new Error('las barras no llegan al prompt');
+    if (!aiCall.body.messages[1].content.includes('ACCURACY RULES')) throw new Error('faltan reglas de exactitud para química');
+    await page.waitForFunction(() => true); if (verifierCalls < 1) throw new Error('no se verificaron los cálculos');
     if (!aiCall.body.messages[1].content.includes('NOT a language class')) throw new Error('no respeta la disciplina');
     if (!aiCall.body.messages[1].content.includes('GOLDEN RULE')) throw new Error('falta materiales listos');
     const up = aiCall.body.messages[1].content;
