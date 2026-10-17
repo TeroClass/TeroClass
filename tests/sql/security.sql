@@ -55,9 +55,13 @@ grant execute on all functions in schema qa to anon, authenticated;
 \set NEWA  '00000000-0000-0000-0000-0000000000a9'
 
 -- ===== FLOW: owner signs up (confirmed) =====
-insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at) values (:'OWNER','Im.SilveiraTrabal@gmail.com ','{"name":"Owner"}',now());
-select qa.eq('flow: owner signup -> superadmin', $$select role from public.profiles where id='00000000-0000-0000-0000-000000000001'$$, 'superadmin');
-select qa.eq('flow: owner profile email lowercased/trimmed', $$select email from public.profiles where id='00000000-0000-0000-0000-000000000001'$$, 'im.silveiratrabal@gmail.com');
+insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at) values (:'OWNER','Owner@TeroClass.test ','{"name":"Owner"}',now());
+select qa.eq('flow: owner profile email lowercased/trimmed', $$select email from public.profiles where id='00000000-0000-0000-0000-000000000001'$$, 'owner@teroclass.test');
+select qa.eq('OWN: no auto-promotion by email (confirmed signup stays teacher)', $$select role from public.profiles where id='00000000-0000-0000-0000-000000000001'$$, 'teacher');
+select qa.eq('OWN: migration source has no hardcoded owner email', $$select count(*) from pg_proc where prosrc ilike '%teroclass.test%' or prosrc ilike '%@gmail.com%'$$, '0');
+-- manual grant (README snippet)
+update public.profiles set role='superadmin' where id=(select id from auth.users where email='Owner@TeroClass.test ');
+select qa.eq('flow: owner granted superadmin manually (README snippet)', $$select role from public.profiles where id='00000000-0000-0000-0000-000000000001'$$, 'superadmin');
 
 set role authenticated; select qa.as_user(:'OWNER');
 select qa.rows('flow: superadmin create_institution A', $$select public.create_institution('Inst A','alpha',' A@A.com ')$$, 1);
@@ -67,7 +71,7 @@ select qa.eq('flow: admin_email normalized', $$select admin_email from public.in
 select qa.eq('flow: pending invitation created for a@a.com', $$select count(*) from public.invitations where email='a@a.com' and role='org_admin'$$, '1');
 select qa.fails('L: invite_member empty email', $$select public.invite_member((select id from public.institutions where slug='alpha'),'  ','teacher')$$, 'Email requerido');
 select qa.fails('L: invite_member null email', $$select public.invite_member((select id from public.institutions where slug='alpha'),null,'teacher')$$, 'Email requerido');
-select qa.eq('L: invite_member of platform owner returns superadmin', $$select public.invite_member((select id from public.institutions where slug='alpha'),'IM.silveiratrabal@gmail.com','teacher')$$, 'superadmin');
+select qa.eq('L: invite_member of platform owner returns superadmin', $$select public.invite_member((select id from public.institutions where slug='alpha'),'OWNER@teroclass.test','teacher')$$, 'superadmin');
 select qa.eq('flow: invite new@a.com', $$select public.invite_member((select id from public.institutions where slug='alpha'),' New@A.com','teacher')$$, 'invited');
 select qa.eq('flow: invite again replaces pending (no duplicates)', $$select public.invite_member((select id from public.institutions where slug='alpha'),'new@a.com','teacher')$$, 'invited');
 select qa.eq('flow: one pending invitation for new@a.com', $$select count(*) from public.invitations where email='new@a.com'$$, '1');
@@ -115,7 +119,7 @@ select qa.fails('H3: teacher get_document_content denied', $$select public.get_d
 select qa.fails('H3: teacher cannot insert documents', $$insert into public.institution_documents(institution_id,name) values (public.my_institution(),'x')$$, 'row-level security');
 
 -- ===== C3: profile email / role =====
-select qa.fails('C3a: teacher changes own email to owner email', $$update public.profiles set email='im.silveiratrabal@gmail.com' where id=auth.uid()$$, 'email no se puede cambiar');
+select qa.fails('C3a: teacher changes own email to owner email', $$update public.profiles set email='owner@teroclass.test' where id=auth.uid()$$, 'email no se puede cambiar');
 select qa.fails('C3: teacher escalates role', $$update public.profiles set role='org_admin' where id=auth.uid()$$, 'No autorizado');
 select qa.fails('C3: teacher changes institution', $$update public.profiles set institution_id=null where id=auth.uid()$$, 'No autorizado');
 select qa.rows('flow: teacher updates own name', $$update public.profiles set name='Teacher One' where id=auth.uid()$$, 1);
@@ -191,11 +195,9 @@ select qa.rows('flow: superadmin creates C with admin@c.com', $$select public.cr
 reset role;
 select qa.eq('C3b: loner (profile email forged) NOT added to C', $$select coalesce(institution_id::text,'none')||':'||role from public.profiles where id='00000000-0000-0000-0000-0000000000ff'$$, 'none:teacher');
 select qa.eq('C3b: invitation pending for real admin@c.com', $$select count(*) from public.invitations where email='admin@c.com' and accepted_at is null$$, '1');
-update public.profiles set email='im.silveiratrabal@gmail.com' where email='t1@a.com';  -- simulate forged owner email
-update public.profiles p set role = 'superadmin' from auth.users u
- where u.id = p.id and lower(trim(u.email)) = 'im.silveiratrabal@gmail.com' and p.role <> 'superadmin'
-   and (u.email_confirmed_at is not null or not exists (select 1 from public.profiles s where s.role = 'superadmin'));
-select qa.eq('C3: superadmin promotion line ignores forged profiles.email', $$select role from public.profiles where id='00000000-0000-0000-0000-0000000000a1'$$, 'org_admin');
+update public.profiles set email='owner@teroclass.test' where email='t1@a.com';  -- simulate forged owner email
+update auth.users set email_confirmed_at = now() where id = '00000000-0000-0000-0000-0000000000a1';
+select qa.eq('C3: confirming an account never promotes it (no email-based superadmin)', $$select role from public.profiles where id='00000000-0000-0000-0000-0000000000a1'$$, 'org_admin');
 update auth.users set email='loner2@x.com' where email='loner@x.com';
 select qa.eq('flow: auth email change syncs profile email', $$select email from public.profiles where id='00000000-0000-0000-0000-0000000000ff'$$, 'loner2@x.com');
 
@@ -248,6 +250,53 @@ select qa.rows('flow: superadmin changes admin_email', $$update public.instituti
 select qa.fails('C3: superadmin cannot change emails from app either', $$update public.profiles set email='z@z.com' where id=auth.uid()$$, 'email no se puede cambiar');
 select qa.eq('flow: superadmin reads B content via fn', $$select public.get_document_content((select id from public.institution_documents where name='pbB.txt'))$$, 'B FULL PLAYBOOK');
 reset role;
+
+-- ===== OWN: the platform owner's identity is hidden from admins and teachers =====
+-- owner placed inside institution A (worst case) + rows that reference him
+update public.profiles set institution_id = (select id from public.institutions where slug='alpha-school') where id = :'OWNER';
+insert into public.ai_request_log(user_id, root_id, inst_id, scope, total_tokens)
+  select :'OWNER', id, id, 'institution', 777 from public.institutions where slug='alpha-school';
+insert into public.ai_request_log(user_id, root_id, inst_id, scope, total_tokens)
+  select :'OWNER', null, id, 'unlimited', 555 from public.institutions where slug='alpha-school';
+insert into public.plannings(owner_id, institution_id, title) select :'OWNER', id, 'owner test class' from public.institutions where slug='alpha-school';
+insert into public.token_purchase_requests(root_id, root_name, requested_by, pack_tokens, price, status, decided_by, decided_at)
+  select id, name, :'OWNER', 1000, 1, 'approved', :'OWNER', now() from public.institutions where slug='alpha-school';
+set role authenticated; select qa.as_user(:'OWNER');
+select qa.rows('OWN: superadmin uploads a playbook into A', $$insert into public.institution_documents(institution_id,name,content,chars,uploaded_by) select id,'owner-pb.txt','x',1,auth.uid() from public.institutions where slug='alpha-school'$$, 1);
+select qa.eq('OWN: superadmin invite gets invited_by null', $$select coalesce(invited_by::text,'null') from public.invitations where id = (select id from public.invitations where email='admin@c.com')$$, 'null');
+select qa.eq('OWN: superadmin still reads own profile', $$select email from public.profiles where id=auth.uid()$$, 'owner@teroclass.test');
+select qa.eq('OWN: superadmin invite_member of own email → superadmin', $$select public.invite_member((select id from public.institutions where slug='alpha-school'),'owner@teroclass.test','teacher')$$, 'superadmin');
+select qa.eq('OWN: superadmin sees own class', $$select count(*) from public.plannings where owner_id=auth.uid()$$, '1');
+select qa.eq('OWN: superadmin sees own log rows', $$select count(*) from public.ai_request_log where user_id=auth.uid()$$, '2');
+select qa.eq('OWN: superadmin sees real requester in list_purchase_requests', $$select (public.list_purchase_requests(null)::jsonb -> 0 ->> 'requested_by_email')$$, 'owner@teroclass.test');
+select qa.as_user(:'ADMA');
+select qa.eq('OWN: admin cannot read owner profile row (same institution)', $$select count(*) from public.profiles where id='00000000-0000-0000-0000-000000000001'$$, '0');
+select qa.eq('OWN: admin sees no superadmin rows at all', $$select count(*) from public.profiles where role='superadmin'$$, '0');
+select qa.eq('OWN: admin still sees own members', $$select (count(*) > 0)::text from public.profiles where institution_id=public.my_institution() and id<>auth.uid()$$, 'true');
+select qa.eq('OWN: institutions.created_by never points to the owner', $$select count(*) from public.institutions where created_by='00000000-0000-0000-0000-000000000001'$$, '0');
+select qa.eq('OWN: invitations.invited_by never points to the owner', $$select count(*) from public.invitations where invited_by='00000000-0000-0000-0000-000000000001'$$, '0');
+select qa.eq('OWN: playbook uploaded_by masked (null)', $$select coalesce(uploaded_by::text,'null') from public.institution_documents where name='owner-pb.txt'$$, 'null');
+select qa.eq('OWN: admin sees no classes authored by the owner', $$select count(*) from public.plannings where owner_id='00000000-0000-0000-0000-000000000001'$$, '0');
+select qa.eq('OWN: admin sees no owner rows in ai_request_log', $$select count(*) from public.ai_request_log where user_id='00000000-0000-0000-0000-000000000001'$$, '0');
+select qa.fails('OWN: admin cannot read decided_by of purchase requests', $$select decided_by from public.token_purchase_requests$$, 'permission denied');
+select qa.fails('OWN: admin cannot read requested_by directly either', $$select requested_by from public.token_purchase_requests$$, 'permission denied');
+select qa.eq('OWN: admin reads purchase requests (allowed columns)', $$select count(*) from (select id, status, decided_at from public.token_purchase_requests) x$$, '1');
+select qa.eq('OWN: billing summary by_teacher masks the owner', $$select (j->'by_teacher' = '[{"name": "", "email": null, "used": 777, "masked": true, "user_id": null, "requests": 1}]'::jsonb)::text from (select public.get_billing_summary(null)::jsonb j) x$$, 'true');
+select qa.eq('OWN: billing summary requests mask the owner', $$select (j->'requests'->0->>'masked')||'/'||(j->'requests'->0->>'requested_by_name') from (select public.get_billing_summary(null)::jsonb j) x$$, 'true/');
+select qa.eq('OWN: billing summary has no owner email/name/id', $$select (t not ilike '%teroclass.test%' and t not ilike '%Owner%' and t not ilike '%00000000-0000-0000-0000-000000000001%')::text from (select public.get_billing_summary(null)::text t) x$$, 'true');
+select qa.eq('OWN: list_purchase_requests masks the owner', $$select (t not ilike '%teroclass.test%' and t not ilike '%Owner%' and (t::jsonb->0->>'masked') = 'true')::text from (select public.list_purchase_requests(null)::text t) x$$, 'true');
+select qa.eq('OWN: get_effective_config reveals nothing about the owner', $$select (t not ilike '%teroclass.test%' and t not ilike '%00000000-0000-0000-0000-000000000001%')::text from (select public.get_effective_config(null)::text t) x$$, 'true');
+select qa.eq('OWN: invite_member of owner email → generic not_allowed', $$select public.invite_member(public.my_institution(),'Owner@TeroClass.test','teacher')$$, 'not_allowed');
+select qa.fails('OWN: set_member_role on owner → generic No autorizado', $$select public.set_member_role('00000000-0000-0000-0000-000000000001','teacher')$$, 'No autorizado');
+select qa.fails('OWN: remove_member on owner → generic No autorizado', $$select public.remove_member('00000000-0000-0000-0000-000000000001')$$, 'No autorizado');
+select qa.as_user(:'NEWA');
+select qa.eq('OWN: teacher cannot read owner profile', $$select count(*) from public.profiles where id='00000000-0000-0000-0000-000000000001'$$, '0');
+select qa.eq('OWN: teacher sees no owner log rows', $$select count(*) from public.ai_request_log where user_id='00000000-0000-0000-0000-000000000001'$$, '0');
+select qa.eq('OWN: teacher sees no owner playbook uploader', $$select count(*) from public.institution_documents where uploaded_by='00000000-0000-0000-0000-000000000001'$$, '0');
+set role anon;
+select qa.fails('OWN: anon cannot call is_superadmin_id', $$select public.is_superadmin_id('00000000-0000-0000-0000-000000000001')$$, 'permission denied');
+reset role;
+update public.profiles set institution_id = null where id = :'OWNER';
 
 \echo '================ RESULTS ================'
 select n, case when ok then 'PASS' else '**FAIL**' end as res, label, detail from qa.results order by n;

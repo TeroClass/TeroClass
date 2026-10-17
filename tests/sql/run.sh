@@ -4,7 +4,8 @@
 # Creates a throwaway database, loads a Supabase stub (auth/storage/roles) and
 # supabase/migrations/001_base.sql twice (must be idempotent), then runs
 # security.sql (base guarantees), hierarchy.sql (3-level permissions) and billing.sql
-# (plan & usage: seats, monthly AI tokens, token packs).
+# (plan & usage: seats, monthly AI tokens, token packs); finally re-runs 001_base.sql on the populated
+# database (superadmins must be kept, owner references hidden).
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -21,4 +22,12 @@ for t in security hierarchy billing; do
   echo "$t: passed | failed = $sum"
   [[ "$sum" =~ \|\ +0$ ]] || fail=1
 done
+# Re-run on the populated database: must apply cleanly and keep every superadmin (never demote,
+# never promote anyone else, owner references stay hidden).
+before=$($PSQL -At -d $DB -c "select string_agg(id::text, ',' order by id) from public.profiles where role='superadmin'")
+if $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; then
+  after=$($PSQL -At -d $DB -c "select string_agg(id::text, ',' order by id) from public.profiles where role='superadmin'")
+  refs=$($PSQL -At -d $DB -c "select (select count(*) from public.institutions where public.is_superadmin_id(created_by)) + (select count(*) from public.invitations where public.is_superadmin_id(invited_by)) + (select count(*) from public.institution_documents where public.is_superadmin_id(uploaded_by))")
+  if [[ -n "$before" && "$before" == "$after" && "$refs" == "0" ]]; then echo "rerun: superadmins kept ($after), owner refs hidden"; else echo "rerun: **FAIL** before=$before after=$after refs=$refs"; fail=1; fi
+else echo "rerun: **FAIL** 001_base.sql failed on the populated database"; fail=1; fi
 exit $fail

@@ -16,7 +16,9 @@ const HTML = RAW_HTML
   .replace('<script src="/live-class.js"></script>', () => `<script>${asset('live-class.js')}</script>`);
 const SB_JS = fs.readFileSync(process.env.SB_JS || '/tmp/package/dist/umd/supabase.js', 'utf8');
 const SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
-const SUPERADMIN_EMAIL = 'im.silveiratrabal@gmail.com';
+// Test-only platform owner (placeholder). The real system never promotes by email: the mock simply
+// seeds this account as an existing superadmin, like production where the role lives in profiles.role.
+const SUPERADMIN_EMAIL = 'owner@teroclass.test';
 
 const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [] };
 const calls = { rpc: [], inserts: {} };
@@ -90,7 +92,8 @@ function billingSummary(me, inst) {
     can_request: p.role === 'org_admin' && p.institution_id === root, full_detail: scope.includes(root),
     pending: bill.requests.find(r => r.root_id === root && r.status === 'pending') || null,
     by_unit: sum(logs, 'inst_id').map(x => ({ id: x.k, name: instById(x.k)?.name, used: x.used, requests: x.requests })),
-    by_teacher: sum(logs, 'user_id').slice(0, 10).map(x => { const u = db.profiles.find(q => q.id === x.k) || {}; return { user_id: x.k, name: u.name || u.email, email: u.email, used: x.used, requests: x.requests }; }),
+    by_teacher: sum(logs, 'user_id').slice(0, 10).map(x => { const u = db.profiles.find(q => q.id === x.k) || {}; const masked = u.role === 'superadmin' && p.role !== 'superadmin';
+      return masked ? { user_id: null, name: '', email: null, masked: true, used: x.used, requests: x.requests } : { user_id: x.k, name: u.name || u.email, email: u.email, masked: false, used: x.used, requests: x.requests }; }),
     requests: bill.requests.filter(r => r.root_id === root).slice().reverse().slice(0, 20) };
 }
 // what a user can read from institutions (RLS): superadmin all; org_admin own unit + below; teacher own unit
@@ -140,7 +143,7 @@ async function handleSupabase(route) {
     if (fn === 'list_purchase_requests') {
       if (!isSA && meP?.role !== 'org_admin') return NOAUTH();
       const root = isSA ? null : rootOf(meP.institution_id);
-      const rows = bill.requests.filter(r => (!root || r.root_id === root) && (!body.p_status || r.status === body.p_status)).map(r => { const u = db.profiles.find(q => q.id === r.requested_by) || {}; return { ...r, requested_by_name: u.name || u.email || '', requested_by_email: u.email }; });
+      const rows = bill.requests.filter(r => (!root || r.root_id === root) && (!body.p_status || r.status === body.p_status)).map(r => { const u = db.profiles.find(q => q.id === r.requested_by) || {}; const masked = u.role === 'superadmin' && !isSA; return { ...r, requested_by: undefined, requested_by_name: masked ? '' : (u.name || u.email || ''), requested_by_email: masked ? null : u.email, masked }; });
       return json(200, rows.sort((x, y) => (y.status === 'pending') - (x.status === 'pending') || (y.created_at > x.created_at ? 1 : -1)));
     }
     if (fn === 'decide_purchase_request') {
@@ -184,7 +187,7 @@ async function handleSupabase(route) {
     }
     if (fn === 'platform_stats') return json(200, { institutions: db.institutions.length, top_level: db.institutions.filter(i => !i.parent_id).length, users: db.profiles.length, teachers: db.profiles.filter(p => p.role === 'teacher').length, admins: db.profiles.filter(p => p.role === 'org_admin').length, classes: db.plannings.length, ai_today: 7, ai_users_today: 2 });
     if (fn === 'invite_member') {
-      if (body.p_email.toLowerCase() === SUPERADMIN_EMAIL) return json(200, 'superadmin');
+      if (body.p_email.toLowerCase() === SUPERADMIN_EMAIL) return json(200, isSA ? 'superadmin' : 'not_allowed'); // never reveals the owner to others
       const pr = db.profiles.find(x => x.email === body.p_email); const root = rootOf(body.p_inst);
       const counted = pr && ['teacher', 'org_admin'].includes(pr.role) && pr.institution_id && rootOf(pr.institution_id) === root;
       if (!counted && !seatFree(root)) return json(400, { code: 'P0001', message: `No quedan asientos disponibles en el plan de la institución (${seatsUsed(root)} de ${account(root).seats} en uso)` });
@@ -208,7 +211,11 @@ async function handleSupabase(route) {
     if (!me) return json(401, { message: 'JWT required' });
     const table = p.split('/').pop(); const rows = db[table];
     if (m === 'GET') {
-      const out = project(applyFilters(table === 'institutions' ? visibleInstitutions(me) : rows, url), url);
+      const meP = db.profiles.find(x => x.id === me.id); const sa = meP?.role === 'superadmin';
+      let base = table === 'institutions' ? visibleInstitutions(me) : rows;
+      if (table === 'profiles' && !sa) base = base.filter(r => r.role !== 'superadmin' || r.id === me.id); // RLS: owner hidden
+      if (table === 'plannings' && !sa) { const owners = new Set(db.profiles.filter(x => x.role === 'superadmin' && x.id !== me.id).map(x => x.id)); base = base.filter(r => !owners.has(r.owner_id)); }
+      const out = project(applyFilters(base, url), url);
       const single = (req.headers()['accept'] || '').includes('vnd.pgrst.object');
       if (single) return out.length ? json(200, out[0]) : json(406, { code: 'PGRST116', message: 'no rows' });
       return json(200, out);

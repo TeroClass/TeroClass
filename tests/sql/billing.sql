@@ -32,7 +32,8 @@ grant execute on function qb.inst(text), qb.uid(text), qb.bal(text), qb.used(tex
 
 \set OWNER '00000000-0000-0000-0000-000000000001'
 insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at)
-  values (:'OWNER','im.silveiratrabal@gmail.com','{"name":"Owner"}',now()) on conflict do nothing;
+  values (:'OWNER','owner@teroclass.test','{"name":"Owner"}',now()) on conflict do nothing;
+update public.profiles set role='superadmin' where id=:'OWNER'; -- manual grant (README); no auto-promotion by email
 -- known starting settings (the suite may run on a DB where they were changed)
 update public.platform_settings set pack_tokens=2000000, pack_price=11.99, currency='USD', personal_monthly_tokens=200000, default_seats=10, default_monthly_tokens=2000000;
 

@@ -74,7 +74,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
   const sede = M.seedInstitution({ name: 'Sede Norte', slug: 'sede', color: null, bg_color: null, font: null, parent_id: madre.id });
   const otra = M.seedInstitution({ name: 'Otra Escuela', slug: 'otra' });
   const mk = (email, role, inst, name) => { const u = M.newUser(email, { name: name || email.split('@')[0] }); const p = db.profiles.find(x => x.id === u.id); p.role = role; p.institution_id = inst; return p; };
-  const owner = M.newUser('im.silveiratrabal@gmail.com', { name: 'Owner' });
+  const owner = M.newUser('owner@teroclass.test', { name: 'Owner' });
   const madm = mk('madm@h.com', 'org_admin', madre.id, 'Marta Admin'), sadm = mk('sadm@h.com', 'org_admin', sede.id, 'Sergio Sede');
   const t1 = mk('t1@h.com', 'teacher', madre.id, 'Tina ' + XSS), t2 = mk('t2@h.com', 'teacher', sede.id, 'Tomás Norte');
   const oadm = mk('oadm@o.com', 'org_admin', otra.id, 'Otro Admin');
@@ -225,7 +225,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     st.status = { billing_configured: false, billing_ok: null };
     bill.requests.push({ id: 'req-1', root_id: t.madre.id, root_name: t.madre.name, requested_by: t.madm.id, pack_tokens: 2000000, price: 11.99, currency: 'USD', status: 'pending', note: '', created_at: new Date().toISOString() });
     bill.requests.push({ id: 'req-2', root_id: t.otra.id, root_name: t.otra.name, requested_by: t.oadm.id, pack_tokens: 2000000, price: 11.99, currency: 'USD', status: 'pending', note: '', created_at: new Date().toISOString() });
-    await login(page, 'im.silveiratrabal@gmail.com');
+    await login(page, 'owner@teroclass.test');
     await page.click('#nav-platform');
     await page.waitForSelector('#pf-billing-banner', { state: 'visible' });
     if (!/Token limits are not active: add SUPABASE_SERVICE_ROLE_KEY in Vercel/.test((await text(page, '#pf-billing-banner')).replace(/\s+/g, ' '))) throw new Error('banner: ' + await text(page, '#pf-billing-banner'));
@@ -274,7 +274,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
   await run('Platform banner: hidden when configured, warning when the key is rejected', browser, async ({ page, st }) => {
     seed();
     st.status = { billing_configured: true, billing_ok: true };
-    await login(page, 'im.silveiratrabal@gmail.com');
+    await login(page, 'owner@teroclass.test');
     await page.click('#nav-platform');
     await page.waitForSelector('#pf-settings-card');
     if (await page.isVisible('#pf-billing-banner')) throw new Error('banner shown while configured');
@@ -290,7 +290,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await page.click('[data-h="invite"][data-id="' + t.sede.id + '"]');
     await page.fill('#invite-email', 'nueva@h.com');
     await page.click('#modal-invite .btn-modal-save');
-    await waitToast(page, /No seats left in the institution's plan \(4 of 4 in use\)\. Ask the platform owner to add seats\./);
+    await waitToast(page, /No seats left in the institution's plan \(4 of 4 in use\)\. Ask the TeroClass team to add seats\./);
     if (db.invitations.some(i => i.email === 'nueva@h.com')) throw new Error('invitation saved');
     await page.evaluate(() => setUiLang('es')); // the open modal covers the topbar toggle
     await page.click('#modal-invite .btn-modal-save');
@@ -336,7 +336,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     // super admin
     await page.click('.user-avatar-sm#user-avatar'); await page.click('.user-menu-btn');
     await page.waitForSelector('#tab-login', { state: 'visible' });
-    await page.fill('#login-email', 'im.silveiratrabal@gmail.com'); await page.fill('#login-password', 'secreto123');
+    await page.fill('#login-email', 'owner@teroclass.test'); await page.fill('#login-password', 'secreto123');
     await page.click('#tab-login .auth-btn');
     await page.waitForSelector('#screen-app.active');
     await page.click('#nav-platform');

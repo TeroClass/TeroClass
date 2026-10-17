@@ -54,7 +54,7 @@ function seedTree() {
   const sede2 = M.seedInstitution({ name: 'Sede 2', slug: 'sede2', color: null, bg_color: null, font: null, parent_id: madre.id });
   const cat1 = M.seedInstitution({ name: 'Cátedra 1', slug: 'cat1', color: null, bg_color: null, font: null, parent_id: sede1.id, master_prompt: 'Catedra rule' });
   const mk = (email, role, inst) => { const u = M.newUser(email, { name: email.split('@')[0] }); const p = db.profiles.find(x => x.id === u.id); p.role = role; p.institution_id = inst; return p; };
-  const owner = M.newUser('im.silveiratrabal@gmail.com', { name: 'Owner' });
+  const owner = M.newUser('owner@teroclass.test', { name: 'Owner' });
   const madm = mk('madm@h.com', 'org_admin', madre.id), s1adm = mk('s1adm@h.com', 'org_admin', sede1.id);
   const tc1 = mk('tc1@h.com', 'teacher', cat1.id), ts2 = mk('ts2@h.com', 'teacher', sede2.id), tm = mk('tm@h.com', 'teacher', madre.id);
   const plan = (o, inst, subj) => db.plannings.push({ id: M.uid(), owner_id: o.id, institution_id: inst, title: 'Plan ' + subj, data: { params: { subjects: [subj], level: 'Primary' }, content: 'x' }, created_at: new Date().toISOString() });
@@ -68,8 +68,8 @@ function seedTree() {
   const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
 
   await run('Super admin: mode switch, first institution, Structure empty state → sub-unit → cátedra (3 levels max)', browser, async ({ page }) => {
-    M.newUser('im.silveiratrabal@gmail.com', { name: 'Owner' });
-    await login(page, 'im.silveiratrabal@gmail.com');
+    M.newUser('owner@teroclass.test', { name: 'Owner' });
+    await login(page, 'owner@teroclass.test');
     await page.waitForSelector('#panel-superadmin.active');
     if (!(await page.isVisible('#mode-switch'))) throw new Error('no mode switch for super admin');
     if (await page.isVisible('#nav-ai') || await page.isVisible('#nav-home')) throw new Error('admin mode shows teacher nav');
@@ -258,7 +258,7 @@ function seedTree() {
 
   await run('Platform (super admin): totals, search, change role, move to a unit; Spanish UI', browser, async ({ page }) => {
     const t = seedTree();
-    await login(page, 'im.silveiratrabal@gmail.com');
+    await login(page, 'owner@teroclass.test');
     await page.click('#nav-platform');
     await page.waitForFunction(() => document.getElementById('pf-m-classes').textContent === '4');
     if (await page.textContent('#pf-m-inst') !== '4' || await page.textContent('#pf-m-top') !== '1' || await page.textContent('#pf-m-ai') !== '7') throw new Error('totals');

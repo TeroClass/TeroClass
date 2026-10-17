@@ -10,8 +10,12 @@
 --   Authentication → Providers → Email → "Confirm email" = ON, con SMTP propio
 --   (Authentication → Emails → SMTP Settings). Si no, cualquiera podría
 --   registrarse con el email de otra persona invitada y quedarse con su lugar.
---   El rol de súper admin solo se otorga si el email ya está confirmado o si
---   todavía no existe ningún súper admin (primer arranque).
+--
+-- SÚPER ADMIN (dueño de la plataforma): el rol vive SOLO en profiles.role. Este script nunca
+--   promueve a nadie por email y nunca le quita el rol a un súper admin existente. Para otorgarlo
+--   a mano (una sola vez, en el SQL Editor; ver README):
+--     update public.profiles set role='superadmin' where id=(select id from auth.users where email='OWNER_EMAIL_HERE');
+--   La identidad del súper admin (nombre, email, id) no se muestra a admins ni docentes.
 --
 -- JERARQUÍA (3 niveles): institución madre › sede/facultad › cátedra/área.
 --   institutions.parent_id (null = madre). Los admins de una unidad administran también
@@ -232,6 +236,32 @@ create or replace function public.is_superadmin() returns boolean
 language sql stable security definer set search_path = public as
 $$ select coalesce((select role = 'superadmin' from public.profiles where id = auth.uid()), false) $$;
 
+-- ¿Ese usuario es súper admin? (uso interno: ocultar su identidad a los demás)
+create or replace function public.is_superadmin_id(p_user uuid) returns boolean
+language sql stable security definer set search_path = public as
+$$ select p_user is not null and exists (select 1 from public.profiles where id = p_user and role = 'superadmin') $$;
+-- (lo usan las políticas RLS, que corren con el rol de quien consulta: authenticated necesita ejecutarla;
+--  solo responde sí/no para un id que ya se conoce, y los ids del súper admin no se muestran a nadie)
+revoke all on function public.is_superadmin_id(uuid) from public, anon;
+grant execute on function public.is_superadmin_id(uuid) to authenticated;
+
+-- Al insertar: si la columna indicada (argumento del trigger) apunta a un súper admin, queda en null.
+-- Así ni su id ni su identidad aparecen en filas que leen admins y docentes (created_by, invited_by,
+-- uploaded_by). Corre como el dueño de la función (puede consultar profiles).
+create or replace function public.hide_superadmin_refs() returns trigger
+language plpgsql security definer set search_path = public as
+$$
+declare c text; j jsonb := to_jsonb(new);
+begin
+  foreach c in array tg_argv loop
+    if j ? c and jsonb_typeof(j->c) = 'string' and public.is_superadmin_id((j->>c)::uuid) then
+      j := jsonb_set(j, array[c], 'null'::jsonb);
+    end if;
+  end loop;
+  return jsonb_populate_record(new, j);
+end $$;
+revoke all on function public.hide_superadmin_refs() from public, anon, authenticated;
+
 -- ===== Jerarquía: ayudas =====
 -- Cadena de una unidad: ella misma (depth 0) y sus ancestros (depth 1 = padre, 2 = abuelo).
 create or replace function public.institution_chain(p_id uuid) returns table (id uuid, depth integer)
@@ -401,12 +431,7 @@ begin
     v_inst := null; v_role := 'teacher'; inv := null;
   end if;
 
-  -- Súper admin: solo con email confirmado, o si todavía no hay ninguno (primer arranque)
-  if v_email = 'im.silveiratrabal@gmail.com'
-     and (new.email_confirmed_at is not null
-          or not exists (select 1 from public.profiles where role = 'superadmin')) then
-    v_role := 'superadmin';
-  end if;
+  -- Nadie se vuelve súper admin al registrarse: ese rol se otorga solo a mano (ver encabezado).
 
   insert into public.profiles (id, email, name, role, institution_id)
   values (new.id, v_email,
@@ -431,10 +456,6 @@ $$
 begin
   if new.email is distinct from old.email then
     update public.profiles set email = lower(trim(coalesce(new.email, ''))) where id = new.id;
-  end if;
-  if lower(trim(coalesce(new.email, ''))) = 'im.silveiratrabal@gmail.com'
-     and new.email_confirmed_at is not null then
-    update public.profiles set role = 'superadmin' where id = new.id and role <> 'superadmin';
   end if;
   return new;
 end $$;
@@ -626,7 +647,7 @@ create policy inst_delete on public.institutions for delete
 drop policy if exists prof_select on public.profiles;
 create policy prof_select on public.profiles for select
   using (id = auth.uid() or public.is_superadmin()
-         or (institution_id is not null and public.is_admin_of(institution_id)));
+         or (institution_id is not null and role <> 'superadmin' and public.is_admin_of(institution_id)));
 drop policy if exists prof_update on public.profiles;
 create policy prof_update on public.profiles for update
   using (id = auth.uid() or public.is_superadmin())
@@ -643,7 +664,8 @@ create policy inv_all on public.invitations for all
 drop policy if exists plan_select on public.plannings;
 create policy plan_select on public.plannings for select
   using (owner_id = auth.uid()
-         or (institution_id is not null and public.is_admin_of(institution_id)));
+         or (institution_id is not null and public.is_admin_of(institution_id)
+             and (public.is_superadmin() or not public.is_superadmin_id(owner_id))));
 drop policy if exists plan_insert on public.plannings;
 create policy plan_insert on public.plannings for insert
   with check (owner_id = auth.uid()
@@ -820,7 +842,8 @@ end $$;
 revoke all on function public.assert_not_last_admin(uuid) from public, anon, authenticated;
 
 -- Sumar a alguien a una institución (si ya tiene cuenta, directo; si no, invitación).
--- Devuelve 'added' | 'invited' | 'superadmin' (el dueño de la plataforma no se toca).
+-- Devuelve 'added' | 'invited' | 'not_allowed' (esa cuenta no se puede invitar; al súper admin
+-- que llama se le devuelve 'superadmin'). No revela a otros que ese email es del dueño.
 create or replace function public.invite_member(p_inst uuid, p_email text, p_role text default 'teacher')
 returns text
 language plpgsql security definer set search_path = public as
@@ -841,7 +864,9 @@ begin
    limit 1;
 
   if prof.id is not null then
-    if prof.role = 'superadmin' then return 'superadmin'; end if;
+    if prof.role = 'superadmin' then
+      return case when public.is_superadmin() then 'superadmin' else 'not_allowed' end;
+    end if;
     -- Se puede mover a alguien entre unidades que uno administra; si está en otra, no.
     if prof.institution_id is not null and prof.institution_id <> p_inst
        and not public.is_admin_of(prof.institution_id) then
@@ -877,7 +902,10 @@ begin
   if t.id is null or t.institution_id is null or not public.is_admin_of(t.institution_id) then
     raise exception 'No autorizado';
   end if;
-  if t.role = 'superadmin' then raise exception 'No se puede modificar al súper admin'; end if;
+  if t.role = 'superadmin' then
+    if public.is_superadmin() then raise exception 'No se puede modificar al súper admin'; end if;
+    raise exception 'No autorizado';
+  end if;
   if t.role = 'org_admin' and p_role <> 'org_admin' then
     perform public.assert_not_last_admin(t.institution_id);
   end if;
@@ -898,7 +926,10 @@ begin
   if t.id is null or t.institution_id is null or not public.is_admin_of(t.institution_id) then
     raise exception 'No autorizado';
   end if;
-  if t.role = 'superadmin' then raise exception 'No se puede modificar al súper admin'; end if;
+  if t.role = 'superadmin' then
+    if public.is_superadmin() then raise exception 'No se puede modificar al súper admin'; end if;
+    raise exception 'No autorizado';
+  end if;
   if t.role = 'org_admin' then
     perform public.assert_not_last_admin(t.institution_id);
   end if;
@@ -1063,14 +1094,7 @@ update public.profiles p set email = lower(trim(u.email))
   from auth.users u
  where u.id = p.id and u.email is not null and p.email is distinct from lower(trim(u.email));
 
--- Si ya te registraste (y confirmaste) con este email, te deja como súper admin
-update public.profiles p set role = 'superadmin'
-  from auth.users u
- where u.id = p.id
-   and lower(trim(u.email)) = 'im.silveiratrabal@gmail.com'
-   and p.role <> 'superadmin'
-   and (u.email_confirmed_at is not null
-        or not exists (select 1 from public.profiles s where s.role = 'superadmin'));
+-- Súper admins: se conservan tal cual (este script no promueve ni degrada a nadie).
 
 -- ========== PLAYBOOK / PRINCIPIOS DE LA INSTITUCIÓN ==========
 create table if not exists public.institution_documents (
@@ -1132,13 +1156,17 @@ alter table public.token_purchase_requests enable row level security;
 revoke all on public.platform_settings, public.billing_accounts, public.token_usage_monthly,
               public.ai_request_log, public.token_purchase_requests from anon, authenticated;
 revoke all on sequence public.ai_request_log_id_seq from anon, authenticated;
-grant select on public.ai_request_log, public.token_purchase_requests to authenticated;
+grant select on public.ai_request_log to authenticated;
+-- decided_by (quién aprobó: el súper admin) no se lee directo; requested_by solo si no es súper admin (vía funciones)
+grant select (id, root_id, root_name, pack_tokens, price, currency, status, note, created_at, decided_at)
+  on public.token_purchase_requests to authenticated;
 
 -- Registro: el súper admin todo; cada uno sus pedidos; los admins, los de sus unidades (y las de abajo)
 drop policy if exists ailog_select on public.ai_request_log;
 create policy ailog_select on public.ai_request_log for select
   using (public.is_superadmin() or user_id = auth.uid()
-         or (inst_id is not null and public.is_admin_of(inst_id)));
+         or (inst_id is not null and scope <> 'unlimited' and public.is_admin_of(inst_id)
+             and not public.is_superadmin_id(user_id)));
 -- Solicitudes: el súper admin todas; los admins de cualquier unidad de la cuenta, las de su cuenta
 drop policy if exists tpr_select on public.token_purchase_requests;
 create policy tpr_select on public.token_purchase_requests for select
@@ -1311,16 +1339,22 @@ begin
           from public.ai_request_log l join public.institutions i on i.id = l.inst_id
          where l.root_id = v_root and l.created_at >= v_month and l.inst_id = any(v_scope)
          group by l.inst_id, i.name) x), '[]'::json),
+    -- el súper admin nunca aparece con nombre/email/id ante otros (masked = true → "Equipo TeroClass")
     'by_teacher', coalesce((select json_agg(x order by x.used desc) from (
-        select l.user_id, coalesce(nullif(p.name, ''), p.email, '—') as name, p.email, sum(l.total_tokens)::bigint as used, count(*)::int as requests
+        select case when m.masked then null else l.user_id end as user_id,
+               case when m.masked then '' else coalesce(nullif(p.name, ''), p.email, '—') end as name,
+               case when m.masked then null else p.email end as email, m.masked,
+               sum(l.total_tokens)::bigint as used, count(*)::int as requests
           from public.ai_request_log l left join public.profiles p on p.id = l.user_id
+          cross join lateral (select coalesce(p.role = 'superadmin', false) and not public.is_superadmin() as masked) m
          where l.root_id = v_root and l.created_at >= v_month and l.inst_id = any(v_scope)
-         group by l.user_id, p.name, p.email
+         group by 1, 2, 3, 4
          order by sum(l.total_tokens) desc limit 10) x), '[]'::json),
     'requests', coalesce((select json_agg(x order by x.created_at desc) from (
         select r.id, r.pack_tokens, r.price, r.currency, r.status, r.note, r.created_at, r.decided_at,
-               coalesce(nullif(p.name, ''), p.email, '') as requested_by_name
+               case when m.masked then '' else coalesce(nullif(p.name, ''), p.email, '') end as requested_by_name, m.masked
           from public.token_purchase_requests r left join public.profiles p on p.id = r.requested_by
+          cross join lateral (select coalesce(p.role = 'superadmin', false) and not public.is_superadmin() as masked) m
          where r.root_id = v_root order by r.created_at desc limit 20) x), '[]'::json));
 end $$;
 revoke all on function public.get_billing_summary(uuid) from public, anon;
@@ -1364,10 +1398,12 @@ begin
   return coalesce((select json_agg(x order by (x.status = 'pending') desc, x.created_at desc) from (
     select r.id, r.root_id, coalesce(i.name, r.root_name) as root_name, i.slug as root_slug, r.pack_tokens, r.price, r.currency,
            r.status, r.note, r.created_at, r.decided_at,
-           coalesce(nullif(p.name, ''), p.email, '') as requested_by_name, p.email as requested_by_email
+           case when m.masked then '' else coalesce(nullif(p.name, ''), p.email, '') end as requested_by_name,
+           case when m.masked then null else p.email end as requested_by_email, m.masked
       from public.token_purchase_requests r
       left join public.institutions i on i.id = r.root_id
       left join public.profiles p on p.id = r.requested_by
+      cross join lateral (select coalesce(p.role = 'superadmin', false) and not public.is_superadmin() as masked) m
      where (v_root is null or r.root_id = v_root) and (p_status is null or r.status = p_status)
      order by (r.status = 'pending') desc, r.created_at desc limit 200) x), '[]'::json);
 end $$;
@@ -1474,6 +1510,25 @@ begin
 end $$;
 revoke all on function public.platform_billing_overview() from public, anon;
 grant execute on function public.platform_billing_overview() to authenticated;
+
+-- ========== IDENTIDAD DEL SÚPER ADMIN: oculta para admins y docentes ==========
+-- Filas nuevas: created_by / invited_by / uploaded_by que apunten a un súper admin quedan en null.
+drop trigger if exists institutions_hide_owner on public.institutions;
+create trigger institutions_hide_owner before insert on public.institutions
+  for each row execute function public.hide_superadmin_refs('created_by');
+drop trigger if exists invitations_hide_owner on public.invitations;
+create trigger invitations_hide_owner before insert or update of invited_by on public.invitations
+  for each row execute function public.hide_superadmin_refs('invited_by');
+drop trigger if exists idocs_hide_owner on public.institution_documents;
+create trigger idocs_hide_owner before insert or update of uploaded_by on public.institution_documents
+  for each row execute function public.hide_superadmin_refs('uploaded_by');
+-- Filas que ya existían (se puede volver a ejecutar: después de la primera vez no cambia nada)
+update public.institutions set created_by = null
+ where created_by is not null and created_by in (select id from public.profiles where role = 'superadmin');
+update public.invitations set invited_by = null
+ where invited_by is not null and invited_by in (select id from public.profiles where role = 'superadmin');
+update public.institution_documents set uploaded_by = null
+ where uploaded_by is not null and uploaded_by in (select id from public.profiles where role = 'superadmin');
 
 -- Cuentas que ya existían: plan por defecto para cada institución madre sin fila
 insert into public.billing_accounts (root_id, seats, monthly_tokens)

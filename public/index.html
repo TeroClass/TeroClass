@@ -1252,7 +1252,7 @@ const I18N_ES={
 'Allow pop-ups to export the PDF':'Permití las ventanas emergentes para exportar el PDF','Generated with Tero Class':'Generado con Tero Class',
 'Could not copy. Select the text and copy it manually (Ctrl+C / Cmd+C).':'No se pudo copiar. Seleccioná el texto y copialo a mano (Ctrl+C / Cmd+C).',
 // institutions / branding / team
-'Slug already exists.':'Ese link ya existe.',"That's the platform owner account.":'Esa es la cuenta del dueño de la plataforma.',
+'Slug already exists.':'Ese link ya existe.',"That email can't be invited.":'Ese email no se puede invitar.',
 'Coming soon':'Próximamente','Preview':'Vista previa','Admin':'Admin','Editing:':'Editando:','Institution:':'Institución:','New institution':'Nueva institución',
 '＋ New institution':'＋ Nueva institución','All institutions':'Todas las instituciones','Select an institution in Institutions → View':'Elegí una institución en Instituciones → Ver',
 'Registration':'Registro','Anyone with the link can join as a teacher':'Cualquiera con el link puede sumarse como docente',
@@ -1268,10 +1268,10 @@ const I18N_ES={
 'Could not reach the AI service. Please try again.':'No pudimos conectar con el servicio de IA. Probá de nuevo.',
 'The AI returned an empty answer. Please try again.':'La IA devolvió una respuesta vacía. Probá de nuevo.','Server error':'Error del servidor',
 "You can't remove the institution's last admin.":'No se puede quitar al último admin de la institución.',
-"The platform owner account can't be changed.":'La cuenta del dueño de la plataforma no se puede modificar.',
+"This account can't be changed.":'Esta cuenta no se puede modificar.',
 'That person already belongs to another institution.':'Esa persona ya pertenece a otra institución.',
-'Only the platform owner can change the link (slug).':'Solo el dueño de la plataforma puede cambiar el link.',
-'Only the platform owner can change the admin email.':'Solo el dueño de la plataforma puede cambiar el email del admin.',
+'Only the TeroClass team can change the link (slug).':'Solo el equipo de TeroClass puede cambiar el link.',
+'Only the TeroClass team can change the admin email.':'Solo el equipo de TeroClass puede cambiar el email del admin.',
 'Invalid link: use 2 to 60 lowercase letters, numbers or hyphens.':'Link inválido: usá de 2 a 60 minúsculas, números o guiones.',
 'You are not allowed to change this.':'No tenés permiso para cambiar esto.','You are not allowed to do this.':'No tenés permiso para hacer esto.',
 'Invalid role.':'Rol inválido.','Invalid email.':'Email inválido.','Email is required.':'El email es obligatorio.','Name is required.':'El nombre es obligatorio.'
@@ -1308,7 +1308,7 @@ const I18N_ES_HIER={
 'AI uses today':'Usos de IA hoy','UTC day':'Día UTC','All accounts':'Todas las cuentas','Change a role or move someone to another unit':'Cambiá un rol o mové a alguien a otra unidad',
 'PH:Search by name, email or institution':'Buscar por nombre, email o institución','Created':'Creada','— No institution —':'— Sin institución —','Move':'Mover',
 'No accounts match your search.':'Ninguna cuenta coincide con la búsqueda.','Moved ✓':'Movido ✓',
-'Only the platform owner can move units.':'Solo el dueño de la plataforma puede mover unidades.','Delete or move its sub-units first.':'Primero borrá o mové sus sub-unidades.',
+'Only the TeroClass team can move units.':'Solo el equipo de TeroClass puede mover unidades.','Delete or move its sub-units first.':'Primero borrá o mové sus sub-unidades.',
 'Move or remove the people in this unit first.':'Primero mové o quitá a las personas de esta unidad.',
 'Invalid learning-approach bars (name 1–60 characters, description up to 300, default 0–100).':'Barras de enfoque inválidas (nombre de 1 a 60 caracteres, descripción hasta 300, valor inicial de 0 a 100).',
 'A unit cannot be moved inside one of its own sub-units.':'Una unidad no se puede mover dentro de una de sus sub-unidades.'
@@ -1872,7 +1872,7 @@ async function saveBranding(){
   if(!created&&adminEmail&&(orgsCache[orgId]?.adminEmail||'').toLowerCase()!==adminEmail.toLowerCase()){
     const {data:inv,error}=await sb.rpc('invite_member',{p_inst:orgId,p_email:adminEmail,p_role:'org_admin'});
     if(error)showToast('Admin: '+error.message,'err');
-    else if(inv==='superadmin')showToast("That's the platform owner account.",'err');
+    else if(inv==='superadmin'||inv==='not_allowed')showToast("That email can't be invited.",'err');
   }
   await fetchOrgs();effCache={};hierCtxFor=undefined;
   if(currentUser.orgId)hierApplyOwnBranding();
@@ -2091,7 +2091,7 @@ async function sendInvite(){
   if(!email){showToast('Enter an email.','err');return;}
   const {data,error}=await sb.rpc('invite_member',{p_inst:orgId,p_email:email,p_role:role});
   if(error){showToast('Error: '+error.message,'err');return;}
-  if(data==='superadmin'){showToast("That's the platform owner account.",'err');return;}
+  if(data==='superadmin'||data==='not_allowed'){showToast("That email can't be invited.",'err');return;} // never reveals the owner account
   closeModal('modal-invite');document.getElementById('invite-email').value='';
   showToast(data==='added'?`${email} added to the institution ✓`:`Invitation saved ✓ — ask ${email} to register with the institution link`,'ok');
 }
@@ -3073,10 +3073,10 @@ function getSkillsPriority(){
 // Database (Postgres) exceptions are written in Spanish → map to English source strings so the i18n layer handles both UIs
 const DB_ERRORS=[
   [/No se puede quitar el último administrador de la institución/,"You can't remove the institution's last admin."],
-  [/No se puede modificar al súper admin/,"The platform owner account can't be changed."],
+  [/No se puede modificar al súper admin/,"This account can't be changed."],
   [/Esa persona ya pertenece a otra institución/,'That person already belongs to another institution.'],
-  [/Solo el súper admin puede cambiar el slug/,'Only the platform owner can change the link (slug).'],
-  [/Solo el súper admin puede cambiar el email del admin/,'Only the platform owner can change the admin email.'],
+  [/Solo el súper admin puede cambiar el slug/,'Only the TeroClass team can change the link (slug).'],
+  [/Solo el súper admin puede cambiar el email del admin/,'Only the TeroClass team can change the admin email.'],
   [/Slug inválido[^]*$/,'Invalid link: use 2 to 60 lowercase letters, numbers or hyphens.'],
   [/No autorizado a cambiar[^]*$/,'You are not allowed to change this.'],
   [/No autorizado/,'You are not allowed to do this.'],[/Rol inválido/,'Invalid role.'],[/Email inválido/,'Invalid email.'],
@@ -3552,7 +3552,7 @@ document.addEventListener('change',e=>{
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal('modal-create-unit');});
 DB_ERRORS.push(
   [/Máximo 3 niveles[^]*$/,'Units can only go 3 levels deep.'],
-  [/Solo el súper admin puede mover unidades/,'Only the platform owner can move units.'],
+  [/Solo el súper admin puede mover unidades/,'Only the TeroClass team can move units.'],
   [/Primero borrá o mové sus sub-unidades/,'Delete or move its sub-units first.'],
   [/Primero mové o quitá a las personas de esta unidad/,'Move or remove the people in this unit first.'],
   [/Configuración de barras inválida[^]*$/,'Invalid learning-approach bars (name 1–60 characters, description up to 300, default 0–100).'],
@@ -3624,7 +3624,7 @@ function billingHtml(s){
   <div class="admin-card bl-buy-card${blocked?' blocked':''}"><div class="admin-card-title">Need more tokens? <span>Used after the monthly allowance</span></div>${buy}</div>
   <div class="admin-grid">
     <div class="admin-card"><div class="admin-card-title">Usage by unit <span>This month</span></div><table class="teachers-table"><thead><tr><th>Unit</th><th>Tokens</th><th>Requests</th></tr></thead><tbody id="bl-units">${units.length?units.map(u=>row(u.name,'',u.used,u.requests)).join(''):empty3}</tbody></table></div>
-    <div class="admin-card"><div class="admin-card-title">Top teachers <span>This month · top 10</span></div><table class="teachers-table"><thead><tr><th>Name</th><th>Tokens</th><th>Requests</th></tr></thead><tbody id="bl-teachers">${teachers.length?teachers.map(t=>row(t.name,t.email&&t.email!==t.name?t.email:'',t.used,t.requests)).join(''):empty3}</tbody></table></div>
+    <div class="admin-card"><div class="admin-card-title">Top teachers <span>This month · top 10</span></div><table class="teachers-table"><thead><tr><th>Name</th><th>Tokens</th><th>Requests</th></tr></thead><tbody id="bl-teachers">${teachers.length?teachers.map(t=>t.masked?row(trText('TeroClass team'),'',t.used,t.requests):row(t.name,t.email&&t.email!==t.name?t.email:'',t.used,t.requests)).join(''):empty3}</tbody></table></div>
   </div>
   <div class="admin-card"><div class="admin-card-title">Purchase requests <span>History</span></div><table class="teachers-table"><thead><tr><th>Date</th><th>Pack</th><th>Price</th><th>Status</th><th>Note</th></tr></thead><tbody id="bl-requests">${reqs.length?reqs.map(r=>`<tr><td data-no-i18n>${esc(fmtDate(r.created_at,{year:'numeric',month:'short',day:'numeric'}))}</td><td data-no-i18n>${esc(fmtTokens(r.pack_tokens))}</td><td data-no-i18n>${esc(fmtMoney(r.price,r.currency))}</td><td>${blStatusBadge(r.status)}</td><td data-no-i18n>${esc(r.note||'')}</td></tr>`).join(''):'<tr><td colspan="5" class="muted-cell">No purchase requests yet.</td></tr>'}</tbody></table></div>`;
 }
@@ -3774,7 +3774,7 @@ document.addEventListener('input',e=>{
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal('modal-budget');});
 ADMIN_PANELS.push('billing');
 DB_ERRORS.push(
-  [/No quedan asientos disponibles en el plan de la institución \((\d+) de (\d+) en uso\)/,"No seats left in the institution's plan ($1 of $2 in use). Ask the platform owner to add seats."],
+  [/No quedan asientos disponibles en el plan de la institución \((\d+) de (\d+) en uso\)/,"No seats left in the institution's plan ($1 of $2 in use). Ask the TeroClass team to add seats."],
   [/Ya hay una solicitud de compra pendiente[^]*$/,'There is already a pending purchase request for this institution.'],
   [/Esta solicitud ya fue resuelta/,'This request was already decided.'],[/Solicitud no encontrada/,'Request not found.'],
   [/La institución de esta solicitud ya no existe/,'The institution of this request no longer exists.'],
@@ -3785,7 +3785,7 @@ DB_ERRORS.push(
 );
 DB_ERRORS.unshift([/No autorizado: solo los admins de la institución madre pueden comprar tokens/,'Only admins of the main institution can buy tokens.']); // before the generic "No autorizado"
 I18N_RULES_ES.push(
-  [/^No seats left in the institution's plan \((\d+) of (\d+) in use\)\. Ask the platform owner to add seats\.$/,'No quedan asientos en el plan de la institución ($1 de $2 en uso). Pedile al dueño de la plataforma que agregue asientos.'],
+  [/^No seats left in the institution's plan \((\d+) of (\d+) in use\)\. Ask the TeroClass team to add seats\.$/,'No quedan asientos en el plan de la institución ($1 de $2 en uso). Pedile al equipo de TeroClass que agregue asientos.'],
   [/^(\d+)% of the monthly allowance$/,'$1% de la asignación mensual']
 );
 const I18N_ES_BILLING={
@@ -3838,6 +3838,11 @@ const I18N_ES_BILLING={
 'This institution has no seats available right now. Ask its admin to free a seat or expand the plan.':'Esta institución no tiene asientos disponibles ahora. Pedile a su admin que libere un asiento o amplíe el plan.'
 };
 Object.assign(I18N_ES,I18N_ES_BILLING);
+// ══ VIEW AS (super admin) + neutral wording for the platform owner ══
+const I18N_ES_VIEWAS={
+'TeroClass team':'Equipo TeroClass'
+};
+Object.assign(I18N_ES,I18N_ES_VIEWAS);
 </script>
 <script src="/live-class.js"></script>
 </body>

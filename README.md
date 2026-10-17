@@ -22,6 +22,20 @@ AI-powered didactic planning platform for teachers.
 
 Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run).
 
+### Platform owner (super admin)
+
+The super admin role lives only in `profiles.role`. The script never promotes anyone by email and never
+demotes an existing super admin, so re-running it keeps the current owner. To grant the role (once, in
+Supabase → SQL Editor; replace the placeholder with the real account email):
+
+```sql
+update public.profiles set role='superadmin' where id=(select id from auth.users where email='OWNER_EMAIL_HERE');
+```
+
+The owner's identity (name, email, id) is never shown to institution admins or teachers: their profile is
+hidden by RLS, and "created by / invited by / uploaded by / decided by" references to a super admin are
+removed or masked (shown as "TeroClass team").
+
 Institutions form a hierarchy of up to 3 levels: main institution › campus/faculty › department/area
 (`institutions.parent_id`). Admins of a unit manage everything below it; sub-units inherit branding,
 master prompt, playbooks and learning-approach bars (`get_effective_config`).

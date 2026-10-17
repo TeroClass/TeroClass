@@ -42,7 +42,7 @@ async function nav(page, sel) {
 
   await step('Registro súper admin', async () => {
     await page.click('.auth-tab:nth-child(2)');
-    await page.fill('#reg-name', 'Ignacio Silveira'); await page.fill('#reg-email', 'im.silveiratrabal@gmail.com'); await page.fill('#reg-password', 'secreto123');
+    await page.fill('#reg-name', 'Owner Test'); await page.fill('#reg-email', 'owner@teroclass.test'); await page.fill('#reg-password', 'secreto123');
     await page.click('#tab-register .auth-btn');
     await page.waitForSelector('#screen-app.active');
     await page.waitForSelector('#panel-superadmin.active');
@@ -107,9 +107,9 @@ async function nav(page, sel) {
 
   await step('Invitar docente', async () => {
     await page.click('.btn-invite');
-    await page.fill('#invite-email', 'im.silveiratrabal@gmail.com');
+    await page.fill('#invite-email', 'owner@teroclass.test');
     await page.click('#modal-invite .btn-modal-save');
-    await page.waitForFunction(() => /platform owner/.test(document.getElementById('toast').textContent));
+    await page.waitForFunction(() => /That email can't be invited\./.test(document.getElementById('toast').textContent));
     await page.fill('#invite-email', 'profe@tec.com');
     await page.click('#modal-invite .btn-modal-save');
     await page.waitForTimeout(300);
@@ -186,7 +186,7 @@ async function nav(page, sel) {
   await step('Salir y entrar de nuevo', async () => {
     await page.evaluate(() => handleLogout());
     await page.waitForSelector('#tab-login', { state: 'visible' });
-    await page.fill('#login-email', 'im.silveiratrabal@gmail.com'); await page.fill('#login-password', 'secreto123');
+    await page.fill('#login-email', 'owner@teroclass.test'); await page.fill('#login-password', 'secreto123');
     await page.click('#tab-login .auth-btn');
     await page.waitForSelector('#screen-app.active');
   });
@@ -194,7 +194,7 @@ async function nav(page, sel) {
   await step('Menú de usuario con nombre, email, rol y salir', async () => {
     await page.click('#user-avatar');
     await page.waitForSelector('#user-menu.open');
-    const t = await page.textContent('#user-menu'); if (!t.includes('im.silveiratrabal@gmail.com') || !/Platform owner/.test(t)) throw new Error(t);
+    const t = await page.textContent('#user-menu'); if (!t.includes('owner@teroclass.test') || !/Platform owner/.test(t)) throw new Error(t);
     await page.click('body', { position: { x: 400, y: 400 } });
     if (await page.isVisible('#user-menu')) throw new Error('el menú no se cierra');
   });
@@ -218,7 +218,7 @@ async function nav(page, sel) {
   await step('Admin: cambiar rol y quitar docente (RPC, doble clic sin confirm())', async () => {
     await page.evaluate(() => handleLogout());
     await page.goto('http://teroclass.test/');
-    await page.fill('#login-email', 'im.silveiratrabal@gmail.com'); await page.fill('#login-password', 'secreto123');
+    await page.fill('#login-email', 'owner@teroclass.test'); await page.fill('#login-password', 'secreto123');
     await page.click('#tab-login .auth-btn');
     await page.waitForSelector('#screen-app.active');
     await nav(page, '#nav-superadmin'); await page.click('.btn-inst-action.primary');

@@ -35,7 +35,8 @@ grant execute on function qh.inst(text), qh.uid(text) to anon, authenticated;
 
 \set OWNER '00000000-0000-0000-0000-000000000001'
 insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at)
-  values (:'OWNER','im.silveiratrabal@gmail.com','{"name":"Owner"}',now()) on conflict do nothing;
+  values (:'OWNER','owner@teroclass.test','{"name":"Owner"}',now()) on conflict do nothing;
+update public.profiles set role='superadmin' where id=:'OWNER'; -- manual grant (README); no auto-promotion by email
 
 -- ===== superadmin creates the main institution =====
 set role authenticated; select qh.as_user(:'OWNER');
