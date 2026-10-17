@@ -12,6 +12,11 @@
 --   registrarse con el email de otra persona invitada y quedarse con su lugar.
 --   El rol de súper admin solo se otorga si el email ya está confirmado o si
 --   todavía no existe ningún súper admin (primer arranque).
+--
+-- JERARQUÍA (3 niveles): institución madre › sede/facultad › cátedra/área.
+--   institutions.parent_id (null = madre). Los admins de una unidad administran también
+--   todo lo que cuelga debajo (clases, personas, invitaciones, playbooks, marca, barras).
+--   Las instituciones que ya existían quedan como madres, sin cambios.
 
 -- ========== TABLAS ==========
 create table if not exists public.institutions (
@@ -67,6 +72,15 @@ alter table public.institutions add column if not exists admin_email text;
 -- Si es true, quien se registra desde /org/<slug> entra directo como docente.
 -- Si es false, solo se entra por invitación.
 alter table public.institutions add column if not exists open_registration boolean not null default true;
+
+-- Jerarquía de hasta 3 niveles: institución madre › sede/facultad › cátedra/área.
+-- parent_id null = institución madre (las instituciones que ya existían quedan así).
+-- No se puede borrar una unidad mientras tenga sub-unidades (on delete restrict).
+alter table public.institutions add column if not exists parent_id uuid references public.institutions(id) on delete restrict;
+create index if not exists institutions_parent_idx on public.institutions (parent_id);
+-- Barras de "enfoque de aprendizaje" de esta unidad (se suman a las heredadas):
+--   {"hidden": ["clave", ...], "custom": [{"key":"c_...","label":"...","tooltip":"...","def":0-100}, ...]}
+alter table public.institutions add column if not exists methodology_config jsonb not null default '{}'::jsonb;
 
 -- Uso diario de IA por usuario (lo maneja solo consume_ai_quota; sin acceso directo)
 create table if not exists public.ai_usage (
@@ -139,11 +153,74 @@ create or replace function public.is_superadmin() returns boolean
 language sql stable security definer set search_path = public as
 $$ select coalesce((select role = 'superadmin' from public.profiles where id = auth.uid()), false) $$;
 
+-- ===== Jerarquía: ayudas =====
+-- Cadena de una unidad: ella misma (depth 0) y sus ancestros (depth 1 = padre, 2 = abuelo).
+create or replace function public.institution_chain(p_id uuid) returns table (id uuid, depth integer)
+language sql stable security definer set search_path = public as
+$$ with recursive up(id, parent_id, depth) as (
+     select i.id, i.parent_id, 0 from public.institutions i where i.id = p_id
+     union all
+     select i.id, i.parent_id, up.depth + 1
+       from public.institutions i join up on i.id = up.parent_id
+      where up.depth < 10)
+   select up.id, up.depth from up order by up.depth desc $$;
+
+-- Ancestros (sin incluirse): padre, abuelo...
+create or replace function public.institution_ancestors(p_id uuid) returns setof uuid
+language sql stable security definer set search_path = public as
+$$ select c.id from public.institution_chain(p_id) c where c.depth > 0 order by c.depth desc $$;
+
+-- Descendientes (sin incluirse): hijos, nietos...
+create or replace function public.institution_descendants(p_id uuid) returns setof uuid
+language sql stable security definer set search_path = public as
+$$ with recursive down(id, depth) as (
+     select i.id, 1 from public.institutions i where i.parent_id = p_id
+     union all
+     select i.id, down.depth + 1
+       from public.institutions i join down on i.parent_id = down.id
+      where down.depth < 10)
+   select down.id from down $$;
+
+-- Nivel: 1 = institución madre, 2 = sede/facultad, 3 = cátedra/área
+create or replace function public.institution_level(p_id uuid) returns integer
+language sql stable security definer set search_path = public as
+$$ select count(*)::int from public.institution_chain(p_id) $$;
+
+-- Cuántos niveles cuelgan debajo (0 = no tiene sub-unidades)
+create or replace function public.institution_height(p_id uuid) returns integer
+language sql stable security definer set search_path = public as
+$$ with recursive down(id, depth) as (
+     select i.id, 1 from public.institutions i where i.parent_id = p_id
+     union all
+     select i.id, down.depth + 1
+       from public.institutions i join down on i.parent_id = down.id
+      where down.depth < 10)
+   select coalesce(max(depth), 0)::int from down $$;
+
+revoke all on function public.institution_chain(uuid) from public, anon;
+revoke all on function public.institution_ancestors(uuid) from public, anon;
+revoke all on function public.institution_descendants(uuid) from public, anon;
+revoke all on function public.institution_level(uuid) from public, anon;
+revoke all on function public.institution_height(uuid) from public, anon;
+grant execute on function public.institution_chain(uuid) to authenticated;
+grant execute on function public.institution_ancestors(uuid) to authenticated;
+grant execute on function public.institution_descendants(uuid) to authenticated;
+grant execute on function public.institution_level(uuid) to authenticated;
+grant execute on function public.institution_height(uuid) to authenticated;
+
+-- ¿Esta unidad es la mía o una de sus superiores? (docentes: leer resúmenes del playbook heredado)
+create or replace function public.in_my_chain(inst uuid) returns boolean
+language sql stable security definer set search_path = public as
+$$ select inst is not null and exists (
+     select 1 from public.institution_chain(public.my_institution()) c where c.id = inst) $$;
+
+-- Admin de una unidad = súper admin, o org_admin de esa unidad o de cualquiera de sus superiores
 create or replace function public.is_admin_of(inst uuid) returns boolean
 language sql stable security definer set search_path = public as
-$$ select public.is_superadmin() or exists (
-     select 1 from public.profiles
-     where id = auth.uid() and role = 'org_admin' and institution_id = inst) $$;
+$$ select public.is_superadmin() or (inst is not null and exists (
+     select 1 from public.profiles p
+      where p.id = auth.uid() and p.role = 'org_admin' and p.institution_id is not null
+        and p.institution_id in (select c.id from public.institution_chain(inst) c))) $$;
 
 -- Al registrarse: crear perfil y aplicar invitación pendiente (o slug abierto).
 -- Todo se basa en auth.users.email (el email real de la cuenta), nunca en profiles.email.
@@ -248,6 +325,58 @@ drop trigger if exists profiles_protect on public.profiles;
 create trigger profiles_protect before update on public.profiles
   for each row execute function public.protect_profile();
 
+-- Barras de enfoque: valida y normaliza methodology_config.
+-- Devuelve siempre {"hidden":[...],"custom":[{key,label,tooltip,def}]}; formato inválido → error.
+create or replace function public.clean_methodology_config(p jsonb) returns jsonb
+language plpgsql immutable set search_path = public as
+$$
+declare
+  v_hidden jsonb := '[]'::jsonb;
+  v_custom jsonb := '[]'::jsonb;
+  v_keys   text[] := '{}';
+  e jsonb; k text; lbl text; tip text; d numeric;
+begin
+  if p is null or p = 'null'::jsonb then return '{"hidden":[],"custom":[]}'::jsonb; end if;
+  if jsonb_typeof(p) <> 'object' then raise exception 'Configuración de barras inválida'; end if;
+  if exists (select 1 from jsonb_object_keys(p) x where x not in ('hidden','custom')) then
+    raise exception 'Configuración de barras inválida';
+  end if;
+  if p ? 'hidden' and p->'hidden' <> 'null'::jsonb then
+    if jsonb_typeof(p->'hidden') <> 'array' or jsonb_array_length(p->'hidden') > 40 then
+      raise exception 'Configuración de barras inválida';
+    end if;
+    for e in select * from jsonb_array_elements(p->'hidden') loop
+      if jsonb_typeof(e) <> 'string' or (e #>> '{}') !~ '^[a-z0-9_]{1,40}$' then
+        raise exception 'Configuración de barras inválida';
+      end if;
+      if not v_hidden @> jsonb_build_array(e) then v_hidden := v_hidden || jsonb_build_array(e); end if;
+    end loop;
+  end if;
+  if p ? 'custom' and p->'custom' <> 'null'::jsonb then
+    if jsonb_typeof(p->'custom') <> 'array' or jsonb_array_length(p->'custom') > 15 then
+      raise exception 'Configuración de barras inválida (máximo 15 barras propias)';
+    end if;
+    for e in select * from jsonb_array_elements(p->'custom') loop
+      if jsonb_typeof(e) <> 'object' then raise exception 'Configuración de barras inválida'; end if;
+      k   := e->>'key';
+      lbl := trim(coalesce(e->>'label', ''));
+      tip := trim(coalesce(e->>'tooltip', ''));
+      if k is null or k !~ '^c_[a-z0-9_]{1,40}$' or k = any(v_keys) then
+        raise exception 'Configuración de barras inválida';
+      end if;
+      if lbl = '' or length(lbl) > 60 or length(tip) > 300 or lbl ~ '[<>]' or tip ~ '[<>]' then
+        raise exception 'Configuración de barras inválida (nombre de 1 a 60 caracteres, descripción hasta 300, sin < >)';
+      end if;
+      if jsonb_typeof(e->'def') <> 'number' then raise exception 'Configuración de barras inválida'; end if;
+      d := (e->>'def')::numeric;
+      if d < 0 or d > 100 or d <> trunc(d) then raise exception 'Configuración de barras inválida (valor inicial de 0 a 100)'; end if;
+      v_keys := v_keys || k;
+      v_custom := v_custom || jsonb_build_array(jsonb_build_object('key', k, 'label', lbl, 'tooltip', tip, 'def', d::int));
+    end loop;
+  end if;
+  return jsonb_build_object('hidden', v_hidden, 'custom', v_custom);
+end $$;
+
 -- Instituciones: slug y email del admin solo los cambia el súper admin.
 -- Un org_admin puede cambiar nombre, colores, tipografía, logo, prompt, documentos
 -- y si el registro por link está abierto.
@@ -268,12 +397,39 @@ begin
        or new.created_at is distinct from old.created_at then
       raise exception 'No autorizado a cambiar este dato';
     end if;
+    if new.parent_id is distinct from old.parent_id then
+      raise exception 'Solo el súper admin puede mover unidades';
+    end if;
   end if;
+  new.methodology_config := public.clean_methodology_config(new.methodology_config);
   return new;
 end $$;
 drop trigger if exists institutions_protect on public.institutions;
 create trigger institutions_protect before insert or update on public.institutions
   for each row execute function public.protect_institution();
+
+-- Jerarquía: máximo 3 niveles y sin ciclos (corre antes que institutions_protect)
+create or replace function public.institutions_hierarchy() returns trigger
+language plpgsql security definer set search_path = public as
+$$
+begin
+  if tg_op = 'UPDATE' and new.parent_id is not distinct from old.parent_id then return new; end if;
+  if new.parent_id is null then return new; end if;
+  if new.parent_id = new.id then
+    raise exception 'Una unidad no puede depender de sí misma';
+  end if;
+  if tg_op = 'UPDATE' and new.parent_id in (select public.institution_descendants(new.id)) then
+    raise exception 'No se puede mover una unidad dentro de una de sus sub-unidades (ciclo)';
+  end if;
+  if public.institution_level(new.parent_id)
+     + 1 + (case when tg_op = 'UPDATE' then public.institution_height(new.id) else 0 end) > 3 then
+    raise exception 'Máximo 3 niveles: institución madre › sede/facultad › cátedra/área';
+  end if;
+  return new;
+end $$;
+drop trigger if exists institutions_hierarchy on public.institutions;
+create trigger institutions_hierarchy before insert or update of parent_id on public.institutions
+  for each row execute function public.institutions_hierarchy();
 
 -- Planificaciones: si la persona cambió de institución (o dejó de tener una), al
 -- editar una planificación vieja esta pasa a su institución actual, así la regla
@@ -303,7 +459,7 @@ alter table public.ai_usage     enable row level security;
 -- Instituciones
 drop policy if exists inst_select on public.institutions;
 create policy inst_select on public.institutions for select
-  using (public.is_superadmin() or id = public.my_institution());
+  using (public.is_superadmin() or id = public.my_institution() or public.is_admin_of(id));
 drop policy if exists inst_insert on public.institutions;
 create policy inst_insert on public.institutions for insert
   with check (public.is_superadmin());
@@ -394,19 +550,121 @@ create policy logos_delete on storage.objects for delete to authenticated
 
 -- ========== FUNCIONES PARA LA APP ==========
 -- Marca pública de una institución (para la pantalla de login /org/<slug>)
+-- Marca efectiva: si una sub-unidad no tiene color / fondo / tipografía / logo propios,
+-- usa los de la unidad superior más cercana que sí los tenga.
+create or replace function public.institution_branding(p_id uuid) returns json
+language sql stable security definer set search_path = public as
+$$ select json_build_object(
+     'name',     (select i.name from public.institutions i where i.id = p_id),
+     'color',    coalesce((select i.color    from public.institution_chain(p_id) c join public.institutions i on i.id = c.id where i.color    is not null order by c.depth limit 1), '#7c5cbf'),
+     'bg_color', coalesce((select i.bg_color from public.institution_chain(p_id) c join public.institutions i on i.id = c.id where i.bg_color is not null order by c.depth limit 1), '#f0eef8'),
+     'font',     coalesce((select i.font     from public.institution_chain(p_id) c join public.institutions i on i.id = c.id where i.font     is not null order by c.depth limit 1), 'Inter'),
+     'logo_url', (select i.logo_url from public.institution_chain(p_id) c join public.institutions i on i.id = c.id where i.logo_url is not null order by c.depth limit 1),
+     'path',     (select string_agg(i.name, ' › ' order by c.depth desc) from public.institution_chain(p_id) c join public.institutions i on i.id = c.id)) $$;
+revoke all on function public.institution_branding(uuid) from public, anon, authenticated;
+
 drop function if exists public.get_org_branding(text);
 create function public.get_org_branding(p_slug text)
-returns table (name text, slug text, color text, bg_color text, font text, logo_url text, open_registration boolean)
+returns table (name text, slug text, color text, bg_color text, font text, logo_url text, open_registration boolean, path text)
 language sql stable security definer set search_path = public as
-$$ select name, slug, color, bg_color, font, logo_url, open_registration
-     from public.institutions where slug = lower(trim(p_slug)) limit 1 $$;
+$$ select i.name, i.slug, b->>'color', b->>'bg_color', b->>'font', b->>'logo_url', i.open_registration, b->>'path'
+     from public.institutions i
+     cross join lateral (select public.institution_branding(i.id)::jsonb as b) x
+    where i.slug = lower(trim(p_slug)) limit 1 $$;
 grant execute on function public.get_org_branding(text) to anon, authenticated;
+
+-- Configuración efectiva de una unidad (de la madre hacia abajo). Por defecto, la mía.
+-- Devuelve {chain:[{id,name,level,parent_id,slug,master_prompt,methodology}],
+--           master_prompts:[{id,name,prompt}], methodology:{hidden,custom}, branding:{...}}
+-- methodology efectiva: barras base sin "hidden" + "custom" (de la madre hacia abajo, cada nivel
+-- primero oculta y después agrega). La pueden pedir: súper admin, sus admins y quien pertenece a ella.
+create or replace function public.get_effective_config(p_inst uuid default null) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare
+  v_inst   uuid := coalesce(p_inst, public.my_institution());
+  v_chain  jsonb := '[]'::jsonb;
+  v_mp     jsonb := '[]'::jsonb;
+  v_hidden jsonb := '[]'::jsonb;
+  v_custom jsonb := '[]'::jsonb;
+  r record; cfg jsonb; e jsonb; lvl int := 0;
+begin
+  if v_inst is null then return null; end if;
+  if not exists (select 1 from public.institutions where id = v_inst) then raise exception 'No autorizado'; end if;
+  if not (public.is_superadmin() or v_inst = public.my_institution() or public.is_admin_of(v_inst)) then
+    raise exception 'No autorizado';
+  end if;
+  for r in select i.id, i.name, i.slug, i.parent_id, i.master_prompt, i.methodology_config
+             from public.institution_chain(v_inst) c join public.institutions i on i.id = c.id
+            order by c.depth desc loop
+    lvl := lvl + 1;
+    cfg := public.clean_methodology_config(r.methodology_config);
+    v_chain := v_chain || jsonb_build_array(jsonb_build_object(
+      'id', r.id, 'name', r.name, 'slug', r.slug, 'level', lvl, 'parent_id', r.parent_id,
+      'master_prompt', coalesce(r.master_prompt, ''), 'methodology', cfg));
+    if trim(coalesce(r.master_prompt, '')) <> '' then
+      v_mp := v_mp || jsonb_build_array(jsonb_build_object('id', r.id, 'name', r.name, 'prompt', r.master_prompt));
+    end if;
+    for e in select * from jsonb_array_elements(cfg->'hidden') loop
+      if not v_hidden @> jsonb_build_array(e) then v_hidden := v_hidden || jsonb_build_array(e); end if;
+      select coalesce(jsonb_agg(x), '[]'::jsonb) into v_custom
+        from jsonb_array_elements(v_custom) x where x->>'key' <> (e #>> '{}');
+    end loop;
+    for e in select * from jsonb_array_elements(cfg->'custom') loop
+      select coalesce(jsonb_agg(x), '[]'::jsonb) into v_custom
+        from jsonb_array_elements(v_custom) x where x->>'key' <> e->>'key';
+      v_custom := v_custom || jsonb_build_array(e);
+      v_hidden := v_hidden - (e->>'key');
+    end loop;
+  end loop;
+  return json_build_object(
+    'chain', v_chain,
+    'master_prompts', v_mp,
+    'methodology', jsonb_build_object('hidden', v_hidden, 'custom', v_custom),
+    'branding', public.institution_branding(v_inst));
+end $$;
+revoke all on function public.get_effective_config(uuid) from public, anon;
+grant execute on function public.get_effective_config(uuid) to authenticated;
+
+-- Súper admin: totales de la plataforma (incluye usos de IA de hoy, UTC)
+create or replace function public.platform_stats() returns json
+language plpgsql stable security definer set search_path = public as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  return json_build_object(
+    'institutions', (select count(*) from public.institutions),
+    'top_level',    (select count(*) from public.institutions where parent_id is null),
+    'users',        (select count(*) from public.profiles),
+    'teachers',     (select count(*) from public.profiles where role = 'teacher'),
+    'admins',       (select count(*) from public.profiles where role = 'org_admin'),
+    'classes',      (select count(*) from public.plannings),
+    'ai_today',     (select coalesce(sum(count), 0) from public.ai_usage where day = (now() at time zone 'utc')::date),
+    'ai_users_today', (select count(*) from public.ai_usage where day = (now() at time zone 'utc')::date and count > 0));
+end $$;
+revoke all on function public.platform_stats() from public, anon;
+grant execute on function public.platform_stats() to authenticated;
 
 -- Cantidad de org_admins de una institución (uso interno)
 create or replace function public.org_admin_count(p_inst uuid) returns integer
 language sql stable security definer set search_path = public as
 $$ select count(*)::int from public.profiles where institution_id = p_inst and role = 'org_admin' $$;
 revoke all on function public.org_admin_count(uuid) from public, anon, authenticated;
+
+-- Una institución madre no puede quedarse sin admin. Las sub-unidades sí (las siguen
+-- administrando los admins de las unidades superiores). Uso interno.
+create or replace function public.assert_not_last_admin(p_inst uuid) returns void
+language plpgsql security definer set search_path = public as
+$$
+begin
+  if p_inst is null then return; end if;
+  if exists (select 1 from public.institutions where id = p_inst and parent_id is not null) then return; end if;
+  perform 1 from public.profiles where institution_id = p_inst and role = 'org_admin' for update;
+  if public.org_admin_count(p_inst) <= 1 then
+    raise exception 'No se puede quitar el último administrador de la institución';
+  end if;
+end $$;
+revoke all on function public.assert_not_last_admin(uuid) from public, anon, authenticated;
 
 -- Sumar a alguien a una institución (si ya tiene cuenta, directo; si no, invitación).
 -- Devuelve 'added' | 'invited' | 'superadmin' (el dueño de la plataforma no se toca).
@@ -431,14 +689,13 @@ begin
 
   if prof.id is not null then
     if prof.role = 'superadmin' then return 'superadmin'; end if;
-    if prof.institution_id is not null and prof.institution_id <> p_inst then
+    -- Se puede mover a alguien entre unidades que uno administra; si está en otra, no.
+    if prof.institution_id is not null and prof.institution_id <> p_inst
+       and not public.is_admin_of(prof.institution_id) then
       raise exception 'Esa persona ya pertenece a otra institución';
     end if;
-    if prof.role = 'org_admin' and prof.institution_id = p_inst and p_role <> 'org_admin' then
-      perform 1 from public.profiles where institution_id = p_inst and role = 'org_admin' for update;
-      if public.org_admin_count(p_inst) <= 1 then
-        raise exception 'No se puede quitar el último administrador de la institución';
-      end if;
+    if prof.role = 'org_admin' and (prof.institution_id is distinct from p_inst or p_role <> 'org_admin') then
+      perform public.assert_not_last_admin(prof.institution_id);
     end if;
     update public.profiles set institution_id = p_inst, role = p_role where id = prof.id;
     return 'added';
@@ -467,10 +724,7 @@ begin
   end if;
   if t.role = 'superadmin' then raise exception 'No se puede modificar al súper admin'; end if;
   if t.role = 'org_admin' and p_role <> 'org_admin' then
-    perform 1 from public.profiles where institution_id = t.institution_id and role = 'org_admin' for update;
-    if public.org_admin_count(t.institution_id) <= 1 then
-      raise exception 'No se puede quitar el último administrador de la institución';
-    end if;
+    perform public.assert_not_last_admin(t.institution_id);
   end if;
   update public.profiles set role = p_role where id = p_user;
   return p_role;
@@ -491,10 +745,7 @@ begin
   end if;
   if t.role = 'superadmin' then raise exception 'No se puede modificar al súper admin'; end if;
   if t.role = 'org_admin' then
-    perform 1 from public.profiles where institution_id = t.institution_id and role = 'org_admin' for update;
-    if public.org_admin_count(t.institution_id) <= 1 then
-      raise exception 'No se puede quitar el último administrador de la institución';
-    end if;
+    perform public.assert_not_last_admin(t.institution_id);
   end if;
   update public.profiles set institution_id = null, role = 'teacher' where id = p_user;
   return 'removed';
@@ -502,8 +753,13 @@ end $$;
 revoke all on function public.remove_member(uuid) from public, anon;
 grant execute on function public.remove_member(uuid) to authenticated;
 
--- Crear institución (solo super admin) y asignar su admin
-create or replace function public.create_institution(p_name text, p_slug text, p_admin_email text, p_color text default '#7c5cbf')
+-- Crear institución o sub-unidad y (opcional) invitar a su admin.
+--   p_parent null → institución madre (solo súper admin).
+--   p_parent = una unidad que administrás → sub-unidad (máximo 3 niveles). Sin color propio
+--   (null) hereda la marca de la unidad superior.
+drop function if exists public.create_institution(text, text, text, text);
+create or replace function public.create_institution(p_name text, p_slug text, p_admin_email text default '',
+                                                     p_color text default null, p_parent uuid default null)
 returns uuid
 language plpgsql security definer set search_path = public as
 $$
@@ -511,22 +767,88 @@ declare
   new_id  uuid;
   v_slug  text := lower(trim(coalesce(p_slug, '')));
   v_email text := lower(trim(coalesce(p_admin_email, '')));
+  v_color text := nullif(trim(coalesce(p_color, '')), '');
 begin
-  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_parent is null then
+    if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  else
+    if not exists (select 1 from public.institutions where id = p_parent) or not public.is_admin_of(p_parent) then
+      raise exception 'No autorizado';
+    end if;
+    if public.institution_level(p_parent) >= 3 then
+      raise exception 'Máximo 3 niveles: institución madre › sede/facultad › cátedra/área';
+    end if;
+  end if;
   if trim(coalesce(p_name, '')) = '' then raise exception 'Nombre requerido'; end if;
   if v_slug !~ '^[a-z0-9-]{2,60}$' then
     raise exception 'Slug inválido: usa de 2 a 60 letras minúsculas, números o guiones';
   end if;
-  insert into public.institutions (name, slug, color, admin_email, created_by)
-  values (trim(p_name), v_slug, coalesce(nullif(trim(p_color), ''), '#7c5cbf'), nullif(v_email, ''), auth.uid())
-  returning id into new_id;
+  if p_parent is null then
+    insert into public.institutions (name, slug, color, admin_email, created_by)
+    values (left(trim(p_name), 120), v_slug, coalesce(v_color, '#7c5cbf'), nullif(v_email, ''), auth.uid())
+    returning id into new_id;
+  else
+    insert into public.institutions (name, slug, color, bg_color, font, admin_email, created_by, parent_id)
+    values (left(trim(p_name), 120), v_slug, v_color, null, null, nullif(v_email, ''), auth.uid(), p_parent)
+    returning id into new_id;
+  end if;
   if v_email <> '' then
     perform public.invite_member(new_id, v_email, 'org_admin');
   end if;
   return new_id;
 end $$;
-revoke all on function public.create_institution(text, text, text, text) from public, anon;
-grant execute on function public.create_institution(text, text, text, text) to authenticated;
+revoke all on function public.create_institution(text, text, text, text, uuid) from public, anon;
+grant execute on function public.create_institution(text, text, text, text, uuid) to authenticated;
+
+-- Borrar una sub-unidad vacía (sin sub-unidades ni personas). La puede borrar el súper
+-- admin o un admin de una unidad superior. Devuelve 'deleted'.
+create or replace function public.delete_institution(p_inst uuid) returns text
+language plpgsql security definer set search_path = public as
+$$
+declare v_parent uuid; v_found boolean;
+begin
+  select true, parent_id into v_found, v_parent from public.institutions where id = p_inst;
+  if v_found is null then raise exception 'No autorizado'; end if;
+  if not (public.is_superadmin() or (v_parent is not null and public.is_admin_of(v_parent))) then
+    raise exception 'No autorizado';
+  end if;
+  if exists (select 1 from public.institutions where parent_id = p_inst) then
+    raise exception 'Primero borrá o mové sus sub-unidades';
+  end if;
+  if exists (select 1 from public.profiles where institution_id = p_inst) then
+    raise exception 'Primero mové o quitá a las personas de esta unidad';
+  end if;
+  delete from public.institutions where id = p_inst;
+  return 'deleted';
+end $$;
+revoke all on function public.delete_institution(uuid) from public, anon;
+grant execute on function public.delete_institution(uuid) to authenticated;
+
+-- Súper admin: mover a una persona a otra unidad (o dejarla sin institución con null).
+-- Mantiene su rol (sin institución queda como docente). Devuelve 'moved'.
+create or replace function public.admin_move_member(p_user uuid, p_inst uuid)
+returns text
+language plpgsql security definer set search_path = public as
+$$
+declare t public.profiles%rowtype;
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  select * into t from public.profiles where id = p_user;
+  if t.id is null then raise exception 'No autorizado'; end if;
+  if t.role = 'superadmin' then raise exception 'No se puede modificar al súper admin'; end if;
+  if p_inst is not null and not exists (select 1 from public.institutions where id = p_inst) then
+    raise exception 'No autorizado';
+  end if;
+  if t.institution_id is not distinct from p_inst then return 'moved'; end if;
+  if t.role = 'org_admin' then perform public.assert_not_last_admin(t.institution_id); end if;
+  update public.profiles
+     set institution_id = p_inst,
+         role = case when p_inst is null then 'teacher' else role end
+   where id = p_user;
+  return 'moved';
+end $$;
+revoke all on function public.admin_move_member(uuid, uuid) from public, anon;
+grant execute on function public.admin_move_member(uuid, uuid) to authenticated;
 
 -- Límite diario de IA. Suma 1 uso y devuelve {"allowed":bool,"used":int,"limit":int}.
 -- Límites por día (UTC): súper admin 500, org_admin 150, docente con institución 60,
@@ -610,7 +932,7 @@ create index if not exists inst_docs_inst_idx on public.institution_documents (i
 alter table public.institution_documents enable row level security;
 drop policy if exists idoc_select on public.institution_documents;
 create policy idoc_select on public.institution_documents for select
-  using (institution_id = public.my_institution() or public.is_admin_of(institution_id));
+  using (public.in_my_chain(institution_id) or public.is_admin_of(institution_id));
 drop policy if exists idoc_insert on public.institution_documents;
 create policy idoc_insert on public.institution_documents for insert
   with check (public.is_admin_of(institution_id));
