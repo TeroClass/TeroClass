@@ -75,14 +75,16 @@ async function handleSupabase(route) {
   const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
   const ctx = await browser.newContext();
   const errors = [];
-  let aiCall = null;
+  let aiCall = null; let studentCalls = 0;
   await ctx.route('https://cdn.jsdelivr.net/**', r => r.fulfill({ contentType: 'application/javascript', body: SB_JS }));
   await ctx.route(SB + '/**', handleSupabase);
   await ctx.route('https://fonts.googleapis.com/**', r => r.fulfill({ body: '' }));
   await ctx.route('http://teroclass.test/**', async r => {
     const u = new URL(r.request().url());
     if (u.pathname === '/api/generate') {
-      aiCall = { auth: r.request().headers()['authorization'], body: JSON.parse(r.request().postData()) };
+      const b = JSON.parse(r.request().postData());
+      if (JSON.stringify(b).includes('STUDENT HANDOUT')) { studentCalls++; return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'Chemical reactions\nToday\'s goals:\n- You will be able to balance equations\nCard 1: H2 + O2 → ________' } }] }) }); }
+      aiCall = { auth: r.request().headers()['authorization'], body: b };
       return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'Week 1 - Class 1 - Test - Small talk\nAttendance:\n\nToday\'s Objectives:\n- Practice greetings <img src=x onerror=window.__xss=1>\n- Ask questions' } }] }) });
     }
     return r.fulfill({ contentType: 'text/html', body: HTML });
@@ -145,8 +147,14 @@ async function handleSupabase(route) {
     if (!aiCall.body.messages[1].content.includes('NOT a language class')) throw new Error('no respeta la disciplina');
     if (!aiCall.body.messages[1].content.includes('GOLDEN RULE')) throw new Error('falta materiales listos');
     if (JSON.stringify(aiCall.body).includes('apiKey')) throw new Error('se envía apiKey desde el navegador');
-    await page.click('.cls-doc-actions .btn-out');
+    await page.waitForFunction(() => document.getElementById('lp-doc-student')?.innerText.includes('You will be able'));
+    if (studentCalls !== 1) throw new Error('no se pidió el material del alumno');
+    await page.click('#tab-student');
+    if (!(await page.isVisible('#lp-doc-student')) || await page.isVisible('#lp-doc')) throw new Error('pestañas no cambian');
+    await page.click('#tab-teacher');
+    await page.click('#btn-save');
     await page.waitForTimeout(400);
+    if (!db.plannings[0]?.data?.student?.includes('You will be able')) throw new Error('no se guardó el material del alumno');
     if (db.plannings.length !== 1 || !db.plannings[0].data.content.includes('greetings')) throw new Error('clase no guardada con contenido');
     if (await page.evaluate(() => window.__xss)) throw new Error('HTML del modelo se ejecutó');
   });
@@ -164,8 +172,9 @@ async function handleSupabase(route) {
     await page.waitForSelector('#lp-doc');
     const txt = await page.textContent('#lp-doc'); if (!txt.includes('greetings')) throw new Error('contenido no cargado');
     await page.evaluate(() => { document.getElementById('lp-doc').insertAdjacentHTML('beforeend', '<div class="cls-line">Extra note</div>'); });
-    await page.click('.cls-doc-actions .btn-out');
+    await page.click('#btn-save');
     await page.waitForTimeout(400);
+    if (studentCalls !== 1) throw new Error('regeneró el material del alumno al abrir');
     if (db.plannings.length !== 1) throw new Error('se duplicó: ' + db.plannings.length);
     if (!db.plannings[0].data.content.includes('Extra note')) throw new Error('no se guardó la edición');
   });

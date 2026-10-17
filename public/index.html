@@ -375,6 +375,9 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 .lp-methodology{border-left:3px solid #e2dff0;background:var(--purple-tag-bg)!important}
 
 /* ── CLASS DOCUMENT ── */
+.doc-tabs{display:flex;gap:4px;background:var(--white);border:1.5px solid var(--border);border-radius:9px;padding:3px;margin-right:6px}
+.doc-tab{border:none;background:transparent;padding:5px 11px;border-radius:6px;font-size:12px;font-weight:600;color:var(--ink-muted);cursor:pointer;font-family:'Inter',sans-serif}
+.doc-tab.active{background:var(--brand-primary);color:#fff}
 .cls-doc-wrapper{max-width:760px;margin:0 auto;padding-bottom:40px}
 .cls-doc-actions{display:flex;gap:8px;margin:-24px -4px 14px;padding:14px 4px 10px;flex-wrap:wrap;position:sticky;top:-24px;z-index:5;background:var(--brand-bg,#f0eef8)}
 .cls-doc{background:var(--white);border:1px solid var(--border);border-radius:var(--radius-lg);padding:36px 40px;font-family:'Inter',sans-serif;outline:none;box-shadow:0 2px 20px rgba(0,0,0,.05);min-height:400px;line-height:1.8;cursor:text}
@@ -1452,54 +1455,122 @@ FORMAT (adapt section contents to the discipline):
 Tone: warm, specific, human, with some emojis. DO NOT use ** or # for formatting. Use plain text, dashes, emojis and the → arrow.`;
 }
 
-async function callAI(params){
+async function callAIMessages(messages){
   const {data:{session}}=await sb.auth.getSession();
   if(!session)throw new Error('Your session expired. Please sign in again.');
   const res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
-    body:JSON.stringify({messages:[{role:'system',content:buildSystemPrompt()},{role:'user',content:buildUserPrompt(params)}],max_tokens:6000,temperature:.7})});
+    body:JSON.stringify({messages,temperature:.7})});
   if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e?.error||`HTTP ${res.status}`);}
   const data=await res.json();return data.choices[0].message.content;
 }
+async function callAI(params){
+  return callAIMessages([{role:'system',content:buildSystemPrompt()},{role:'user',content:buildUserPrompt(params)}]);
+}
 
+function formatDoc(text){return (text||'').split('\n').map((l,i)=>fmtLine(l,i)).join('');}
+function fmtLine(line,idx){
+  const raw=line.trim();
+  const t=esc(raw);
+  if(!raw)return '<div style="height:7px"></div>';
+  if(idx===0)return `<div class="cls-title">${t}</div>`;
+  if(/^attendance:/i.test(raw))return `<div class="cls-attendance">${t}</div>`;
+  if(/^(today.s obj|vocabulary|warm.up|optional|main activit|activity \d|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback|methodology applied|key concepts|materials|answer key|solutions|card \d|worksheet)/i.test(raw))return `<div class="cls-section-head">${t}</div>`;
+  if(raw.startsWith('\u26A1'))return `<div class="cls-challenge">${t}</div>`;
+  if(/^[-•]/.test(raw))return `<div class="cls-bullet">${esc(raw.replace(/^[-•]\s*/,''))}</div>`;
+  if(raw.startsWith('"')||raw.startsWith('\u201C'))return `<div class="cls-quote">${t}</div>`;
+  if(raw.includes('\u2192')){const p=raw.split('\u2192');return `<div class="cls-correction"><span class="cls-wrong">${esc(p[0].trim())}</span> <span class="cls-arrow">→</span> <span class="cls-right">${esc(p.slice(1).join('→').trim())}</span></div>`;}
+  if(raw.match(/https?:\/\//)){const linked=t.replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener" class="cls-link">$1</a>');return `<div class="cls-line">${linked}</div>`;}
+  return `<div class="cls-line">${t}</div>`;
+}
+
+
+let activeDocTab='teacher';
 function displayResult(text,params,opts={}){
   document.getElementById('ai-loading').classList.remove('visible');
   document.getElementById('ai-empty').style.display='none';
   const firstLine=text.split('\n')[0].trim();
-  currentResult={id:opts.id||null,title:opts.title||firstLine||(params?.prompt||'').substring(0,60)||'Class',text,params:params||{},date:opts.date||new Date().toISOString()};
-
-  function fmtLine(line,idx){
-    const raw=line.trim();
-    const t=esc(raw);
-    if(!raw)return '<div style="height:7px"></div>';
-    if(idx===0)return `<div class="cls-title">${t}</div>`;
-    if(/^attendance:/i.test(raw))return `<div class="cls-attendance">${t}</div>`;
-    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|activity \d|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback|methodology applied|key concepts|materials|answer key|solutions|card \d|worksheet)/i.test(raw))return `<div class="cls-section-head">${t}</div>`;
-    if(raw.startsWith('\u26A1'))return `<div class="cls-challenge">${t}</div>`;
-    if(/^[-•]/.test(raw))return `<div class="cls-bullet">${esc(raw.replace(/^[-•]\s*/,''))}</div>`;
-    if(raw.startsWith('"')||raw.startsWith('\u201C'))return `<div class="cls-quote">${t}</div>`;
-    if(raw.includes('\u2192')){const p=raw.split('\u2192');return `<div class="cls-correction"><span class="cls-wrong">${esc(p[0].trim())}</span> <span class="cls-arrow">→</span> <span class="cls-right">${esc(p.slice(1).join('→').trim())}</span></div>`;}
-    if(raw.match(/https?:\/\//)){const linked=t.replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener" class="cls-link">$1</a>');return `<div class="cls-line">${linked}</div>`;}
-    return `<div class="cls-line">${t}</div>`;
-  }
-
-  const html=text.split('\n').map((l,i)=>fmtLine(l,i)).join('');
-
+  currentResult={id:opts.id||null,title:opts.title||firstLine||(params?.prompt||'').substring(0,60)||'Class',text,student:opts.student||'',params:params||{},date:opts.date||new Date().toISOString()};
+  activeDocTab='teacher';
   const out=document.getElementById('ai-output');
   out.innerHTML=`<div class="cls-doc-wrapper">
     <div class="cls-doc-actions">
-      <button class="btn-out" onclick="savePlanning()">💾 ${currentResult.id?'Save changes':'Save'}</button>
+      <div class="doc-tabs">
+        <button class="doc-tab active" id="tab-teacher" onclick="switchDocTab('teacher')">👩‍🏫 Teacher guide</button>
+        <button class="doc-tab" id="tab-student" onclick="switchDocTab('student')">🎒 Student handout</button>
+      </div>
+      <button class="btn-out" id="btn-save" onclick="savePlanning()">💾 ${currentResult.id?'Save changes':'Save'}</button>
       <button class="btn-out" onclick="generatePlanning()">↺ Regenerate</button>
       <button class="btn-out" onclick="copyForGoogleDocs()" id="btn-copy">📋 Copy for Google Docs</button>
       <button class="btn-out dark" onclick="exportPDF()">⬇ Export PDF</button>
     </div>
-    <div class="cls-doc" id="lp-doc" contenteditable="true">${html}</div>
+    <div class="cls-doc" id="lp-doc" contenteditable="true">${formatDoc(text)}</div>
+    <div class="cls-doc" id="lp-doc-student" contenteditable="true" style="display:none"></div>
   </div>`;
   out.classList.add('visible');
+  if(currentResult.student)renderStudent(currentResult.student);
+  else generateStudentHandout();
   if(!opts.silent)showToast('Class plan ready ✓','ok');
 }
+function setStudentPlaceholder(msg,withRetry){
+  const el=document.getElementById('lp-doc-student');if(!el)return;
+  el.setAttribute('contenteditable','false');
+  el.innerHTML=`<div class="cls-line" style="color:var(--ink-muted)">${esc(msg)}</div>`+(withRetry?`<button class="btn-out" style="margin-top:10px" onclick="generateStudentHandout()">↺ Try again</button>`:'');
+}
+function renderStudent(text){
+  const el=document.getElementById('lp-doc-student');if(!el)return;
+  el.setAttribute('contenteditable','true');el.innerHTML=formatDoc(text);
+}
+function switchDocTab(tab){
+  activeDocTab=tab;
+  document.getElementById('tab-teacher').classList.toggle('active',tab==='teacher');
+  document.getElementById('tab-student').classList.toggle('active',tab==='student');
+  document.getElementById('lp-doc').style.display=tab==='teacher'?'block':'none';
+  document.getElementById('lp-doc-student').style.display=tab==='student'?'block':'none';
+}
+function getActiveDoc(){return document.getElementById(activeDocTab==='student'?'lp-doc-student':'lp-doc');}
+let studentGenToken=0;
+async function generateStudentHandout(){
+  if(!currentResult)return;
+  const myToken=++studentGenToken;const forResult=currentResult;
+  setStudentPlaceholder('⏳ Preparing the student handout (no answers, no teacher notes)…');
+  try{
+    const teacherText=(document.getElementById('lp-doc')?.innerText||forResult.text||'').trim();
+    const txt=await callAIMessages([
+      {role:'system',content:'You turn teacher lesson plans into clean, student-facing class materials. You never reveal answers.'},
+      {role:'user',content:buildStudentPrompt(teacherText,forResult.params)}
+    ]);
+    if(myToken!==studentGenToken||currentResult!==forResult)return;
+    forResult.student=txt;renderStudent(txt);
+    if(forResult.id)await sb.from('plannings').update({data:{params:forResult.params,content:forResult.text,student:txt}}).eq('id',forResult.id);
+  }catch(err){
+    if(myToken!==studentGenToken)return;
+    setStudentPlaceholder('Could not prepare the student handout: '+err.message,true);
+  }
+}
+function buildStudentPrompt(teacherText,p){
+  return `Below is a TEACHER GUIDE. Create the STUDENT HANDOUT for the same class: the document students receive (printed or projected), ready to use.
+Write it in ${p?.language||'the same language as the guide'}, addressed directly to the students, friendly and clear.
 
+INCLUDE:
+- First line: the class title (topic). No "Attendance" line.
+- "Today's goals": the objectives rewritten for students ("You will be able to…").
+- Key concepts: terms with student-friendly definitions (only if the guide has them).
+- Each activity in order, with a short title and clear instructions for students (what to do, with whom, how long).
+- ALL student materials COMPLETE: every card, role card, worksheet, text, problem, question, game board and exit ticket, with blank lines (________) where students write.
+
+NEVER INCLUDE:
+- Answers, answer keys, solutions, expected responses, correct options or worked results.
+- Teacher notes, teaching tips, methodology/pedagogy sections ("Methodology applied"), grading info, or materials meant only for the teacher.
+
+FORMAT: plain text, dashes, emojis allowed, the → arrow allowed. DO NOT use ** or #.
+
+TEACHER GUIDE:
+"""
+${teacherText}
+"""`;
+}
 function copyForGoogleDocs(){
-  const doc=document.getElementById('lp-doc');
+  const doc=getActiveDoc();
   if(!doc)return;
   // Use innerHTML selection so Google Docs preserves some formatting
   const range=document.createRange();
@@ -1524,29 +1595,31 @@ function copyForGoogleDocs(){
 async function loadPlannings(){
   const {data,error}=await sb.from('plannings').select('*').eq('owner_id',currentUser.id).order('created_at',{ascending:false});
   if(error){showToast('Error loading classes: '+error.message,'err');plannings=[];return;}
-  plannings=(data||[]).map(r=>({id:r.id,title:r.title,params:r.data?.params||{},content:r.data?.content||'',date:r.created_at}));
+  plannings=(data||[]).map(r=>({id:r.id,title:r.title,params:r.data?.params||{},content:r.data?.content||'',student:r.data?.student||'',date:r.created_at}));
 }
 async function savePlanning(){
   if(!currentResult){showToast('Nothing to save yet.','err');return;}
   const doc=document.getElementById('lp-doc');
   const content=(doc?.innerText||currentResult.text||'').trim();
+  const sdoc=document.getElementById('lp-doc-student');
+  const student=(currentResult.student&&sdoc&&sdoc.getAttribute('contenteditable')==='true')?sdoc.innerText.trim():(currentResult.student||'');
   const title=(content.split('\n')[0]||currentResult.title||'').trim().substring(0,200);
   let error;
   if(currentResult.id){
-    ({error}=await sb.from('plannings').update({title,data:{params:currentResult.params,content}}).eq('id',currentResult.id));
+    ({error}=await sb.from('plannings').update({title,data:{params:currentResult.params,content,student}}).eq('id',currentResult.id));
   }else{
-    const r=await sb.from('plannings').insert({owner_id:currentUser.id,institution_id:currentUser.orgId||null,title,data:{params:currentResult.params,content}}).select('id').single();
+    const r=await sb.from('plannings').insert({owner_id:currentUser.id,institution_id:currentUser.orgId||null,title,data:{params:currentResult.params,content,student}}).select('id').single();
     error=r.error;if(!error)currentResult.id=r.data.id;
   }
   if(error){showToast('Error saving: '+error.message,'err');return;}
-  currentResult.title=title;currentResult.text=content;
-  const btn=document.querySelector('.cls-doc-actions .btn-out');if(btn)btn.textContent='💾 Save changes';
+  currentResult.title=title;currentResult.text=content;currentResult.student=student;
+  const btn=document.getElementById('btn-save');if(btn)btn.textContent='💾 Save changes';
   await loadPlannings();renderClasses();showToast('Saved ✓','ok');
 }
 function openClass(id){
   const p=plannings.find(x=>x.id===id);if(!p)return;
   showPanel('ai');
-  displayResult(p.content||p.title||'',p.params,{id:p.id,title:p.title,date:p.date,silent:true});
+  displayResult(p.content||p.title||'',p.params,{id:p.id,title:p.title,date:p.date,student:p.student,silent:true});
 }
 function renderClasses(){
   const grid=document.getElementById('classes-grid');if(!grid)return;
@@ -1556,7 +1629,7 @@ function renderClasses(){
 
 // ══ EXPORT ══
 function exportPDF(){
-  const doc=document.getElementById('lp-doc');
+  const doc=getActiveDoc();
   if(!doc){showToast('Generate a lesson plan first.','err');return;}
   const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
   const lines=(doc.innerText||'').split('\n');
