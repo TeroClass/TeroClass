@@ -1,6 +1,8 @@
 // Supabase simulado para las pruebas e2e (no toca datos reales).
 // Incluye las RPC nuevas: set_member_role, remove_member, get_document_content, y open_registration en institutions.
 // Jerarquía: parent_id, methodology_config, get_effective_config, delete_institution, admin_move_member, platform_stats.
+// Plan y consumo: get_billing_summary, request_token_pack, list_purchase_requests, decide_purchase_request,
+// set_institution_plan, update_platform_settings, platform_billing_overview, get_seat_status (+ seats in invite_member / get_org_branding).
 const fs = require('fs');
 const path = require('path');
 
@@ -18,9 +20,12 @@ const SUPERADMIN_EMAIL = 'im.silveiratrabal@gmail.com';
 
 const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [] };
 const calls = { rpc: [], inserts: {} };
+// billing state (same rules as the SQL functions, simplified): accounts[rootId] = {seats, monthly_tokens, extra}; usage[rootId] = used this month
+const BILL_DEFAULTS = () => ({ settings: { pack_tokens: 2000000, pack_price: 11.99, currency: 'USD', personal_monthly_tokens: 200000, default_seats: 10, default_monthly_tokens: 2000000 }, accounts: {}, usage: {}, requests: [], log: [] });
+const bill = BILL_DEFAULTS();
 let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
-function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; calls.rpc = []; calls.inserts = {}; }
+function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; calls.rpc = []; calls.inserts = {}; Object.assign(bill, BILL_DEFAULTS()); }
 function session(u) {
   return { access_token: 'tok-' + u.id, token_type: 'bearer', expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600,
     refresh_token: 'r-' + u.id, user: { id: u.id, aud: 'authenticated', role: 'authenticated', email: u.email, user_metadata: u.meta, app_metadata: {} } };
@@ -28,10 +33,13 @@ function session(u) {
 function newUser(email, meta) {
   const id = uid(); db.users[id] = { id, email, meta };
   const inv = db.invitations.find(i => i.email === email.toLowerCase() && !i.accepted_at);
-  const bySlug = db.institutions.find(i => i.slug === meta.org_slug && i.open_registration !== false);
-  db.profiles.push({ id, email, created_at: new Date().toISOString(), name: meta.name || '', role: email.toLowerCase() === SUPERADMIN_EMAIL ? 'superadmin' : (inv ? inv.role : 'teacher'),
-    institution_id: inv ? inv.institution_id : (bySlug ? bySlug.id : null) });
-  if (inv) inv.accepted_at = new Date().toISOString();
+  let bySlug = db.institutions.find(i => i.slug === meta.org_slug && i.open_registration !== false);
+  let invUse = inv;
+  const target = inv ? inv.institution_id : (bySlug ? bySlug.id : null);
+  if (target && !seatFree(rootOf(target))) { invUse = null; bySlug = null; } // no free seat → account without institution
+  db.profiles.push({ id, email, created_at: new Date().toISOString(), name: meta.name || '', role: email.toLowerCase() === SUPERADMIN_EMAIL ? 'superadmin' : (invUse ? invUse.role : 'teacher'),
+    institution_id: invUse ? invUse.institution_id : (bySlug ? bySlug.id : null) });
+  if (invUse) invUse.accepted_at = new Date().toISOString();
   return db.users[id];
 }
 function seedInstitution(extra = {}) {
@@ -63,6 +71,27 @@ function effectiveConfig(id) {
     m.custom.forEach(c => { custom = custom.filter(x => x.key !== c.key).concat([{ tooltip: '', ...c }]); hidden = hidden.filter(k => k !== c.key); });
     return { id: i.id, name: i.name, slug: i.slug, level: n + 1, parent_id: i.parent_id || null, master_prompt: i.master_prompt || '', methodology: m }; });
   return { chain, master_prompts: ch.filter(i => (i.master_prompt || '').trim()).map(i => ({ id: i.id, name: i.name, prompt: i.master_prompt })), methodology: { hidden, custom }, branding: effBranding(id) };
+}
+// ── billing helpers ──
+const rootOf = id => chainOf(id)[0]?.id || null;
+const treeIds = root => root ? [root, ...descendantsOf(root)] : [];
+const account = root => bill.accounts[root] || (bill.accounts[root] = { seats: bill.settings.default_seats, monthly_tokens: bill.settings.default_monthly_tokens, extra: 0 });
+const seatsUsed = root => db.profiles.filter(p => ['teacher', 'org_admin'].includes(p.role) && treeIds(root).includes(p.institution_id)).length;
+const seatFree = root => seatsUsed(root) < account(root).seats;
+function canViewBilling(me, root) { const p = me && db.profiles.find(x => x.id === me.id); if (!p || !root) return false; return p.role === 'superadmin' || (p.role === 'org_admin' && rootOf(p.institution_id) === root); }
+function adminScope(me, root) { const p = db.profiles.find(x => x.id === me.id); if (p.role === 'superadmin') return treeIds(root); return treeIds(root).filter(id => chainOf(id).some(c => c.id === p.institution_id)); }
+function billingSummary(me, inst) {
+  const root = rootOf(inst); const a = account(root); const used = bill.usage[root] || 0; const p = db.profiles.find(x => x.id === me.id);
+  const scope = adminScope(me, root); const logs = bill.log.filter(l => l.root_id === root && scope.includes(l.inst_id));
+  const sum = (arr, key) => Object.values(arr.reduce((m, l) => { const k = l[key]; m[k] = m[k] || { k, used: 0, requests: 0 }; m[k].used += l.total; m[k].requests++; return m; }, {})).sort((x, y) => y.used - x.used);
+  const month = new Date().toISOString().slice(0, 7) + '-01';
+  return { root_id: root, root_name: instById(root)?.name, month, resets_on: month, seats: a.seats, seats_used: seatsUsed(root), monthly_tokens: a.monthly_tokens, used_month: used, extra_used_month: 0,
+    extra_balance: a.extra, remaining: Math.max(a.monthly_tokens - used, 0) + a.extra, pack_tokens: bill.settings.pack_tokens, pack_price: bill.settings.pack_price, currency: bill.settings.currency,
+    can_request: p.role === 'org_admin' && p.institution_id === root, full_detail: scope.includes(root),
+    pending: bill.requests.find(r => r.root_id === root && r.status === 'pending') || null,
+    by_unit: sum(logs, 'inst_id').map(x => ({ id: x.k, name: instById(x.k)?.name, used: x.used, requests: x.requests })),
+    by_teacher: sum(logs, 'user_id').slice(0, 10).map(x => { const u = db.profiles.find(q => q.id === x.k) || {}; return { user_id: x.k, name: u.name || u.email, email: u.email, used: x.used, requests: x.requests }; }),
+    requests: bill.requests.filter(r => r.root_id === root).slice().reverse().slice(0, 20) };
 }
 // what a user can read from institutions (RLS): superadmin all; org_admin own unit + below; teacher own unit
 function visibleInstitutions(me) {
@@ -97,7 +126,44 @@ async function handleSupabase(route) {
   if (p.startsWith('/rest/v1/rpc/')) {
     const fn = p.split('/').pop();
     calls.rpc.push({ fn, body });
-    if (fn === 'get_org_branding') { const i = db.institutions.find(x => x.slug === body.p_slug); return json(200, i ? [{ ...i, ...effBranding(i.id), name: i.name, slug: i.slug, open_registration: i.open_registration }] : []); }
+    if (fn === 'get_org_branding') { const i = db.institutions.find(x => x.slug === body.p_slug); return json(200, i ? [{ ...i, ...effBranding(i.id), name: i.name, slug: i.slug, open_registration: i.open_registration, seats_full: !seatFree(rootOf(i.id)) }] : []); }
+    const NOAUTH = () => json(400, { code: 'P0001', message: 'No autorizado' });
+    const meP = me && db.profiles.find(x => x.id === me.id); const isSA = meP?.role === 'superadmin';
+    if (fn === 'get_billing_summary') { const inst = body.p_inst || meP?.institution_id; const root = inst && rootOf(inst); if (!canViewBilling(me, root)) return NOAUTH(); return json(200, billingSummary(me, inst)); }
+    if (fn === 'get_seat_status') { const root = rootOf(body.p_root || meP?.institution_id); if (!canViewBilling(me, root)) return NOAUTH(); const a = account(root); return json(200, { root_id: root, seats: a.seats, used: seatsUsed(root), available: Math.max(a.seats - seatsUsed(root), 0), full: !seatFree(root) }); }
+    if (fn === 'request_token_pack') {
+      const root = meP?.institution_id; if (meP?.role !== 'org_admin' || !root || instById(root)?.parent_id) return json(400, { code: 'P0001', message: 'No autorizado: solo los admins de la institución madre pueden comprar tokens' });
+      if (bill.requests.some(r => r.root_id === root && r.status === 'pending')) return json(400, { code: 'P0001', message: 'Ya hay una solicitud de compra pendiente para esta institución' });
+      const r = { id: uid(), root_id: root, root_name: instById(root).name, requested_by: me.id, pack_tokens: bill.settings.pack_tokens, price: bill.settings.pack_price, currency: bill.settings.currency, status: 'pending', note: '', created_at: new Date().toISOString(), decided_at: null };
+      bill.requests.push(r); return json(200, r);
+    }
+    if (fn === 'list_purchase_requests') {
+      if (!isSA && meP?.role !== 'org_admin') return NOAUTH();
+      const root = isSA ? null : rootOf(meP.institution_id);
+      const rows = bill.requests.filter(r => (!root || r.root_id === root) && (!body.p_status || r.status === body.p_status)).map(r => { const u = db.profiles.find(q => q.id === r.requested_by) || {}; return { ...r, requested_by_name: u.name || u.email || '', requested_by_email: u.email }; });
+      return json(200, rows.sort((x, y) => (y.status === 'pending') - (x.status === 'pending') || (y.created_at > x.created_at ? 1 : -1)));
+    }
+    if (fn === 'decide_purchase_request') {
+      if (!isSA) return NOAUTH(); const r = bill.requests.find(x => x.id === body.p_id); if (!r) return json(400, { code: 'P0001', message: 'Solicitud no encontrada' });
+      if (r.status !== 'pending') return json(400, { code: 'P0001', message: 'Esta solicitud ya fue resuelta' });
+      if (body.p_approve) account(r.root_id).extra += r.pack_tokens;
+      Object.assign(r, { status: body.p_approve ? 'approved' : 'rejected', note: String(body.p_note || '').trim().slice(0, 500), decided_at: new Date().toISOString() }); return json(200, r.status);
+    }
+    if (fn === 'set_institution_plan') {
+      if (!isSA) return NOAUTH(); if (instById(body.p_root)?.parent_id) return json(400, { code: 'P0001', message: 'El plan se define en la institución madre' });
+      if (!(body.p_seats >= 0)) return json(400, { code: 'P0001', message: 'Cantidad de asientos inválida' });
+      Object.assign(account(body.p_root), { seats: body.p_seats, monthly_tokens: body.p_monthly_tokens }); return json(200, { root_id: body.p_root, seats: body.p_seats, monthly_tokens: body.p_monthly_tokens });
+    }
+    if (fn === 'update_platform_settings') {
+      if (!isSA) return NOAUTH(); if (!/^[A-Z]{3}$/.test(String(body.p_currency || '').toUpperCase())) return json(400, { code: 'P0001', message: 'Moneda inválida (código de 3 letras, ej. USD)' });
+      Object.assign(bill.settings, { pack_tokens: body.p_pack_tokens, pack_price: body.p_pack_price, currency: String(body.p_currency).toUpperCase(), personal_monthly_tokens: body.p_personal_monthly_tokens, default_seats: body.p_default_seats, default_monthly_tokens: body.p_default_monthly_tokens });
+      return json(200, bill.settings);
+    }
+    if (fn === 'platform_billing_overview') {
+      if (!isSA) return NOAUTH();
+      return json(200, { month: new Date().toISOString().slice(0, 7) + '-01', settings: bill.settings, pending_requests: bill.requests.filter(r => r.status === 'pending').length, personal: { users: 0, used_month: 0 },
+        accounts: db.institutions.filter(i => !i.parent_id).map(i => { const a = account(i.id); return { id: i.id, name: i.name, slug: i.slug, seats: a.seats, seats_used: seatsUsed(i.id), monthly_tokens: a.monthly_tokens, extra_balance: a.extra, used_month: bill.usage[i.id] || 0, extra_used_month: 0, pending: bill.requests.some(r => r.root_id === i.id && r.status === 'pending') }; }) });
+    }
     if (fn === 'create_institution') {
       if (db.institutions.some(i => i.slug === body.p_slug)) return json(409, { code: '23505', message: 'duplicate key value violates unique constraint "institutions_slug_key"' });
       if (body.p_parent && chainOf(body.p_parent).length >= 3) return json(400, { code: 'P0001', message: 'Máximo 3 niveles: institución madre › sede/facultad › cátedra/área' });
@@ -119,7 +185,10 @@ async function handleSupabase(route) {
     if (fn === 'platform_stats') return json(200, { institutions: db.institutions.length, top_level: db.institutions.filter(i => !i.parent_id).length, users: db.profiles.length, teachers: db.profiles.filter(p => p.role === 'teacher').length, admins: db.profiles.filter(p => p.role === 'org_admin').length, classes: db.plannings.length, ai_today: 7, ai_users_today: 2 });
     if (fn === 'invite_member') {
       if (body.p_email.toLowerCase() === SUPERADMIN_EMAIL) return json(200, 'superadmin');
-      const pr = db.profiles.find(x => x.email === body.p_email); if (pr) { pr.institution_id = body.p_inst; pr.role = body.p_role; return json(200, 'added'); }
+      const pr = db.profiles.find(x => x.email === body.p_email); const root = rootOf(body.p_inst);
+      const counted = pr && ['teacher', 'org_admin'].includes(pr.role) && pr.institution_id && rootOf(pr.institution_id) === root;
+      if (!counted && !seatFree(root)) return json(400, { code: 'P0001', message: `No quedan asientos disponibles en el plan de la institución (${seatsUsed(root)} de ${account(root).seats} en uso)` });
+      if (pr) { pr.institution_id = body.p_inst; pr.role = body.p_role; return json(200, 'added'); }
       db.invitations.push({ email: body.p_email, institution_id: body.p_inst, role: body.p_role }); return json(200, 'invited');
     }
     if (fn === 'set_member_role') {
@@ -150,4 +219,4 @@ async function handleSupabase(route) {
   }
   return json(404, { message: 'unmocked ' + m + ' ' + p });
 }
-module.exports = { db, calls, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+module.exports = { db, bill, calls, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
