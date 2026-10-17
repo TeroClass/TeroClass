@@ -9,7 +9,7 @@ const HTML = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
 const SB_JS = fs.readFileSync(process.env.SB_JS || '/tmp/package/dist/umd/supabase.js', 'utf8');
 const SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
 
-const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [] };
+const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [] };
 let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
 function session(u) {
@@ -66,6 +66,7 @@ async function handleSupabase(route) {
       return json(200, out);
     }
     if (m === 'POST') { const r = { id: uid(), created_at: new Date().toISOString(), ...body }; rows.push(r); return json(201, (req.headers()['accept'] || '').includes('vnd.pgrst.object') ? r : [r]); }
+    if (m === 'DELETE') { const del = applyFilters(rows, url); db[table] = rows.filter(r => !del.includes(r)); return route.fulfill({ status: 204 }); }
     if (m === 'PATCH') { applyFilters(rows, url).forEach(r => Object.assign(r, body)); return json(200, []); }
   }
   return json(404, { message: 'unmocked ' + m + ' ' + p });
@@ -83,7 +84,8 @@ async function handleSupabase(route) {
     const u = new URL(r.request().url());
     if (u.pathname === '/api/generate') {
       const b = JSON.parse(r.request().postData());
-      if (JSON.stringify(b).includes('STUDENT HANDOUT')) { studentCalls++; return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'Chemical reactions\nToday\'s goals:\n- You will be able to balance equations\nCard 1: H2 + O2 → ________' } }] }) }); }
+      if (JSON.stringify(b).includes('STUDENT HANDOUT')) { studentCalls++; return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'Chemical reactions\nToday\'s goals:\n- You will be able to balance equations\nCard 1: H2 + O2 → ________\nAnswer: 2H2 + O2 → 2H2O\nAnswer key\n1. 2, 1, 2' } }] }) }); }
+      if (JSON.stringify(b).includes("institution's CORE")) { return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: '- Pedagogical principles: learning by doing, always end with reflection' } }] }) }); }
       aiCall = { auth: r.request().headers()['authorization'], body: b };
       return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: 'Week 1 - Class 1 - Test - Small talk\nAttendance:\n\nToday\'s Objectives:\n- Practice greetings <img src=x onerror=window.__xss=1>\n- Ask questions' } }] }) });
     }
@@ -127,6 +129,12 @@ async function handleSupabase(route) {
     if (db.institutions[0].master_prompt !== 'Always use CEFR levels.') throw new Error('master prompt no guardado');
   });
 
+  await step('Subir playbook de la institución', async () => {
+    await page.setInputFiles('#playbook-upload', { name: 'playbook.txt', mimeType: 'text/plain', buffer: Buffer.from('Our school believes in learning by doing. Every class ends with a reflection moment. '.repeat(5)) });
+    await page.waitForFunction(() => /Read by the AI/.test(document.getElementById('playbook-list')?.innerText || ''));
+    if (!db.institution_documents[0]?.summary?.includes('learning by doing')) throw new Error('resumen no guardado');
+  });
+
   await step('Invitar docente', async () => {
     await page.click('.btn-invite');
     await page.fill('#invite-email', 'profe@tec.com');
@@ -159,6 +167,8 @@ async function handleSupabase(route) {
     await page.click('#btn-save');
     await page.waitForTimeout(400);
     if (!db.plannings[0]?.data?.student?.includes('You will be able')) throw new Error('no se guardó el material del alumno');
+    const st = db.plannings[0].data.student; if (/2H2 \+ O2 → 2H2O|Answer key|2, 1, 2/.test(st)) throw new Error('se filtraron respuestas al alumno: ' + st);
+    if (!aiCall.body.messages[0].content.includes('learning by doing')) throw new Error('el playbook no llega a la IA');
     if (db.plannings.length !== 1 || !db.plannings[0].data.content.includes('greetings')) throw new Error('clase no guardada con contenido');
     if (await page.evaluate(() => window.__xss)) throw new Error('HTML del modelo se ejecutó');
   });

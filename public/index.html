@@ -375,6 +375,15 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 .lp-methodology{border-left:3px solid #e2dff0;background:var(--purple-tag-bg)!important}
 
 /* ── CLASS DOCUMENT ── */
+.pb-list{margin-top:12px;display:flex;flex-direction:column;gap:8px}
+.pb-empty{font-size:12px;color:var(--ink-muted)}
+.pb-item{border:1px solid var(--border);border-radius:10px;padding:10px 12px;background:var(--white)}
+.pb-name{font-size:13px;font-weight:600}.pb-meta{font-weight:400;color:var(--ink-muted);font-size:11px;margin-left:6px}
+.pb-status{font-size:12px;color:var(--ink-muted);margin-top:2px}
+.pb-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.pb-btn{border:1px solid var(--border);background:var(--white);border-radius:7px;padding:4px 9px;font-size:11px;cursor:pointer;font-family:'Inter',sans-serif}
+.pb-btn.danger{color:#c53030}
+.pb-summary{margin-top:8px;font-size:12px;line-height:1.55;background:var(--bg);border-radius:8px;padding:10px;max-height:260px;overflow:auto}
 .lang-toggle{display:inline-flex;border:1.5px solid var(--border,#ddd);border-radius:8px;overflow:hidden;background:var(--white,#fff)}
 .lang-toggle button{border:none;background:transparent;padding:5px 9px;font-size:11px;font-weight:700;cursor:pointer;color:#888;font-family:'Inter',sans-serif}
 .lang-toggle button.active{background:var(--brand-primary,#7c5cbf);color:#fff}
@@ -787,16 +796,17 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
             <div class="settings-card-title">Master System Prompt</div>
             <div class="settings-card-sub">This prompt is injected into every AI generation for your institution — defining pedagogy, curriculum standards, and requirements that all teachers must follow.</div>
             <div class="settings-field"><label class="settings-label">System Prompt</label><textarea id="mp-prompt" class="settings-textarea" style="min-height:160px" placeholder="e.g. Always align with IB MYP standards. Use English as the primary language. Include differentiation strategies. Focus on inquiry-based learning..."></textarea></div>
-            <div class="settings-field">
-              <label class="settings-label">Context Document</label>
-              <div class="upload-zone" onclick="document.getElementById('doc-upload').click()">
-                <div class="upload-zone-text">📄 Upload curriculum document</div>
-                <div class="upload-zone-sub">PDF, TXT · Max 5MB · Used as context for every generation</div>
-              </div>
-              <input type="file" id="doc-upload" accept=".pdf,.txt,.docx" style="display:none" onchange="handleDocUpload(this)">
-              <div class="upload-success" id="doc-preview"></div>
-            </div>
             <button class="btn-save-settings" onclick="saveMasterPrompt()">Save Prompt</button>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-title">📘 Institution playbook</div>
+            <div class="settings-card-sub">Upload the documents that define your institution: principles, pedagogical model, values, non-negotiables. The AI extracts your core and applies it to every class your teachers generate.</div>
+            <div class="upload-zone" onclick="document.getElementById('playbook-upload').click()">
+              <div class="upload-zone-text">📘 Upload playbook</div>
+              <div class="upload-zone-sub">PDF, DOCX, TXT · Max 15MB each · You can upload several</div>
+            </div>
+            <input type="file" id="playbook-upload" accept=".pdf,.docx,.txt,.md" multiple style="display:none" onchange="handlePlaybookUpload(this)">
+            <div id="playbook-list" class="pb-list"></div>
           </div>
           <div class="settings-card">
             <div class="settings-card-title">AI engine</div>
@@ -901,6 +911,11 @@ const METHODOLOGIES = [
 
 // ══ UI LANGUAGE (EN / ES) ══
 const I18N_ES={
+'📘 Institution playbook':'📘 Playbook de la institución',
+'Upload the documents that define your institution: principles, pedagogical model, values, non-negotiables. The AI extracts your core and applies it to every class your teachers generate.':'Subí los documentos que definen a tu institución: principios, modelo pedagógico, valores, innegociables. La IA extrae tu esencia y la aplica en cada clase que generen tus docentes.',
+'📘 Upload playbook':'📘 Subir playbook','PDF, DOCX, TXT · Max 15MB each · You can upload several':'PDF, DOCX, TXT · Máx. 15 MB c/u · Podés subir varios','No documents yet.':'Todavía no hay documentos.',
+'✓ Read by the AI':'✓ Leído por la IA','⚠ Not processed yet':'⚠ Todavía sin procesar','What the AI understood':'Lo que entendió la IA','Process':'Procesar','Delete':'Borrar','Click again to delete':'Hacé clic de nuevo para borrar',
+'⏳ Reading the document…':'⏳ Leyendo el documento…','🧠 The AI is extracting your core principles…':'🧠 La IA está extrayendo tus principios…','Playbook ready ✓ The AI will apply it to every class':'Playbook listo ✓ La IA lo va a aplicar en cada clase',
 '+ Create Institution':'+ Crear institución','+ New class':'+ Nueva clase','2 hrs':'2 h',
 'AI Settings':'Ajustes de IA','AI engine':'Motor de IA','Active Teachers':'Docentes activos','Add files or videos':'Agregar archivos o videos',
 'Admin Email':'Email del admin','Adult Education':'Educación de adultos','Advanced':'Avanzado','All time':'Todo el período',
@@ -1019,6 +1034,117 @@ function setUiLang(lang){
 function initI18n(){
   i18nObserver.observe(document.body,{childList:true,subtree:true,characterData:true});
   setUiLang(uiLang);
+}
+
+// ══ PLAYBOOK (principios de la institución) ══
+let playbookCache={}; // orgId -> [{id,name,summary,chars,created_at}]
+const playbookBusy={}; // docId|tempId -> status text
+function loadScriptOnce(src){
+  return new Promise((res,rej)=>{
+    if(document.querySelector(`script[src="${src}"]`)){const t=setInterval(()=>{if(src.includes('pdf')?window.pdfjsLib:window.mammoth){clearInterval(t);res();}},50);return;}
+    const el=document.createElement('script');el.src=src;el.onload=()=>res();el.onerror=()=>rej(new Error('Could not load reader for this file type'));document.head.appendChild(el);
+  });
+}
+async function extractFileText(file){
+  const name=file.name.toLowerCase();
+  if(name.endsWith('.txt')||name.endsWith('.md'))return await file.text();
+  if(name.endsWith('.docx')){
+    await loadScriptOnce('https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js');
+    const r=await window.mammoth.extractRawText({arrayBuffer:await file.arrayBuffer()});return r.value||'';
+  }
+  if(name.endsWith('.pdf')){
+    await loadScriptOnce('https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js');
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+    const pdf=await window.pdfjsLib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise;
+    let out='';for(let i=1;i<=Math.min(pdf.numPages,200);i++){const pg=await pdf.getPage(i);const tc=await pg.getTextContent();out+=tc.items.map(it=>it.str).join(' ')+'\n\n';}
+    return out;
+  }
+  throw new Error('Use PDF, DOCX or TXT');
+}
+const PLAYBOOK_SUMMARY_PROMPT=`Read this institutional document and extract the institution's CORE so an AI can design every class according to it. Write in the same language as the document, as concise bullet points (max 600 words), grouped under: Mission & identity · Pedagogical principles / teaching model · Values & classroom culture · Non-negotiables (what every class must have) · Things to avoid · Assessment & feedback approach · Tone & language. Only include what the document actually says. Plain text with dashes, no ** or #.`;
+async function summarizePlaybook(text){
+  const CH=24000;const chunks=[];for(let i=0;i<text.length&&chunks.length<8;i+=CH)chunks.push(text.slice(i,i+CH));
+  const parts=[];
+  for(const c of chunks){parts.push(await callAIMessages([{role:'system',content:'You extract institutional principles faithfully and concisely.'},{role:'user',content:PLAYBOOK_SUMMARY_PROMPT+'\n\nDOCUMENT'+(chunks.length>1?` (part ${parts.length+1} of ${chunks.length})`:'')+':\n"""\n'+c+'\n"""'}],0.2));}
+  if(parts.length===1)return parts[0];
+  return await callAIMessages([{role:'system',content:'You merge notes faithfully and concisely.'},{role:'user',content:'Merge these partial extracts of the same institutional document into ONE core summary (max 600 words), same groups and language, removing repetition. Plain text with dashes.\n\n'+parts.join('\n\n---\n\n')}],0.2);
+}
+async function loadPlaybooks(orgId){
+  if(!orgId)return [];
+  const {data,error}=await sb.from('institution_documents').select('id,name,summary,chars,created_at').eq('institution_id',orgId).order('created_at');
+  if(!error)playbookCache[orgId]=data||[];
+  return playbookCache[orgId]||[];
+}
+function getPlaybookCore(orgId){
+  const docs=(playbookCache[orgId]||[]).filter(d=>d.summary);
+  if(!docs.length)return '';
+  let txt=docs.map(d=>`[${d.name}]\n${d.summary}`).join('\n\n');
+  return txt.length>12000?txt.slice(0,12000):txt;
+}
+async function handlePlaybookUpload(input){
+  const orgId=masterOrgId();
+  if(!orgId){showToast('Open an institution first (Institutions → View).','err');input.value='';return;}
+  const files=[...input.files];input.value='';
+  for(const file of files){
+    const tmp='tmp-'+Date.now()+Math.random();
+    playbookBusy[tmp]={name:file.name,status:'⏳ Reading the document…'};renderPlaybookList();
+    try{
+      if(file.size>15*1024*1024)throw new Error('Max 15MB per file');
+      const text=(await extractFileText(file)).replace(/\s+\n/g,'\n').trim();
+      if(text.length<50)throw new Error('No readable text found (is it a scanned PDF?)');
+      const ins=await sb.from('institution_documents').insert({institution_id:orgId,name:file.name,content:text.slice(0,400000),chars:text.length,uploaded_by:currentUser.id}).select('id').single();
+      if(ins.error)throw new Error(ins.error.message);
+      delete playbookBusy[tmp];playbookBusy[ins.data.id]={status:'🧠 The AI is extracting your core principles…'};
+      await loadPlaybooks(orgId);renderPlaybookList();
+      const summary=await summarizePlaybook(text);
+      const up=await sb.from('institution_documents').update({summary}).eq('id',ins.data.id);
+      if(up.error)throw new Error(up.error.message);
+      delete playbookBusy[ins.data.id];
+      showToast('Playbook ready ✓ The AI will apply it to every class','ok');
+    }catch(err){
+      delete playbookBusy[tmp];
+      showToast(file.name+': '+err.message,'err');
+    }
+    await loadPlaybooks(orgId);renderPlaybookList();buildSystemPrompt();
+  }
+}
+async function resummarizePlaybook(id){
+  const orgId=masterOrgId();
+  const {data,error}=await sb.from('institution_documents').select('content').eq('id',id).single();
+  if(error||!data?.content){showToast('Error: '+(error?.message||'no text'),'err');return;}
+  playbookBusy[id]={status:'🧠 The AI is extracting your core principles…'};renderPlaybookList();
+  try{const summary=await summarizePlaybook(data.content);await sb.from('institution_documents').update({summary}).eq('id',id);}
+  catch(err){showToast('Error: '+err.message,'err');}
+  delete playbookBusy[id];await loadPlaybooks(orgId);renderPlaybookList();buildSystemPrompt();
+}
+const playbookConfirm={};
+async function deletePlaybook(id){
+  if(!playbookConfirm[id]){playbookConfirm[id]=true;renderPlaybookList();setTimeout(()=>{delete playbookConfirm[id];renderPlaybookList();},4000);return;}
+  const orgId=masterOrgId();
+  const {error}=await sb.from('institution_documents').delete().eq('id',id);
+  if(error){showToast('Error: '+error.message,'err');return;}
+  delete playbookConfirm[id];await loadPlaybooks(orgId);renderPlaybookList();buildSystemPrompt();
+}
+function togglePlaybookSummary(id){const el=document.getElementById('pbs-'+id);if(el)el.style.display=el.style.display==='none'?'block':'none';}
+function renderPlaybookList(){
+  const box=document.getElementById('playbook-list');if(!box)return;
+  const orgId=masterOrgId();const docs=playbookCache[orgId]||[];
+  const temps=Object.entries(playbookBusy).filter(([k])=>k.startsWith('tmp-'));
+  if(!docs.length&&!temps.length){box.innerHTML='<div class="pb-empty">No documents yet.</div>';return;}
+  box.innerHTML=temps.map(([k,v])=>`<div class="pb-item"><div class="pb-name">📘 ${esc(v.name)}</div><div class="pb-status">${esc(v.status)}</div></div>`).join('')+
+  docs.map(d=>{
+    const busy=playbookBusy[d.id];
+    const status=busy?busy.status:(d.summary?'✓ Read by the AI':'⚠ Not processed yet');
+    return `<div class="pb-item">
+      <div class="pb-name">📘 ${esc(d.name)} <span class="pb-meta">${Math.round((d.chars||0)/1000)}k chars</span></div>
+      <div class="pb-status">${esc(status)}</div>
+      <div class="pb-actions">
+        ${d.summary?`<button class="pb-btn" onclick="togglePlaybookSummary('${d.id}')">What the AI understood</button>`:''}
+        ${!busy&&!d.summary?`<button class="pb-btn" onclick="resummarizePlaybook('${d.id}')">Process</button>`:''}
+        ${!busy?`<button class="pb-btn danger" onclick="deletePlaybook('${d.id}')">${playbookConfirm[d.id]?'Click again to delete':'Delete'}</button>`:''}
+      </div>
+      ${d.summary?`<div class="pb-summary" data-no-i18n id="pbs-${d.id}" style="display:none">${esc(d.summary).replace(/\n/g,'<br>')}</div>`:''}
+    </div>`;}).join('');
 }
 
 // ══ STATE ══
@@ -1388,6 +1514,7 @@ async function enterApp(){
     showPanel('superadmin');showToast('Welcome Super Admin! Create your first institution.','ok');
   }
   loadMasterSettings();
+  if(currentUser.orgId)loadPlaybooks(currentUser.orgId).then(()=>buildSystemPrompt());
 }
 
 // ══ NAVIGATION ══
@@ -1400,8 +1527,8 @@ function showPanel(name){
   if(name==='home')renderClasses();
   if(name==='admin')renderDashboard();
   if(name==='superadmin'){if(currentUser?.isSuperAdmin)currentOrgId=currentUser.orgId||null;renderInstitutions();}
-  if(name==='master')loadMasterSettings();
-  if(name==='ai'){buildSystemPrompt();initSkillsDrag();}
+  if(name==='master'){loadMasterSettings();const o=masterOrgId();if(o)loadPlaybooks(o).then(renderPlaybookList);else renderPlaybookList();}
+  if(name==='ai'){const o=masterOrgId();if(o&&!playbookCache[o])loadPlaybooks(o).then(()=>buildSystemPrompt());buildSystemPrompt();initSkillsDrag();}
 }
 function openBrandingNav(){
   if(currentUser.isSuperAdmin&&!currentUser.orgId){
@@ -1520,6 +1647,8 @@ function buildSystemPrompt(){
   let parts=[];
   if(mp.prompt){sys+='\n\nINSTITUTION REQUIREMENTS:\n'+mp.prompt;parts.push('system prompt');}
   if(mp.docText&&mp.docName){sys+='\n\nCURRICULUM CONTEXT:\n'+mp.docText.substring(0,3000);parts.push('document: '+mp.docName);}
+  const core=getPlaybookCore(masterOrgId());
+  if(core){sys+='\n\nINSTITUTION CORE — extracted from the institution playbook. Every class MUST embody these principles and never contradict them:\n'+core;parts.push('playbook');}
   // Update UI indicator
   const bar=document.getElementById('mp-status-bar');
   const detail=document.getElementById('mp-status-detail');
@@ -1597,6 +1726,8 @@ ${ageRule(p)}
 
 ${buildMethodologyBlock(p)}
 
+THIS DOCUMENT IS THE TEACHER GUIDE (teacher's eyes only). For every step say how to run it: what the teacher says and does, grouping, timing, expected student answers, common mistakes and how to respond, and full answer keys. A separate student handout (without answers or teacher notes) will be created from it, so make every student material clearly identifiable by name.
+
 GOLDEN RULE — EVERYTHING READY TO USE:
 Never tell the teacher to prepare, create, write, find or think of something. If an activity uses cards, role cards, worksheets, questions, problems, texts, case studies, quiz items, images descriptions, data sets, game boards or exit tickets, YOU write every single one in full in the "${H.mat}" section, numbered and ready to print or project, plus answer keys/solutions where relevant. Example: if an activity says "give each student a card", the ${H.mat} section contains every card, ... with the complete text of each card (one per student, or per group if that is the design).
 
@@ -1614,11 +1745,11 @@ FORMAT — use exactly these section headings, in ${p.language} (adapt contents 
 Tone: warm, specific, human, with some emojis. DO NOT use ** or # for formatting. Use plain text, dashes, emojis and the → arrow.`;
 }
 
-async function callAIMessages(messages){
+async function callAIMessages(messages,temperature=.7){
   const {data:{session}}=await sb.auth.getSession();
   if(!session)throw new Error('Your session expired. Please sign in again.');
   const res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
-    body:JSON.stringify({messages,temperature:.7})});
+    body:JSON.stringify({messages,temperature})});
   if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e?.error||`HTTP ${res.status}`);}
   const data=await res.json();return data.choices[0].message.content;
 }
@@ -1694,10 +1825,11 @@ async function generateStudentHandout(){
   setStudentPlaceholder('⏳ Preparing the student handout (no answers, no teacher notes)…');
   try{
     const teacherText=(document.getElementById('lp-doc')?.innerText||forResult.text||'').trim();
-    const txt=await callAIMessages([
-      {role:'system',content:'You turn teacher lesson plans into clean, student-facing class materials. You never reveal answers.'},
+    let txt=await callAIMessages([
+      {role:'system',content:'You are a materials designer. You produce ONLY the worksheet/handout a student holds in their hands: the class "not done yet", with blanks to complete. You never write for the teacher and never reveal answers.'},
       {role:'user',content:buildStudentPrompt(teacherText,forResult.params)}
-    ]);
+    ],0.3);
+    txt=cleanStudentHandout(txt);
     if(myToken!==studentGenToken||currentResult!==forResult)return;
     forResult.student=txt;renderStudent(txt);
     if(forResult.id)await sb.from('plannings').update({data:{params:forResult.params,content:forResult.text,student:txt}}).eq('id',forResult.id);
@@ -1708,30 +1840,53 @@ async function generateStudentHandout(){
 }
 function buildStudentPrompt(teacherText,p){
   const H=langPack(p?.language);
-  return `Below is a TEACHER GUIDE. Create the STUDENT HANDOUT for the same class: the document students receive (printed or projected), ready to use.
-Write it in ${p?.language||'the same language as the guide'}, addressed directly to the students, friendly and clear.
+  const L=p?.language||'the language of the guide';
+  return `Below is a TEACHER GUIDE (it explains how to teach the class and contains answers). Your job: produce the STUDENT HANDOUT — the class ready for the student, NOT done: what the student reads and completes during the class.
 
-INCLUDE:
-- First line: the class title (topic). No "Attendance" line.
-- "${H.goals}": the objectives rewritten for students, in second person.
-- Key concepts: terms with student-friendly definitions (only if the guide has them).
-- Each activity in order, with a short title and clear instructions for students (what to do, with whom, how long).
-- ALL student materials COMPLETE: every card, role card, worksheet, text, problem, question, game board and exit ticket, with blank lines (________) where students write.
+Write 100% in ${L} (every heading too), in second person, addressed to students aged ${p?.age||'as implied by the guide'}; wording and length must fit that age.
 
-Students are ${p?.age||'of the age implied by the guide'}: wording, tone and length must fit that age.
+STRUCTURE:
+1. First line: the class title (topic only — no week/class number, no date, no attendance).
+2. "${H.goals}": 2-4 goals for the student, starting like "I can…/Puedo…" or "You will…".
+3. Key concepts box (only if useful for students): term + short definition. Never definitions that give away an exercise answer.
+4. For each activity, in order: "${H.act} N — short name", then ONE short instruction addressed to the student (e.g. "Work with your partner. Read card 2 and complete the table."), then the COMPLETE material for that activity right there: every card, text, problem, question, table, role card or game board, with empty spaces "________" or empty table cells where the student writes.
+5. Final challenge and exit ticket, with blanks.
 
-LANGUAGE RULE: 100% in ${p?.language||'the language of the guide'}, including every heading.
+STRICTLY FORBIDDEN (delete it if it appears):
+- Anything addressed to the teacher: "the teacher…", "ask students to…", "divide the class…", "circulate", "monitor", "elicit", "model", tips, expected difficulties, differentiation notes.
+- Timings in minutes, grouping logistics for the teacher, materials lists for the teacher, preparation notes.
+- Answers of ANY kind: answer keys, solutions, filled-in blanks, completed tables, correct options marked, worked examples that solve the same exercise, sample answers, "expected response".
+- Sections about methodology/pedagogy ("${H.meth}"), assessment criteria for the teacher, the warm-up script the teacher reads aloud.
 
-NEVER INCLUDE:
-- Answers, answer keys, solutions, expected responses, correct options or worked results.
-- Teacher notes, teaching tips, methodology/pedagogy sections ("${H.meth}"), grading info, or materials meant only for the teacher.
+EXAMPLES:
+- BAD: "The teacher divides the class into groups of 4 (5 min)." → GOOD: "Form groups of 4."
+- BAD: "2H₂ + O₂ → 2H₂O" (solved) → GOOD: "__ H₂ + __ O₂ → __ H₂O"
+- BAD: "Answer: photosynthesis" → GOOD: "Answer: ____________"
+- BAD: "Ask students what they know about…" → GOOD: "What do you already know about…? ____________"
 
-FORMAT: plain text, dashes, emojis allowed, the → arrow allowed. DO NOT use ** or #.
+FORMAT: plain text, dashes, emojis ok, the → arrow ok. DO NOT use ** or #.
 
 TEACHER GUIDE:
 """
 ${teacherText}
 """`;
+}
+// Safety net: drop answer / methodology / teacher-only sections and teacher-addressed lines
+const STUDENT_FORBIDDEN_HEAD=/^(answer key|answers|solutions?|respuestas|soluci[oó]n(es)?|clave de respuestas|gabarito|respostas|corrig[ée]s?|l[öo]sungen|soluzioni|methodology applied|metodolog[ií]a aplicada|metodologia aplicada|m[ée]thodologie|angewandte methodik|teacher('s)? notes?|notas? (para el|del) docente|notes? pour l'enseignant)\b/i;
+const STUDENT_FORBIDDEN_LINE=/^(answer|respuesta|resposta|r[ée]ponse|antwort|risposta|soluci[oó]n|solution)s?\s*:\s*(?!_)\S/i;
+const STUDENT_RESUME_HEAD=/^(⚡|(activity|actividad|atividade|activit[ée]|aktivit[äa]t|attivit[àa])\s*\d|final challenge|desaf[ií]o final|desafio final|d[ée]fi final|sfida finale|exit ticket|ticket de salida|today.s goals|objetivos|key concepts|conceptos clave)/i;
+function cleanStudentHandout(text){
+  const out=[];let skipping=false;
+  for(const line of (text||'').split('\n')){
+    const t=line.trim().replace(/^[-•\d.)\s]+/,'');
+    if(STUDENT_FORBIDDEN_HEAD.test(t)){skipping=true;continue;}
+    if(skipping){
+      if(STUDENT_RESUME_HEAD.test(line.trim()))skipping=false;else continue;
+    }
+    if(STUDENT_FORBIDDEN_LINE.test(t))continue;
+    out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g,'\n\n').trim();
 }
 function copyForGoogleDocs(){
   const doc=getActiveDoc();

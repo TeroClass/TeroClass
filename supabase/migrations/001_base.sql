@@ -258,4 +258,31 @@ grant execute on function public.create_institution(text, text, text, text) to a
 update public.profiles set role = 'superadmin'
  where lower(email) = 'im.silveiratrabal@gmail.com';
 
+-- ========== PLAYBOOK / PRINCIPIOS DE LA INSTITUCIÓN ==========
+create table if not exists public.institution_documents (
+  id uuid primary key default gen_random_uuid(),
+  institution_id uuid not null references public.institutions(id) on delete cascade,
+  name text not null,
+  kind text not null default 'playbook',
+  content text,                 -- texto extraído del documento
+  summary text,                 -- lo esencial que la IA usa en cada clase
+  chars integer default 0,
+  uploaded_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists inst_docs_inst_idx on public.institution_documents (institution_id);
+alter table public.institution_documents enable row level security;
+drop policy if exists idoc_select on public.institution_documents;
+create policy idoc_select on public.institution_documents for select
+  using (institution_id = public.my_institution() or public.is_admin_of(institution_id));
+drop policy if exists idoc_insert on public.institution_documents;
+create policy idoc_insert on public.institution_documents for insert
+  with check (public.is_admin_of(institution_id));
+drop policy if exists idoc_update on public.institution_documents;
+create policy idoc_update on public.institution_documents for update
+  using (public.is_admin_of(institution_id)) with check (public.is_admin_of(institution_id));
+drop policy if exists idoc_delete on public.institution_documents;
+create policy idoc_delete on public.institution_documents for delete
+  using (public.is_admin_of(institution_id));
+
 select 'TeroClass: base creada OK' as resultado;
