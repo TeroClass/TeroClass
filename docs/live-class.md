@@ -1,0 +1,145 @@
+# Aula en vivo (Live class)
+
+**Estado: DEMO.** Hoy el aula en vivo funciona completa en el navegador, con participantes
+simulados y datos de ejemplo. No hay servidor de video, no se graba nada y no cuesta nada.
+Todo está listo para conectarse a LiveKit cuando se decida: alcanza con cargar 3 variables
+en Vercel (más el grabador y la transcripción, para tener insights reales).
+
+## Qué hay en el código
+
+| Archivo | Qué hace |
+|---|---|
+| `public/live-class.js` | Toda la pantalla: inicio (sesiones), sala de espera con cámara real y consentimientos, sala con video, plan con temporizadores, chat, REC, procesamiento e insights. Textos en español en un bloque `Object.assign(I18N_ES, …)`. |
+| `public/live-class.css` | Estilos (sin librerías). Funciona desde 768 px de ancho. |
+| `api/class/config.js` | `GET` → `{configured: true/false}`. Nunca devuelve claves. |
+| `api/class/token.js` | `POST` → token de LiveKit (JWT HS256 firmado con `node:crypto`). Verifica la sesión de Supabase. Devuelve **501** mientras falten las variables. |
+| `api/livekit/webhook.js` | Recibe los eventos de LiveKit y verifica la firma. Por ahora solo registra (TODOs para el grabador y Supabase). |
+| `api/_lib/livekit.js` | Firma/verificación de JWT y consulta de usuario en Supabase (compartido). |
+| `supabase/migrations/002_live_class.sql` | Tablas y permisos (RLS). **No ejecutar todavía.** |
+| `tests/e2e-live.cjs`, `tests/api-live.test.mjs`, `tests/sql/002_live_class_rls.sql` | Pruebas. |
+
+### Cómo se elige Demo o LiveKit
+
+`public/live-class.js` define una interfaz `LiveProvider` y dos implementaciones:
+
+- **`DemoProvider`** (la que se usa hoy): participantes simulados, quién habla, mano levantada,
+  chat local y REC simulado. Nada sale del navegador.
+- **`LiveKitProvider`**: se conecta con `livekit-client` (`Room`, `connect(url, token)`,
+  publica cámara y micrófono, escucha participantes remotos, quién habla y mensajes de datos
+  para chat / mano / REC).
+
+Al entrar a la sala, la app llama a `GET /api/class/config`:
+
+- `{configured:false}` (o cualquier error) → **Demo**. El SDK de LiveKit ni se descarga.
+- `{configured:true}` → descarga `livekit-client@2.22.3` desde jsDelivr, pide el token a
+  `POST /api/class/token` con la sesión del usuario y se conecta. Si la conexión falla, avisa y
+  abre la demo.
+
+Las pruebas cubren los dos caminos (`tests/e2e-live.cjs`, último escenario).
+
+## Cómo activarlo
+
+### 1. LiveKit Cloud (video)
+
+1. Crear una cuenta en <https://cloud.livekit.io> y un proyecto (por ejemplo `teroclass-prod`).
+2. Región: LiveKit Cloud conecta a cada persona con el servidor más cercano (São Paulo para
+   Uruguay). Si el plan contratado permite fijar la región (*region pinning*), fijarla en
+   Sudamérica / Brasil para que los datos queden en la región.
+3. En *Settings → Keys* crear una API key. Anotar la URL (`wss://<proyecto>.livekit.cloud`),
+   la key y el secret.
+4. En *Settings → Webhooks* agregar `https://<tu-app>.vercel.app/api/livekit/webhook`
+   con esa misma API key.
+
+### 2. Variables en Vercel
+
+Vercel → Project → Settings → Environment Variables (Production), luego **Redeploy**:
+
+| Variable | Ejemplo |
+|---|---|
+| `LIVEKIT_URL` | `wss://teroclass-prod-xxxx.livekit.cloud` |
+| `LIVEKIT_API_KEY` | `APIxxxxxxxx` |
+| `LIVEKIT_API_SECRET` | (secreto) |
+
+Comprobar: `https://<tu-app>/api/class/config` debe responder `{"configured":true}`.
+Desde ese momento las videollamadas son reales (sin grabación todavía: el botón REC solo
+avisa a los participantes).
+
+> Si el webhook responde "checksum does not match" en el primer deploy, agregar también
+> `NODEJS_HELPERS=0` (hace que Vercel entregue el cuerpo crudo para verificar la firma).
+
+### 3. Base de datos
+
+Supabase → SQL Editor → pegar y ejecutar `supabase/migrations/002_live_class.sql`
+(después de `001_base.sql`; se puede volver a ejecutar sin riesgo).
+
+### 4. Grabador (Azure Container Apps) — esquema
+
+Un servicio pequeño, en la misma región que el almacenamiento (Brazil South):
+
+1. El webhook (`track_published`) le avisa qué sala y qué pista grabar.
+2. Entra a la sala como participante oculto (token con `hidden: true`, `canSubscribe: true`,
+   `canPublish: false`) usando el SDK de servidor de LiveKit.
+3. Se suscribe **solo** a las pistas de audio de quienes tienen `recorded: true` en su metadata
+   (lo pone `api/class/token.js` según los consentimientos). Nunca graba video.
+4. Respeta REC / pausa (mensajes `{type:"rec"}` del docente) y guarda solo los tramos con voz
+   (detección de actividad de voz), un archivo por micrófono, en Azure Blob Storage.
+5. Inserta una fila en `recordings` con `retention_until = now() + 30 días`.
+
+Alternativa sin código propio: *Track Egress* de LiveKit (audio por pista directo a Azure Blob),
+con menos control sobre pausas y recorte de silencios.
+
+### 5. Transcripción e insights
+
+1. Al terminar la sala (`room_finished`): *batch transcription* de **Azure AI Speech** (Brazil South)
+   por cada archivo. Como cada archivo es un solo micrófono, no hace falta separar voces ni
+   identificar por huella de voz.
+2. Guardar los segmentos en `transcript_segments`.
+3. Llamar al GPT-4o que ya usa TeroClass con la planificación de la clase + la transcripción, pidiendo
+   JSON con la misma forma que los datos de ejemplo de `live-class.js` (`SAMPLES.*.students[]`
+   y `SAMPLES.*.teacher`). Guardar en `student_insights` / `teacher_insights`.
+4. Cambiar la pantalla de insights para leer esas tablas en vez de `SAMPLES`.
+
+### 6. Borrado automático
+
+Tarea diaria (Container Apps Job o Supabase cron con la service role key):
+`select * from recordings_due_for_deletion()` → borrar cada blob → `update recordings set deleted_at = now(), status = 'deleted'`.
+
+## Costos (estimación, verificar precios vigentes)
+
+Ejemplo: clase de 45 min con 25 estudiantes + docente.
+
+| Pieza | Cómo se cobra | Estimado por clase |
+|---|---|---|
+| LiveKit Cloud | minutos de conexión por participante (26 × 45 ≈ 1.170 min) y ancho de banda. Tiene plan gratuito para probar y planes mensuales con minutos incluidos. | según plan; centavos de dólar por clase con minutos incluidos |
+| Grabador (Azure Container Apps) | consumo por segundo, escala a cero cuando no hay clases | muy bajo (centavos) |
+| Azure Blob Storage | GB/mes; solo voz y se borra a los 30 días | despreciable |
+| Azure AI Speech (batch) | por hora de audio; solo voz ≈ 3 h por clase | ≈ US$ 0,5–1 |
+| GPT-4o (Azure OpenAI) | tokens; ≈ 20–40 mil por clase | ≈ US$ 0,1–0,4 |
+
+Hoy, en modo Demo: **US$ 0**.
+
+## Privacidad — checklist antes de activar
+
+- [ ] Texto de consentimiento revisado por un abogado (Uruguay: Ley 18.331; España: RGPD/LOPDGDD) y versión cargada en `CONSENT_VERSION` (`api/class/token.js` y `live-class.js`).
+- [ ] Tres consentimientos separados y opcionales: grabación, análisis con IA, almacenamiento. Sin consentimiento se participa igual, sin grabar.
+- [ ] Menores de 18: consentimiento de madre/padre/tutor (nombre y email) — la base lo exige (`consents_guard`).
+- [ ] Indicador REC rojo siempre visible para todos; el docente puede pausar y detener.
+- [ ] Se identifica a cada persona por su micrófono, nunca por huella de voz. Sin detección de emociones.
+- [ ] Solo se graba audio con voz de quienes consintieron; nunca video.
+- [ ] Audio original borrado a los 30 días (tarea diaria activa y probada).
+- [ ] Datos en la región (LiveKit con región fijada si el plan lo permite; Azure en Brazil South).
+- [ ] Revocar consentimiento (`revoke_consent`) detiene la grabación de esa persona.
+- [ ] Insights del docente privados (solo docente y admins de su institución); los del estudiante se ven cuando el docente los publica.
+- [ ] Contrato de encargado de tratamiento con LiveKit y Microsoft.
+
+## Pruebas
+
+```bash
+NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-live.cjs        # navegador, modo demo (+ camino LiveKit)
+node --no-warnings --test tests/api-live.test.mjs                     # token / config / webhook
+psql -v ON_ERROR_STOP=1 -f stub.sql -f supabase/migrations/001_base.sql \
+     -f supabase/migrations/002_live_class.sql -f tests/sql/002_live_class_rls.sql   # RLS en Postgres 16 local
+```
+
+Para probar el camino LiveKit con el SDK real: `npm pack livekit-client@2.22.3`, descomprimir y
+correr `LK_UMD=<ruta>/package/dist/livekit-client.umd.js node tests/e2e-live.cjs`.

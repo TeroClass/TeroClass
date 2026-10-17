@@ -24,3 +24,10 @@ Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-ru
 ## Tests
 
 `tests/e2e-mock.cjs` runs the full flow in a headless browser against a simulated Supabase.
+
+## Live class (Aula en vivo)
+
+In-app video classroom, currently in **Demo mode** (simulated participants, sample insights, no cost).
+To connect real video set `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in Vercel.
+See `docs/live-class.md` (activation, costs, privacy checklist). Tests: `tests/e2e-live.cjs`,
+`tests/api-live.test.mjs`, `tests/sql/002_live_class_rls.sql`.

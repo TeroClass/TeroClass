@@ -4,7 +4,13 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const HTML = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+const RAW_HTML = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+// Tests that answer every page request with HTML get the live-class assets inlined
+// (in production they are separate files: see vercel.json). Function replacers: no $-patterns.
+const asset = f => fs.readFileSync(path.join(ROOT, 'public', f), 'utf8');
+const HTML = RAW_HTML
+  .replace('<link rel="stylesheet" href="/live-class.css">', () => `<style>${asset('live-class.css')}</style>`)
+  .replace('<script src="/live-class.js"></script>', () => `<script>${asset('live-class.js')}</script>`);
 const SB_JS = fs.readFileSync(process.env.SB_JS || '/tmp/package/dist/umd/supabase.js', 'utf8');
 const SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
 const SUPERADMIN_EMAIL = 'im.silveiratrabal@gmail.com';
@@ -103,4 +109,4 @@ async function handleSupabase(route) {
   }
   return json(404, { message: 'unmocked ' + m + ' ' + p });
 }
-module.exports = { db, calls, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, SB_JS, SB, SUPERADMIN_EMAIL };
+module.exports = { db, calls, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL };

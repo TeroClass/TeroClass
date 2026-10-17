@@ -6,6 +6,14 @@
       "destination": "/api/$1"
     },
     {
+      "source": "/live-class.js",
+      "destination": "/public/live-class.js"
+    },
+    {
+      "source": "/live-class.css",
+      "destination": "/public/live-class.css"
+    },
+    {
       "source": "/(.*)",
       "destination": "/public/index.html"
     }

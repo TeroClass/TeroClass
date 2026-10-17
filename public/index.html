@@ -454,6 +454,7 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 .preview-btn-light{padding:5px 10px;background:#fff;border:1px solid var(--border);color:#111;border-radius:6px;font-size:11px;font-weight:600}
 .skill-drag-rank{width:20px;height:20px;border-radius:50%;background:var(--brand-primary);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 </style>
+<link rel="stylesheet" href="/live-class.css">
 </head>
 <body>
 
@@ -512,6 +513,7 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
     <nav class="icon-sidebar">
       <button class="sib-btn active" id="nav-home" onclick="showPanel('home')"><span>🏠</span><span class="sib-tooltip">Home</span></button>
       <button class="sib-btn" id="nav-ai" onclick="showPanel('ai')"><span>📖</span><span class="sib-tooltip">Classes</span></button>
+      <button class="sib-btn" id="nav-live" onclick="openLiveClass()"><span>🎥</span><span class="sib-tooltip">Live class</span></button>
       <!-- Super admin only -->
       <button class="sib-btn" id="nav-superadmin" style="display:none" onclick="showPanel('superadmin')"><span>🏛️</span><span class="sib-tooltip">Institutions</span></button>
       <!-- Inst admin only -->
@@ -670,6 +672,9 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
           </div>
         </div>
       </div>
+
+      <!-- LIVE CLASS (public/live-class.js) -->
+      <div id="panel-live" class="panel"><div id="lc-root" class="lc-root"></div></div>
 
       <!-- SUPER ADMIN: INSTITUTIONS -->
       <div id="panel-superadmin" class="panel">
@@ -2531,6 +2536,7 @@ function displayResult(text,params,opts={}){
     <div class="cls-doc" id="lp-doc-student" contenteditable="true" style="display:none"></div>
   </div>`;
   out.classList.add('visible');
+  if(window.LiveClass)LiveClass.onDocShown();
   out.oninput=()=>{docDirty=true;};
   if(currentResult.student)renderStudent(currentResult.student);
   else generateStudentHandout();
@@ -2835,5 +2841,6 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&document.getElementById('screen-auth').style.display!=='none'){document.getElementById('tab-login').style.display!=='none'?handleLogin():handleRegister();};
 });
 </script>
+<script src="/live-class.js"></script>
 </body>
 </html>
