@@ -139,6 +139,8 @@ async function handleSupabase(route) {
     await page.click('#btn-generate');
     await page.waitForSelector('#lp-doc');
     if (!aiCall?.auth?.startsWith('Bearer tok-')) throw new Error('la IA no recibió la sesión');
+    if (process.env.SHOW_PROMPT) console.log(aiCall.body.messages[1].content);
+    if (!aiCall.body.messages[1].content.includes('REQUIREMENTS')) throw new Error('las barras no llegan al prompt');
     if (JSON.stringify(aiCall.body).includes('apiKey')) throw new Error('se envía apiKey desde el navegador');
     await page.click('.cls-doc-actions .btn-out');
     await page.waitForTimeout(400);

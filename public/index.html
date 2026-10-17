@@ -1396,18 +1396,18 @@ function buildSystemPrompt(){
   return sys;
 }
 
+function weightWord(v){return v>=70?'DOMINANT — shapes most of the lesson':v>=40?'STRONG — clearly visible in at least two activities':v>=20?'PRESENT — visible in at least one activity':'LIGHT — a brief touch';}
 function buildMethodologyBlock(p){
   const active=METHODOLOGIES.filter(m=>p[m.key]>10).sort((a,b)=>p[b.key]-p[a.key]);
   if(!active.length)return '';
-  return `\nPEDAGOGICAL METHODOLOGY WEIGHTS (apply proportionally throughout the lesson):\n`+
-    active.map(m=>`- ${m.label} (${p[m.key]}%): ${m.tooltip.split('.')[0]}.`).join('\n')+
-    `\n\nEnsure the lesson design REFLECTS these weights. A methodology with 80% should dominate the lesson structure. A methodology with 10% should appear briefly. After the TEACHER NOTES section, add a section called ### METHODOLOGY APPLIED explaining specifically how each active methodology was incorporated.`;
+  return `PEDAGOGICAL WEIGHTS chosen by the teacher (0-100). They are REQUIREMENTS, not suggestions:\n`+
+    active.map(m=>`- ${m.label}: ${p[m.key]} → ${weightWord(p[m.key])}. Meaning: ${m.tooltip.split('. ')[0]}.`).join('\n')+
+    `\n\nRules for the weights:\n- Higher weight = more class time and more activities built around it.\n- Teacher Talking Time vs Student Talking Time: distribute class time according to their ratio.\n- At the very end add a section titled exactly "Methodology applied:" with one line per weight above, saying concretely where and how it appears in this class (activity name + time).`;
 }
 
 function buildUserPrompt(p){
-  const active=METHODOLOGIES.filter(m=>p[m.key]>10).sort((a,b)=>p[b.key]-p[a.key]);
-  const methodStr=active.map(m=>`${m.label} (${p[m.key]}%)`).join(', ');
   const skills=getSkillsPriority();
+  const subjects=p.subjects.join(', ')||'General';
   const today=new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
   return `You are an experienced teacher writing your own lesson plan for TODAY.
 This is a real class document — not a template. Make it specific, human, and ready to use.
@@ -1416,58 +1416,31 @@ Write everything in ${p.language}.
 CLASS INFO:
 - Date: ${today}
 - Topic: ${p.prompt}
-- Subject: ${p.subjects.join(', ')||'General'}
+- Subject: ${subjects}
 - Level: ${p.level}
 - Students: ${p.groupSize}
-- Duration: ${p.duration}
+- Duration: ${p.duration} (activity times must add up to this)
 - Skills priority: ${skills.map((s,i)=>`${i+1}. ${s}`).join(' → ')}
-- Pedagogical blend: ${methodStr||'Balanced'}
 
-STUDY THIS REAL EXAMPLE — match this style exactly:
+${buildMethodologyBlock(p)}
 
-Week 5 - Class 8 - May 19, 2026 - Hybrid Work: Productivity vs Real Life
-Attendance: Lautaro Lopez, Ariel Dapia Graziani
-
-Today's Objectives:
-- Discuss professional growth and learning
-- React to ideas naturally in meetings
-- Talk about challenges and improvement
-
-Vocabulary – Q & A – Clarifications
-The project consists on put → The project consists of putting...
-
-Warm-up (5 min) — Tag Questions Recap:
-"You've used AI to generate production code..."
-"Data engineers spend more time debugging than coding..." 😅
-"Clients always understand technical explanations..." 👀
-"You've copied code from Stack Overflow recently..."
-"Software developers work better at night..."
-"You wouldn't trust AI-generated code without reviewing it..."
-
-⚡ Final Challenge — React FAST using a tag question:
-"Hybrid work can be exhausting, can't it?" 🗣️
-"Meetings are longer online, aren't they?" 🗣️
-"You've checked your phone during meetings, haven't you?" 😄
-
-Optional:
-Shadowing Site: Practice with native speakers
-https://www.shadowingfordummies.com/en/page/10/our_videos
-Voice Hero Game: https://gemini.google.com/share/ea4bac6417a3 (Chrome only!)
-
----
-
-NOW WRITE A COMPLETE CLASS for the topic above in the SAME STYLE. Rules:
-
-1. Start with: "Week X - Class X - ${today} - [Topic]" then "Attendance: [blank]"
+FORMAT (keep this structure, adapt the content to the subject — if the subject is not a language class, the "Vocabulary" section becomes key terms/concepts of the subject):
+1. First line: "Week X - Class X - ${today} - [Topic]" then a line "Attendance:"
 2. Today's Objectives: 3-4 short bullet points
-3. Vocabulary section: 3-5 corrections or key phrases using the → format for corrections
-4. Warm-up with exact time: write ALL sentences/prompts with emojis — not descriptions of them
-5. 2-3 Main activities: write the COMPLETE content of each — all questions, sentences, prompts, role cards
-6. ⚡ Fast challenge: a high-energy speaking or production task, fully written out
-7. Optional: 1-2 real resource links relevant to the topic
+3. Vocabulary: 3-6 key terms or phrases (use "wrong → right" only for language corrections)
+4. Warm-up (with minutes): write ALL the actual prompts/questions, not descriptions
+5. 2-3 Main activities (with minutes): write the COMPLETE content — questions, sentences, role cards, instructions. Name each activity and make clear which pedagogical weight it serves.
+6. ⚡ Final challenge: a short high-energy task, fully written out
+7. Optional: 1-2 real resources relevant to the topic
+8. Methodology applied: (see rules above)
 
-DO NOT use ** or # for formatting. Use plain text, dashes, emojis, and the → arrow.
-Write like a real teacher, warm and specific. Include emojis naturally. 😊`;
+STYLE REFERENCE (tone only — do NOT copy its activity types; the weights above decide the activities):
+"Warm-up (5 min) — Tag Questions Recap:
+\\"You've used AI to generate production code...\\" 😅
+⚡ Final Challenge — React FAST using a tag question:
+\\"Meetings are longer online, aren't they?\\" 🗣️"
+
+DO NOT use ** or # for formatting. Use plain text, dashes, emojis and the → arrow. Write like a real teacher, warm and specific.`;
 }
 
 async function callAI(params){
@@ -1491,7 +1464,7 @@ function displayResult(text,params,opts={}){
     if(!raw)return '<div style="height:7px"></div>';
     if(idx===0)return `<div class="cls-title">${t}</div>`;
     if(/^attendance:/i.test(raw))return `<div class="cls-attendance">${t}</div>`;
-    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback)/i.test(raw))return `<div class="cls-section-head">${t}</div>`;
+    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|activity \d|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback|methodology applied)/i.test(raw))return `<div class="cls-section-head">${t}</div>`;
     if(raw.startsWith('\u26A1'))return `<div class="cls-challenge">${t}</div>`;
     if(/^[-•]/.test(raw))return `<div class="cls-bullet">${esc(raw.replace(/^[-•]\s*/,''))}</div>`;
     if(raw.startsWith('"')||raw.startsWith('\u201C'))return `<div class="cls-quote">${t}</div>`;
@@ -1584,7 +1557,7 @@ function exportPDF(){
     if(!t){body+='<div style="height:5px"></div>';return;}
     if(i===0){body+=`<div style="font-size:17px;font-weight:700;margin-bottom:6px">${t}</div>`;return;}
     if(/^attendance:/i.test(t)){body+=`<div style="font-size:12px;color:#888;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #eee">${t}</div>`;return;}
-    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback)/i.test(t)){body+=`<div style="font-size:13px;font-weight:700;margin-top:18px;margin-bottom:5px">${t}</div>`;return;}
+    if(/^(today.s obj|vocabulary|warm.up|optional|main activit|activity \d|speaking|production|grammar|pronunciation|reading|listening|writing|closing|homework|feedback|methodology applied)/i.test(t)){body+=`<div style="font-size:13px;font-weight:700;margin-top:18px;margin-bottom:5px">${t}</div>`;return;}
     if(t.startsWith('⚡')){body+=`<div style="font-weight:700;color:#7c5cbf;margin-top:10px">${t}</div>`;return;}
     if(/^[-•]/.test(t)){body+=`<div style="padding-left:14px;position:relative;margin:2px 0;font-size:12px">– ${t.replace(/^[-•]\s*/,'')}</div>`;return;}
     if(t.startsWith('"')||t.startsWith('\u201C')){body+=`<div style="padding:3px 10px;margin:2px 0;border-left:3px solid #e2dff0;background:#f8f8f8;font-size:12px">${t}</div>`;return;}
