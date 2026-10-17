@@ -146,7 +146,7 @@ async function handleSupabase(route) {
   await step('Generar y guardar clase', async () => {
     await page.click('#nav-ai');
     await page.fill('#subjects-input', 'Chemistry'); await page.press('#subjects-input', 'Enter');
-    await page.selectOption('#st-language', 'Spanish'); await page.selectOption('#st-age', '15-17 years old');
+    await page.selectOption('#st-language', 'Spanish'); await page.selectOption('#st-age', '15 years old');
     await page.fill('#prompt-input', 'Chemical reactions');
     await page.click('#btn-generate');
     await page.waitForSelector('#lp-doc');
@@ -157,7 +157,7 @@ async function handleSupabase(route) {
     if (!aiCall.body.messages[1].content.includes('GOLDEN RULE')) throw new Error('falta materiales listos');
     const up = aiCall.body.messages[1].content;
     if (!up.includes('100% of the document in Spanish') || !up.includes('Semana X - Clase X') || !up.includes('Objetivos de hoy')) throw new Error('no fuerza el idioma');
-    if (!up.includes("STUDENTS' AGE: 15-17 years old")) throw new Error('no usa la edad');
+    if (!up.includes("STUDENTS' AGE: 15 years old")) throw new Error('no usa la edad');
     if (JSON.stringify(aiCall.body).includes('apiKey')) throw new Error('se envía apiKey desde el navegador');
     await page.waitForFunction(() => document.getElementById('lp-doc-student')?.innerText.includes('You will be able'));
     if (studentCalls !== 1) throw new Error('no se pidió el material del alumno');

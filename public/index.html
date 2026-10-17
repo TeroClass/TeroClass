@@ -554,9 +554,7 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
             <div class="st-row">
               <div class="st-field" style="grid-column:1/-1"><label class="st-label">Students' age</label>
                 <select id="st-age" class="st-select" style="font-size:12px">
-                  <option value="3-5 years old">3–5 years</option><option value="6-8 years old">6–8 years</option><option value="9-11 years old">9–11 years</option>
-                  <option value="12-14 years old" selected>12–14 years</option><option value="15-17 years old">15–17 years</option>
-                  <option value="18-25 years old (young adults)">18–25 years</option><option value="adults (26+)">26+ (adults)</option><option value="mixed ages">Mixed ages</option>
+                  <option value="0 years old">0 years</option><option value="1 years old">1 year</option><option value="2 years old">2 years</option><option value="3 years old">3 years</option><option value="4 years old">4 years</option><option value="5 years old">5 years</option><option value="6 years old">6 years</option><option value="7 years old">7 years</option><option value="8 years old">8 years</option><option value="9 years old">9 years</option><option value="10 years old">10 years</option><option value="11 years old">11 years</option><option value="12 years old">12 years</option><option value="13 years old" selected>13 years</option><option value="14 years old">14 years</option><option value="15 years old">15 years</option><option value="16 years old">16 years</option><option value="17 years old">17 years</option><option value="18 years old">18 years</option><option value="19-25 years old (young adults)">19–25 years</option><option value="26-35 years old">26–35 years</option><option value="36-50 years old">36–50 years</option><option value="51+ years old">51+ years</option><option value="adults (all ages)">Adults</option><option value="mixed ages">Mixed ages</option>
                 </select>
               </div>
             </div>
@@ -961,8 +959,7 @@ const I18N_ES={
 '👩‍🏫 Teacher guide':'👩‍🏫 Guía docente','🎒 Student handout':'🎒 Material del alumno','💾 Save':'💾 Guardar','💾 Save changes':'💾 Guardar cambios',
 '↺ Regenerate':'↺ Regenerar','📋 Copy for Google Docs':'📋 Copiar para Google Docs','⬇ Export PDF':'⬇ Exportar PDF','↺ Try again':'↺ Reintentar',
 '⏳ Preparing the student handout (no answers, no teacher notes)…':'⏳ Preparando el material del alumno (sin respuestas ni notas docentes)…',
-"Students' age":'Edad de los alumnos','3–5 years':'3–5 años','6–8 years':'6–8 años','9–11 years':'9–11 años','12–14 years':'12–14 años','15–17 years':'15–17 años',
-'18–25 years':'18–25 años','26+ (adults)':'26+ (adultos)','Mixed ages':'Edades mixtas',
+"Students' age":'Edad de los alumnos','1 year':'1 año','Adults':'Adultos','Mixed ages':'Edades mixtas',
 'Gamification':'Gamificación','Communicative Approach':'Enfoque comunicativo','Collaborative Learning':'Aprendizaje colaborativo','Task-Based Learning':'Aprendizaje basado en tareas',
 'Project-Based Learning':'Aprendizaje basado en proyectos','Deductive Processes':'Procesos deductivos','Inductive Processes':'Procesos inductivos',
 'Teacher Talking Time':'Tiempo de habla docente','Student Talking Time':'Tiempo de habla del alumno','Didactic Transposition':'Transposición didáctica','Personalization':'Personalización',
@@ -978,6 +975,7 @@ const I18N_ES={
 };
 const I18N_RULES_ES=[
   [/^Welcome to (.+)!$/,'¡Bienvenido a $1!'],
+  [/^(\d+) years$/,'$1 años'],[/^(\d+)–(\d+) years$/,'$1–$2 años'],[/^(\d+)\+ years$/,'$1+ años'],
   [/^Institution "(.+)" created! The admin \((.+)\) can register at (.+)$/,'¡Institución "$1" creada! El admin ($2) se puede registrar en $3'],
   [/^Branding saved! Link: (.+)$/,'¡Marca guardada! Link: $1'],
   [/^Error: (.+)$/,'Error: $1'],[/^Error saving: (.+)$/,'Error al guardar: $1'],
@@ -1503,12 +1501,13 @@ async function enterApp(){
     document.getElementById('nav-master').style.display='flex';
   }
   await fetchOrgs();
+  if(!currentUser)return;
   if(currentUser.orgId){
     const org=orgsCache[currentUser.orgId];
     if(org){applyOrgBrandingToApp(org);currentOrgId=currentUser.orgId;}
     document.getElementById('admin-inst-badge').textContent=org?.name||'Institution';
   }
-  await loadPlannings();renderClasses();
+  await loadPlannings();if(!currentUser)return;renderClasses();
   setTimeout(()=>initSkillsDrag(),200);
   if(currentUser.isSuperAdmin&&!Object.keys(orgsCache).length){
     showPanel('superadmin');showToast('Welcome Super Admin! Create your first institution.','ok');
@@ -1912,6 +1911,7 @@ function copyForGoogleDocs(){
 
 // ══ SAVE & HISTORY ══
 async function loadPlannings(){
+  if(!currentUser)return;
   const {data,error}=await sb.from('plannings').select('*').eq('owner_id',currentUser.id).order('created_at',{ascending:false});
   if(error){showToast('Error loading classes: '+error.message,'err');plannings=[];return;}
   plannings=(data||[]).map(r=>({id:r.id,title:r.title,params:r.data?.params||{},content:r.data?.content||'',student:r.data?.student||'',date:r.created_at}));
