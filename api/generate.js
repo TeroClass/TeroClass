@@ -4,7 +4,10 @@
 // límite diario de usos por persona (función consume_ai_quota en Supabase) y, si está la
 // clave del servidor (SUPABASE_SERVICE_ROLE_KEY), con el saldo de tokens del plan:
 // asignación mensual de la institución (o personal) y después los paquetes comprados.
+// Cada pedido queda anotado con sus metadatos (tipo, materias, idioma, edad, nivel, barras) en ai_events
+// vía consume_ai_quota, con el token del usuario: funciona aun sin la clave del servidor (Insights).
 import { serviceKey, budgetCheck, recordUsage, publicBudget, budgetError, warnNotConfigured } from './_lib/billing.js';
+import { sanitizeMeta } from './_lib/meta.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://ppvqkjchhejjulrdqkdr.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_D4ZATRSmyiURioJ4PvTb4A_rR_urilK';
@@ -44,20 +47,32 @@ async function getUser(token) {
   return r.ok ? r.data : null;
 }
 
-// Suma 1 uso del día para este usuario (con SU token: la función decide su límite).
-// Devuelve { allowed, used, limit } o null si no se pudo verificar.
-async function consumeQuota(token) {
-  const r = await fetchJson(`${SUPABASE_URL}/rest/v1/rpc/consume_ai_quota`, {
+function userRpc(fn, token, body) {
+  return fetchJson(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
     method: 'POST',
     headers: {
       apikey: SUPABASE_KEY,
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    body: '{}',
+    body: JSON.stringify(body || {}),
   }, SUPABASE_TIMEOUT_MS);
+}
+
+// Suma 1 uso del día para este usuario (con SU token: la función decide su límite) y anota el pedido
+// con sus metadatos ya limpios. Devuelve { allowed, used, limit, event? } o null si no se pudo verificar.
+// Si la base todavía no tiene la versión con p_meta (script sin volver a correr), reintenta sin metadatos.
+async function consumeQuota(token, meta) {
+  let r = await userRpc('consume_ai_quota', token, meta ? { p_meta: meta } : {});
+  if (!r.ok && meta && (r.status === 404 || r.data?.code === 'PGRST202')) r = await userRpc('consume_ai_quota', token, {});
   const q = r.ok ? r.data : null;
   return q && typeof q.allowed === 'boolean' ? q : null;
+}
+
+// Marca cómo terminó el pedido (para no contar como "clase generada" un error). Nunca hace fallar la respuesta.
+async function finishEvent(token, event, ok) {
+  if (!Number.isSafeInteger(event) || event <= 0) return;
+  try { await userRpc('finish_ai_event', token, { p_event: event, p_ok: !!ok }); } catch { /* best effort */ }
 }
 
 function mapRole(role) {
@@ -93,7 +108,7 @@ export default async function handler(req, res) {
     }
 
     // Validar antes de gastar cupo
-    const { messages, temperature, max_tokens: maxTokensIn, kind } = req.body || {};
+    const { messages, temperature, max_tokens: maxTokensIn, kind, meta } = req.body || {};
     if (!Array.isArray(messages) || !messages.length || messages.length > MAX_MESSAGES) {
       return res.status(400).json({ error: 'Invalid request.', code: 'invalid' });
     }
@@ -106,7 +121,7 @@ export default async function handler(req, res) {
       : MAX_TOKENS_MAX;
 
     // Límite diario (falla cerrado: si no se puede verificar, no se llama a Azure)
-    const quota = await consumeQuota(token);
+    const quota = await consumeQuota(token, sanitizeMeta(meta, kind));
     if (!quota) {
       return res.status(503).json({ error: 'Could not check your daily AI limit. Please try again.', code: 'quota_check' });
     }
@@ -117,60 +132,68 @@ export default async function handler(req, res) {
       });
     }
 
-    // Saldo de tokens del plan (con la clave del servidor; el usuario no lo puede falsear).
-    // Sin la clave: la app sigue funcionando sin límites de tokens (aviso en los logs y en Plataforma).
-    const billingOn = !!serviceKey();
-    if (billingOn) {
-      const budget = await budgetCheck(user.id);
-      if (!budget) {
-        return res.status(503).json({ error: 'Could not check your AI token balance. Please try again.', code: 'budget_check' });
-      }
-      if (!budget.allowed) return res.status(402).json(budgetError(budget));
-    } else {
-      warnNotConfigured();
-    }
-
-    const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
-    let response;
+    // El pedido ya quedó anotado (quota.event): al final se marca si terminó bien. La respuesta ya salió
+    // cuando corre el finally, así que no le suma demora al usuario.
+    let ok = false;
     try {
-      response = await fetchJson(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
-        body: JSON.stringify({
-          messages: messages.map(m => ({ role: mapRole(m?.role), content: String(m?.content ?? '') })),
-          max_tokens: maxTokens,
-          temperature: typeof temperature === 'number' ? Math.min(Math.max(temperature, 0), 1.2) : 0.7,
-          user: user.id,
-        }),
-      }, AZURE_TIMEOUT_MS);
-    } catch (err) {
-      if (err instanceof TimeoutError) return res.status(504).json(TIMEOUT_ERROR);
-      return res.status(502).json({ error: 'Could not reach the AI service. Please try again.', code: 'upstream' });
-    }
+      // Saldo de tokens del plan (con la clave del servidor; el usuario no lo puede falsear).
+      // Sin la clave: la app sigue funcionando sin límites de tokens (aviso en los logs y en Plataforma).
+      const billingOn = !!serviceKey();
+      if (billingOn) {
+        const budget = await budgetCheck(user.id);
+        if (!budget) {
+          return res.status(503).json({ error: 'Could not check your AI token balance. Please try again.', code: 'budget_check' });
+        }
+        if (!budget.allowed) return res.status(402).json(budgetError(budget));
+      } else {
+        warnNotConfigured();
+      }
 
-    const data = response.data;
-    // Anotar el consumo real que informa Azure (si la anotación falla, la respuesta igual llega)
-    let after = null;
-    if (billingOn && response.ok && data?.usage) {
-      after = await recordUsage(user.id, data.usage, kind);
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
+      let response;
+      try {
+        response = await fetchJson(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+          body: JSON.stringify({
+            messages: messages.map(m => ({ role: mapRole(m?.role), content: String(m?.content ?? '') })),
+            max_tokens: maxTokens,
+            temperature: typeof temperature === 'number' ? Math.min(Math.max(temperature, 0), 1.2) : 0.7,
+            user: user.id,
+          }),
+        }, AZURE_TIMEOUT_MS);
+      } catch (err) {
+        if (err instanceof TimeoutError) return res.status(504).json(TIMEOUT_ERROR);
+        return res.status(502).json({ error: 'Could not reach the AI service. Please try again.', code: 'upstream' });
+      }
+
+      const data = response.data;
+      // Anotar el consumo real que informa Azure (si la anotación falla, la respuesta igual llega)
+      let after = null;
+      if (billingOn && response.ok && data?.usage) {
+        after = await recordUsage(user.id, data.usage, kind);
+      }
+      if (!response.ok) {
+        if (isContentFilterError(data)) return res.status(422).json(FILTER_ERROR);
+        const status = response.status === 429 ? 429 : (response.status >= 500 ? 502 : response.status);
+        return res.status(status).json({
+          error: data?.error?.message || `AI service error (${response.status}).`,
+          code: response.status === 429 ? 'rate_limit' : 'upstream',
+        });
+      }
+      if (!data || !Array.isArray(data.choices) || !data.choices.length) {
+        return res.status(502).json({ error: 'The AI returned an empty answer. Please try again.', code: 'upstream' });
+      }
+      const choice = data.choices[0];
+      if (choice?.message?.content == null) {
+        return res.status(422).json(FILTER_ERROR);
+      }
+      // Respuesta completa de Azure (incluye choices[0].finish_reason, p. ej. 'length')
+      ok = true;
+      return res.status(200).json({ ...data, quota: { used: quota.used, limit: quota.limit }, budget: publicBudget(after) });
+    } finally {
+      await finishEvent(token, quota.event, ok);
     }
-    if (!response.ok) {
-      if (isContentFilterError(data)) return res.status(422).json(FILTER_ERROR);
-      const status = response.status === 429 ? 429 : (response.status >= 500 ? 502 : response.status);
-      return res.status(status).json({
-        error: data?.error?.message || `AI service error (${response.status}).`,
-        code: response.status === 429 ? 'rate_limit' : 'upstream',
-      });
-    }
-    if (!data || !Array.isArray(data.choices) || !data.choices.length) {
-      return res.status(502).json({ error: 'The AI returned an empty answer. Please try again.', code: 'upstream' });
-    }
-    const choice = data.choices[0];
-    if (choice?.message?.content == null) {
-      return res.status(422).json(FILTER_ERROR);
-    }
-    // Respuesta completa de Azure (incluye choices[0].finish_reason, p. ej. 'length')
-    return res.status(200).json({ ...data, quota: { used: quota.used, limit: quota.limit }, budget: publicBudget(after) });
   } catch (err) {
     if (err instanceof TimeoutError) return res.status(504).json(TIMEOUT_ERROR);
     return res.status(500).json({ error: err?.message || 'Server error', code: 'server' });

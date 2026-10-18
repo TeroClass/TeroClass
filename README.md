@@ -40,6 +40,28 @@ Institutions form a hierarchy of up to 3 levels: main institution › campus/fac
 (`institutions.parent_id`). Admins of a unit manage everything below it; sub-units inherit branding,
 master prompt, playbooks and learning-approach bars (`get_effective_config`).
 
+## Institution switcher and navigation
+
+Next to the logo, the **institution switcher** picks the unit every institution screen works on: Structure,
+Dashboard, Branding, AI Settings and Plan & usage show that unit and everything below it.
+Super admin: *All institutions* (platform screens: Institutions, Insights, Platform) or any unit of the tree (searchable
+when there are more than 8). Admins: only their own subtree (a single unit is shown as plain text). Teachers: no switcher.
+The choice is remembered per person in the browser and checked against what they can access; *Institutions* in the
+sidebar = *All institutions*; *View* on an institution card selects it. During *View as* it is locked to the viewed unit.
+The sidebar shows a label under each icon, grouped as Teaching · Institution · Platform (icons only on phones).
+
+## Insights (super admin only)
+
+*Insights* shows product usage for the last 7 / 30 / 90 days, for all institutions or the selected unit and what is
+below it (optionally without the owner's own activity): classes generated per day, active teachers (1/7/30 days), new and
+returning users, generated vs saved classes, student handouts, top institutions; top subjects, teaching languages, age
+bands, average learning-approach bars, institutions with a playbook; AI tokens (input/output) and an estimated cost in USD
+(prices per 1M tokens in *Platform → AI cost estimate*, default GPT-4o 2.50 / 10.00).
+Every AI request is recorded with its class settings (never the prompt text) in `ai_events` by `consume_ai_quota`,
+with the user's own session, so this works **without** the server key; institution and user come from the profile.
+Token counts and costs come from the server log and need `SUPABASE_SERVICE_ROLE_KEY` (the screen says so when it is
+missing). Data is read only through `platform_insights` (super admin; totals only, no names).
+
 ## View as (super admin only)
 
 The platform owner can see the app exactly as an institution sees it, without creating accounts:
@@ -64,12 +86,12 @@ institutions are set in *Platform → Plans & pricing*. Token accounting happens
 
 ## Tests
 
-`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs` and `tests/e2e-viewas.cjs` run the app in a headless browser
+`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs` and `tests/e2e-nav-insights.cjs` (switcher, sidebar, Insights) run the app in a headless browser
 against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/<file>`).
 
-`tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage) on a local
+`tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage, insights) on a local
 Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh`.
-API: `node --no-warnings --test tests/api-billing.test.mjs tests/api-live.test.mjs`.
+API: `node --no-warnings --test tests/api-billing.test.mjs tests/api-live.test.mjs tests/api-meta.test.mjs`.
 
 ## Live class (Aula en vivo)
 

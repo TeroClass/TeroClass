@@ -98,11 +98,11 @@ async function nav(page, sel) {
     if (await page.inputValue('#wl-name') !== 'The English Coach') throw new Error('no cargó la institución');
     await page.uncheck('#wl-open-reg');
     await page.evaluate(() => saveBranding());
-    await page.waitForFunction(() => document.getElementById('panel-superadmin').classList.contains('active'));
+    await page.waitForFunction(() => /Branding saved/.test(document.getElementById('toast').textContent));
+    if (!(await page.isVisible('#panel-branding'))) throw new Error('saving branding left the screen'); // the switcher keeps the institution
     if (db.institutions[0].open_registration !== false) throw new Error('open_registration no guardado');
     db.institutions[0].open_registration = true;
     const invs = db.invitations.filter(i => i.email === 'dire@tec.com').length; if (invs !== 1) throw new Error('invitación de admin duplicada: ' + invs);
-    await page.click('.btn-inst-action.primary');
   });
 
   await step('Invitar docente', async () => {

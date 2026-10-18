@@ -67,6 +67,11 @@ const untranslated = (page, sel) => page.evaluate(sel => {
   return out;
 }, sel);
 const brand = page => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--brand-primary').trim().toLowerCase());
+async function pickUnit(page, name) {
+  await page.click('#isw-btn'); await page.waitForSelector('#isw-menu.open');
+  await page.locator('#isw-list .isw-opt', { hasText: name }).first().click();
+  await page.waitForFunction(n => document.getElementById('isw-label').textContent.includes(n), name);
+}
 const nodeRow = (page, name) => page.locator('.tree-row', { has: page.locator('.tree-name', { hasText: name }) }).first();
 const writeCalls = () => calls.rpc.filter(c => WRITE_RPC.includes(c.fn)).map(c => c.fn);
 
@@ -187,6 +192,8 @@ const snapshot = () => JSON.stringify({ inst: db.institutions, plans: db.plannin
     if ((await page.textContent('#topbar-brand-name')) !== 'Tero Class') throw new Error('branding not restored');
     if ((await brand(page)) !== '#7c5cbf') throw new Error('brand color not restored: ' + await brand(page));
     if ((await page.textContent('#um-email')) !== SUPERADMIN_EMAIL) throw new Error('user menu not restored');
+    if (!/All institutions/.test(await page.textContent('#isw-label'))) throw new Error('switcher selection not restored');
+    await pickUnit(page, 'The English Coach');
     await page.click('#nav-structure');
     await page.waitForFunction(() => document.querySelectorAll('#structure-tree .tree-name').length === 4, null, { timeout: 8000 }).catch(() => { throw new Error('owner structure not restored'); });
     if (await page.evaluate(() => localStorage.getItem('tc_app_mode')) === 'teacher') throw new Error('owner mode overwritten');
@@ -201,6 +208,7 @@ const snapshot = () => JSON.stringify({ inst: db.institutions, plans: db.plannin
     await page.fill('#prompt-input', 'Owner topic'); await page.click('#btn-generate'); await page.waitForSelector('#lp-doc');
     await page.evaluate(() => { document.getElementById('lp-doc').innerText = 'OWNER DRAFT'; });
     await page.click('#mode-switch [data-mode="admin"]');
+    await pickUnit(page, 'The English Coach'); await page.click('#nav-structure');
     await page.waitForSelector('#panel-structure.active'); await page.waitForSelector('.tree-row');
     const before = snapshot();
     await nodeRow(page, 'Cátedra Inglés').locator('[data-h="view-as"]').click();
@@ -244,6 +252,9 @@ const snapshot = () => JSON.stringify({ inst: db.institutions, plans: db.plannin
     if (!(await page.isVisible('#mode-switch'))) throw new Error('mode switch not restored');
     await page.click('#mode-switch [data-mode="teacher"]'); await page.click('#nav-ai');
     if ((await page.textContent('#lp-doc')).trim() !== 'OWNER DRAFT') throw new Error('owner draft lost: ' + await page.textContent('#lp-doc'));
+    // bars follow the unit chosen in the switcher (The English Coach hides Gamification); "All institutions" → the owner's own bars
+    if (!/The English Coach/.test(await page.textContent('#isw-label'))) throw new Error('switcher not restored after Exit');
+    await pickUnit(page, 'All institutions');
     await page.waitForSelector('#sl-gamification'); // the owner's own bars again
     if (await page.isVisible('#va-gen-note')) throw new Error('preview note still visible');
   });
@@ -251,7 +262,7 @@ const snapshot = () => JSON.stringify({ inst: db.institutions, plans: db.plannin
   await run('Generic teacher → empty Home; reload always starts in normal mode; Spanish banner', browser, async ({ page }) => {
     const t = seed();
     await login(page, SUPERADMIN_EMAIL);
-    await page.waitForSelector('#panel-structure.active'); await page.waitForSelector('.tree-row');
+    await page.waitForSelector('#panel-superadmin.active'); await page.waitForSelector('.inst-card');
     const ok = await page.evaluate(id => enterViewAs({ unitId: id, perspective: 'teacher', person: null }), t.norte.id);
     if (!ok) throw new Error('enterViewAs refused for the owner');
     await page.waitForSelector('#panel-home.active');

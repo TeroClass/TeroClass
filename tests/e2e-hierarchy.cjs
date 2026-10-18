@@ -46,6 +46,12 @@ async function login(page, email, path = '/') {
 }
 const waitToast = (page, re) => page.waitForFunction(src => new RegExp(src).test(document.getElementById('toast').textContent), re.source, { timeout: 8000 });
 const clearToast = page => page.evaluate(() => { document.getElementById('toast').textContent = ''; });
+// top bar institution switcher: choose a unit by name ('All institutions' = super admin's platform view)
+async function pickUnit(page, name) {
+  await page.click('#isw-btn'); await page.waitForSelector('#isw-menu.open');
+  await page.locator('#isw-list .isw-opt', { hasText: name }).first().click();
+  await page.waitForFunction(n => !document.getElementById('isw-menu').classList.contains('open') && document.getElementById('isw-label').textContent.includes(n), name);
+}
 const nodeRow = (page, name) => page.locator('.tree-row', { has: page.locator('.tree-name', { hasText: name }) }).first();
 // Madre › Sede 1 (own color) › Cátedra 1 ; Madre › Sede 2. Admins at each level, teachers, classes and playbooks.
 function seedTree() {
@@ -73,15 +79,18 @@ function seedTree() {
     await page.waitForSelector('#panel-superadmin.active');
     if (!(await page.isVisible('#mode-switch'))) throw new Error('no mode switch for super admin');
     if (await page.isVisible('#nav-ai') || await page.isVisible('#nav-home')) throw new Error('admin mode shows teacher nav');
-    if (!(await page.isVisible('#nav-structure')) || !(await page.isVisible('#nav-platform'))) throw new Error('admin nav missing');
+    if (!(await page.isVisible('#nav-superadmin')) || !(await page.isVisible('#nav-platform')) || !(await page.isVisible('#nav-insights'))) throw new Error('platform nav missing');
+    if (await page.isVisible('#nav-structure')) throw new Error('institution nav visible in "All institutions"');
     if (await page.isVisible('.btn-new-class')) throw new Error('"New class" visible in admin mode');
-    await page.click('#nav-structure');
-    await page.waitForSelector('.tree-empty');
-    if (!/No institutions yet/.test(await page.textContent('.tree-empty'))) throw new Error('no empty state');
-    await page.click('.tree-empty [data-h="new-inst"]');
+    if (!/All institutions/.test(await page.textContent('#isw-label'))) throw new Error('switcher not on All');
+    await page.waitForSelector('.inst-empty');
+    if (!/No institutions yet/.test(await page.textContent('.inst-empty'))) throw new Error('no empty state');
+    await page.click('#panel-superadmin .btn-create-inst');
     await page.fill('#new-inst-name', 'Universidad X'); await page.fill('#new-inst-admin', 'rector@x.edu');
     await page.click('#modal-create-inst .btn-modal-save');
     await waitToast(page, /created/);
+    await pickUnit(page, 'Universidad X');
+    await page.waitForSelector('#nav-structure', { state: 'visible' });
     await page.click('#nav-structure');
     await page.waitForSelector('.tree-hint');
     if (!/Create your first unit/.test(await page.textContent('.tree-hint'))) throw new Error('no "first unit" guidance');
@@ -131,7 +140,11 @@ function seedTree() {
     await page.waitForFunction(() => /Madre H›Sede 1›Cátedra 1/.test(document.getElementById('ctx-crumb')?.textContent || ''));
     if (!/Department \/ Area/.test(await page.textContent('#ctx-bar'))) throw new Error('breadcrumb level');
     await page.waitForFunction(() => document.getElementById('m-plans').textContent === '2');
+    if (!/Cátedra 1/.test(await page.textContent('#isw-label'))) throw new Error('Open did not set the switcher');
     await page.click('#nav-structure');
+    await page.waitForFunction(() => document.querySelectorAll('.tree-row').length === 1); // Structure = the selected unit
+    await pickUnit(page, 'Madre H');
+    await page.waitForFunction(() => document.querySelectorAll('.tree-row').length === 4);
     await nodeRow(page, 'Sede 2').locator('[data-h="invite"]').click();
     await page.waitForSelector('#modal-invite.active');
     if (!/Madre H › Sede 2/.test(await page.textContent('#invite-org-name'))) throw new Error('invite modal target: ' + await page.textContent('#invite-org-name'));
@@ -182,10 +195,8 @@ function seedTree() {
     if (!cu || cu.label !== 'Outdoor learning' || cu.def !== 40 || !/^c_outdoor_learning_[a-z0-9]{1,4}$/.test(cu.key)) throw new Error('custom bar: ' + JSON.stringify(cu));
     await page.fill('#meth-new-label', '<b>x</b>'); await clearToast(page); await page.click('[data-h="meth-add"]');
     await waitToast(page, /cannot contain/);
-    // sede: inherited view
-    await page.click('#nav-structure');
-    await nodeRow(page, 'Sede 1').locator('[data-h="open"]').click();
-    await page.click('#nav-master');
+    // sede: inherited view (switcher → AI Settings follows it)
+    await pickUnit(page, 'Sede 1');
     await page.waitForFunction(() => /Hidden by\s*Madre H/.test(document.getElementById('meth-list')?.innerText || ''));
     const txt = await page.textContent('#meth-list');
     if (!/Outdoor learning/.test(txt) || !/from\s*Madre H/.test(txt) || !/Bars inherited from the units above/.test(txt)) throw new Error('inherited view: ' + txt);
@@ -250,7 +261,8 @@ function seedTree() {
     await page.check('#wl-inherit');
     await page.evaluate(() => saveBranding()); await waitToast(page, /Branding saved/);
     if (t.sede2.color !== null || t.sede2.font !== null || t.sede2.logo_url !== null) throw new Error('inherit did not clear own values: ' + JSON.stringify([t.sede2.color, t.sede2.font]));
-    await page.click('#nav-structure'); await page.waitForSelector('.tree-row');
+    await pickUnit(page, 'Madre H');
+    await page.click('#nav-structure'); await page.waitForFunction(() => document.querySelectorAll('.tree-row').length === 4);
     if (await page.isVisible('#wl-inherit-row')) throw new Error('inherit row visible outside branding');
     await nodeRow(page, 'Madre H').locator('[data-h="brand"]').click();
     if (await page.isVisible('#wl-inherit-row')) throw new Error('main institution offers inheritance');
@@ -286,6 +298,8 @@ function seedTree() {
     if (await page.locator('#pf-table-body select').count()) throw new Error('platform owner row is editable');
     await page.click('.topbar-right .lang-toggle button[data-lang="es"]');
     await page.waitForFunction(() => /Modo admin/.test(document.getElementById('mode-switch').innerText) && /Todas las cuentas/.test(document.body.innerText));
+    if (await page.textContent('#isw-label') !== 'Todas las instituciones') throw new Error('switcher label not translated');
+    await pickUnit(page, 'Madre H');
     await page.click('#nav-structure');
     await page.waitForFunction(() => /Institución madre/.test(document.getElementById('structure-tree').textContent) && /Sede \/ Facultad/.test(document.getElementById('structure-tree').textContent)); // badges are uppercased by CSS
     if (!/Estructura/.test(await page.textContent('#panel-structure .sa-title'))) throw new Error('title not translated');

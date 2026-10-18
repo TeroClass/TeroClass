@@ -279,7 +279,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await page.waitForSelector('#pf-settings-card');
     if (await page.isVisible('#pf-billing-banner')) throw new Error('banner shown while configured');
     st.status = { billing_configured: true, billing_ok: false };
-    await page.click('#nav-structure'); await page.click('#nav-platform');
+    await page.click('#nav-superadmin'); await page.click('#nav-platform');
     await page.waitForSelector('#pf-billing-banner.warn', { state: 'visible' });
     if (!/not working/.test(await text(page, '#pf-billing-banner'))) throw new Error('warn banner');
   });
@@ -342,7 +342,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await page.click('#nav-platform');
     await page.waitForSelector('#pf-settings-card');
     await page.waitForSelector('#pf-billing-banner', { state: 'visible' });
-    for (const sel of ['#pf-billing-banner', '#pf-requests-card', '#pf-settings-card', '#pf-plans-card']) { u = await untranslated(page, sel); if (u.length) throw new Error(sel + ' sin traducir: ' + JSON.stringify(u)); }
+    for (const sel of ['#pf-billing-banner', '#pf-requests-card', '#pf-settings-card', '#pf-ai-prices-card', '#pf-plans-card']) { u = await untranslated(page, sel); if (u.length) throw new Error(sel + ' sin traducir: ' + JSON.stringify(u)); }
   });
 
   console.log(failed ? `${failed} billing scenario(s) FAILED` : 'All billing scenarios passed');

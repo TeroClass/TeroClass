@@ -10,6 +10,12 @@ let failed = 0;
 
 // Admins have "Admin mode" | "Teacher mode": a sidebar button of the other mode is hidden, so switch first.
 const TEACHER_NAV = ['#nav-home', '#nav-ai'];
+// top bar institution switcher (super admin / admins): choose a unit by name
+async function pickUnit(page, name) {
+  await page.click('#isw-btn'); await page.waitForSelector('#isw-menu.open');
+  await page.locator('#isw-list .isw-opt', { hasText: name }).first().click();
+  await page.waitForFunction(n => document.getElementById('isw-label').textContent.includes(n), name);
+}
 async function nav(page, sel) {
   if (!(await page.isVisible(sel)) && (await page.isVisible('#mode-switch'))) await page.click(`#mode-switch [data-mode="${TEACHER_NAV.includes(sel) ? 'teacher' : 'admin'}"]`);
   await page.click(sel);
@@ -236,10 +242,16 @@ async function run(name, browser, opts, fn) {
     M.seedInstitution({ name: 'Colegio Uno', slug: 'uno', font: 'Georgia', open_registration: false });
     M.seedInstitution({ name: 'Colegio Dos', slug: 'dos' });
     await register(page, M.SUPERADMIN_EMAIL);
-    await nav(page, '#nav-master');
-    if (!(await page.isVisible('#master-no-inst'))) throw new Error('no notice without institution');
-    await nav(page, '#nav-superadmin'); await page.click('.inst-card:nth-child(1) [data-action="view-inst"]');
-    await nav(page, '#nav-superadmin'); // going back to the list keeps the context
+    // "All institutions": institution screens are not offered (and can't be opened by code either)
+    if (await page.isVisible('#nav-master') || await page.isVisible('#nav-branding')) throw new Error('institution nav visible in All institutions');
+    await page.evaluate(() => showPanel('master'));
+    if (!(await page.isVisible('#panel-superadmin'))) throw new Error('institution screen opened without a unit');
+    await page.click('.inst-card:nth-child(1) [data-action="view-inst"]');
+    await page.waitForSelector('#panel-admin.active');
+    if (!(await page.textContent('#isw-label')).includes('Colegio Uno')) throw new Error('View did not set the switcher');
+    await nav(page, '#nav-superadmin'); // the list = All institutions
+    if (!(await page.textContent('#isw-label')).includes('All institutions') || await page.isVisible('#nav-branding')) throw new Error('Institutions did not select All');
+    await pickUnit(page, 'Colegio Uno');
     await nav(page, '#nav-branding');
     if (await page.inputValue('#wl-name') !== 'Colegio Uno') throw new Error('branding lost the viewed institution');
     if (!(await page.textContent('#branding-ctx-badge')).includes('Colegio Uno')) throw new Error('badge');
@@ -250,14 +262,19 @@ async function run(name, browser, opts, fn) {
     await nav(page, '#nav-superadmin'); await page.click('.inst-card:nth-child(2) [data-action="edit-inst"]');
     if (await page.inputValue('#wl-name') !== 'Colegio Dos' || !(await page.isChecked('#wl-open-reg'))) throw new Error('L2 fields not reset');
     if ((await page.getAttribute('.font-option.selected', 'data-font')) !== 'Inter') throw new Error('L2 font not reset');
-    await page.click('#btn-new-inst');
-    if (await page.inputValue('#wl-name') !== '' || await page.evaluate(() => currentOrgId) !== null) throw new Error('new institution did not clear');
-    await page.evaluate(() => goStep(4));
-    await page.fill('#wl-name', 'Escuela Ñandú Señor');
-    const slug = await page.inputValue('#wl-slug'); if (slug !== 'escuela-nandu-senor') throw new Error('slug ' + slug);
-    const link = await page.textContent('#inst-url-text'); if (!link.endsWith('/org/escuela-nandu-senor')) throw new Error('link ' + link);
-    await page.evaluate(() => saveBranding());
-    await page.waitForFunction(() => document.getElementById('panel-superadmin').classList.contains('active'));
+    if (!(await page.textContent('#isw-label')).includes('Colegio Dos')) throw new Error('Edit did not set the switcher');
+    await page.click('#btn-new-inst'); // "＋ New institution" opens the create modal (the switcher keeps Colegio Dos)
+    await page.waitForSelector('#modal-create-inst.active');
+    if (await page.evaluate(() => currentOrgId) === null) throw new Error('new institution cleared the selection');
+    await page.fill('#new-inst-name', 'Escuela Ñandú Señor');
+    const slug = await page.inputValue('#new-inst-slug'); if (slug !== 'escuela-nandu-senor') throw new Error('slug ' + slug);
+    const link = await page.textContent('#new-inst-link'); if (!link.endsWith('/org/escuela-nandu-senor')) throw new Error('link ' + link);
+    await page.fill('#new-inst-admin', 'dir@nandu.edu');
+    await page.click('#modal-create-inst .btn-modal-save');
+    await waitToast(page, /Institution "Escuela Ñandú Señor" created/);
+    await page.click('#isw-btn');
+    if (!(await page.textContent('#isw-list')).includes('Escuela Ñandú Señor')) throw new Error('new institution not in the switcher');
+    await page.keyboard.press('Escape');
     const created = db.institutions.find(i => i.slug === 'escuela-nandu-senor'); if (!created) throw new Error('not created');
     if (calls.rpc.filter(c => c.fn === 'invite_member').length) throw new Error('L3 double invite');
   });
@@ -317,7 +334,9 @@ async function run(name, browser, opts, fn) {
   });
 
   await run('Branding preview Admin/Teacher toggle switches the preview', browser, {}, async ({ page }) => {
+    M.seedInstitution({ name: 'Colegio Uno', slug: 'uno' });
     await register(page, M.SUPERADMIN_EMAIL);
+    await pickUnit(page, 'Colegio Uno');
     await nav(page, '#nav-branding');
     const vis = () => page.isVisible('#preview-box .preview-metrics');
     if (!(await vis())) throw new Error('admin view missing metrics');
@@ -326,7 +345,9 @@ async function run(name, browser, opts, fn) {
   });
 
   await run('L12 logo input reset after error', browser, {}, async ({ page }) => {
+    M.seedInstitution({ name: 'Colegio Uno', slug: 'uno' });
     await register(page, M.SUPERADMIN_EMAIL);
+    await pickUnit(page, 'Colegio Uno');
     await nav(page, '#nav-branding');
     await page.setInputFiles('#wl-logo-upload', { name: 'big.png', mimeType: 'image/png', buffer: Buffer.alloc(2 * 1024 * 1024 + 10) });
     await waitToast(page, /under 2MB/);

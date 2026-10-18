@@ -3,6 +3,8 @@
 // Jerarquía: parent_id, methodology_config, get_effective_config, delete_institution, admin_move_member, platform_stats.
 // Plan y consumo: get_billing_summary, request_token_pack, list_purchase_requests, decide_purchase_request,
 // set_institution_plan, update_platform_settings, platform_billing_overview, get_seat_status (+ seats in invite_member / get_org_branding).
+// Insights: platform_insights (super admin only; data from insightsData(), overridable per test via M.insights.fixture),
+// update_ai_prices (+ ai_price_input / ai_price_output in the platform settings).
 const fs = require('fs');
 const path = require('path');
 
@@ -23,11 +25,29 @@ const SUPERADMIN_EMAIL = 'owner@teroclass.test';
 const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [] };
 const calls = { rpc: [], inserts: {} };
 // billing state (same rules as the SQL functions, simplified): accounts[rootId] = {seats, monthly_tokens, extra}; usage[rootId] = used this month
-const BILL_DEFAULTS = () => ({ settings: { pack_tokens: 2000000, pack_price: 11.99, currency: 'USD', personal_monthly_tokens: 200000, default_seats: 10, default_monthly_tokens: 2000000 }, accounts: {}, usage: {}, requests: [], log: [] });
+const BILL_DEFAULTS = () => ({ settings: { pack_tokens: 2000000, pack_price: 11.99, currency: 'USD', personal_monthly_tokens: 200000, default_seats: 10, default_monthly_tokens: 2000000, ai_price_input: 2.5, ai_price_output: 10 }, accounts: {}, usage: {}, requests: [], log: [] });
 const bill = BILL_DEFAULTS();
 let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
-function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; calls.rpc = []; calls.inserts = {}; Object.assign(bill, BILL_DEFAULTS()); }
+const insights = { fixture: null }; // tests may set insights.fixture = (body) => json
+function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; calls.rpc = []; calls.inserts = {}; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; }
+// Default insights: deterministic sample data shaped like public.platform_insights (smaller numbers for a unit)
+function insightsData(body) {
+  const days = Math.min(Math.max(Number(body.p_days) || 30, 1), 366); const unit = body.p_unit ? instById(body.p_unit) : null;
+  const f = unit ? 1 : 3; const today = new Date(); const day = i => new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (days - 1 - i))).toISOString().slice(0, 10);
+  const per_day = Array.from({ length: days }, (_, i) => ({ day: day(i), classes: ((i * 7) % 5) * f + (i % 3 === 0 ? 1 : 0) }));
+  const classes = per_day.reduce((n, d) => n + d.classes, 0);
+  const roots = db.institutions.filter(i => (unit ? descendantsOf(unit.id).concat(unit.id).includes(i.id) : !i.parent_id));
+  return { days, from: per_day[0].day, to: per_day[days - 1].day, exclude_self: body.p_exclude_self !== false, unit: unit ? { id: unit.id, name: unit.name } : null, tracking_since: new Date().toISOString(),
+    usage: { per_day, classes, saved: Math.round(classes * 0.6), handouts: 4 * f, requests: classes + 9, failed: 1, active: { d1: 2 * f, d7: 4 * f, d30: 6 * f }, active_period: 6 * f, new_users: 3 * f, returning_users: 2 * f,
+      top_institutions: roots.slice(0, 5).map((i, n) => ({ id: i.id, name: i.name, classes: (5 - n) * 4 * f })) },
+    content: { classes, subjects: [{ name: 'Math', count: 9 * f }, { name: 'History', count: 5 * f }, { name: 'English', count: 3 * f }], languages: [{ name: 'Spanish', count: 12 * f }, { name: 'English', count: 4 * f }],
+      age_bands: [{ name: 'teen', count: 8 * f }, { name: 'primary', count: 5 * f }, { name: 'adult', count: 2 * f }], levels: [{ name: 'Secondary', count: 9 * f }],
+      bars: [{ key: 'gamification', avg: 42.5, count: 10 }, { key: 'projectbased', avg: 61, count: 10 }, { key: 'c_outdoor_x1', avg: 30, count: 4 }], playbook_institutions: 1, institutions: roots.length || 1 },
+    costs: { recorded_ever: true, requests: 30 * f, prompt_tokens: 1200000 * f, completion_tokens: 400000 * f, total_tokens: 1600000 * f, classes: 12 * f, price_input: bill.settings.ai_price_input, price_output: bill.settings.ai_price_output,
+      usd: Math.round((1.2 * f * bill.settings.ai_price_input + 0.4 * f * bill.settings.ai_price_output) * 10000) / 10000,
+      by_institution: roots.slice(0, 5).map((i, n) => ({ id: i.id, name: i.name, tokens: (5 - n) * 200000 * f, classes: (5 - n) * f, usd: (5 - n) * f })) } };
+}
 function session(u) {
   return { access_token: 'tok-' + u.id, token_type: 'bearer', expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600,
     refresh_token: 'r-' + u.id, user: { id: u.id, aud: 'authenticated', role: 'authenticated', email: u.email, user_metadata: u.meta, app_metadata: {} } };
@@ -167,6 +187,14 @@ async function handleSupabase(route) {
       return json(200, { month: new Date().toISOString().slice(0, 7) + '-01', settings: bill.settings, pending_requests: bill.requests.filter(r => r.status === 'pending').length, personal: { users: 0, used_month: 0 },
         accounts: db.institutions.filter(i => !i.parent_id).map(i => { const a = account(i.id); return { id: i.id, name: i.name, slug: i.slug, seats: a.seats, seats_used: seatsUsed(i.id), monthly_tokens: a.monthly_tokens, extra_balance: a.extra, used_month: bill.usage[i.id] || 0, extra_used_month: 0, pending: bill.requests.some(r => r.root_id === i.id && r.status === 'pending') }; }) });
     }
+    if (fn === 'platform_insights') {
+      if (!isSA) return NOAUTH(); if (body.p_unit && !instById(body.p_unit)) return json(400, { code: 'P0001', message: 'Unidad no encontrada' });
+      return json(200, insights.fixture ? insights.fixture(body) : insightsData(body));
+    }
+    if (fn === 'update_ai_prices') {
+      if (!isSA) return NOAUTH(); if (!(body.p_input >= 0 && body.p_input <= 1000 && body.p_output >= 0 && body.p_output <= 1000)) return json(400, { code: 'P0001', message: 'Precio de IA inválido (de 0 a 1000 USD por millón de tokens)' });
+      Object.assign(bill.settings, { ai_price_input: body.p_input, ai_price_output: body.p_output }); return json(200, { ai_price_input: body.p_input, ai_price_output: body.p_output });
+    }
     if (fn === 'create_institution') {
       if (db.institutions.some(i => i.slug === body.p_slug)) return json(409, { code: '23505', message: 'duplicate key value violates unique constraint "institutions_slug_key"' });
       if (body.p_parent && chainOf(body.p_parent).length >= 3) return json(400, { code: 'P0001', message: 'Máximo 3 niveles: institución madre › sede/facultad › cátedra/área' });
@@ -226,4 +254,4 @@ async function handleSupabase(route) {
   }
   return json(404, { message: 'unmocked ' + m + ' ' + p });
 }
-module.exports = { db, bill, calls, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+module.exports = { db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

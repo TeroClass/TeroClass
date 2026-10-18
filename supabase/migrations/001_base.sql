@@ -94,6 +94,29 @@ create table if not exists public.ai_usage (
   primary key (user_id, day)
 );
 
+-- Cada pedido a la IA con sus metadatos (tipo, materias, idioma, franja de edad, nivel, barras), para
+-- Insights del súper admin. Lo escribe solo consume_ai_quota (con el token del usuario: funciona aun sin
+-- la clave del servidor) y finish_ai_event marca si terminó bien. Nadie lo lee directo (sin políticas):
+-- solo platform_insights (súper admin), con totales, sin nombres.
+create table if not exists public.ai_events (
+  id bigserial primary key,
+  created_at timestamptz not null default now(),
+  user_id uuid references auth.users(id) on delete set null,
+  inst_id uuid references public.institutions(id) on delete set null,
+  root_id uuid references public.institutions(id) on delete set null,
+  kind text not null default 'generate',
+  subjects text[] not null default '{}',
+  language text,
+  age_band text,
+  level text,
+  bars jsonb not null default '{}'::jsonb,
+  ok boolean,
+  finished_at timestamptz
+);
+create index if not exists ai_events_created_idx on public.ai_events (created_at);
+create index if not exists ai_events_inst_idx on public.ai_events (inst_id, created_at);
+create index if not exists ai_events_user_idx on public.ai_events (user_id, created_at);
+
 -- ========== PLAN Y CONSUMO: tablas ==========
 -- Cada institución madre (parent_id null) es una "cuenta": compra ASIENTOS y recibe una
 -- ASIGNACIÓN MENSUAL de tokens de IA; las sub-unidades usan la cuenta de su madre.
@@ -114,6 +137,11 @@ create table if not exists public.platform_settings (
   updated_at timestamptz not null default now()
 );
 insert into public.platform_settings (id) values (true) on conflict (id) do nothing;
+-- Precio de la IA por millón de tokens (USD), para el costo estimado de Insights. Por defecto GPT-4o.
+alter table public.platform_settings add column if not exists ai_price_input numeric(10,4) not null default 2.50
+  check (ai_price_input >= 0 and ai_price_input <= 1000);
+alter table public.platform_settings add column if not exists ai_price_output numeric(10,4) not null default 10.00
+  check (ai_price_output >= 0 and ai_price_output <= 1000);
 
 -- Plan de cada cuenta (una fila por institución madre; se crea al crear la madre o al primer uso)
 create table if not exists public.billing_accounts (
@@ -1050,7 +1078,48 @@ $$ select case
    from (select null) x left join public.profiles p on p.id = p_uid $$;
 revoke all on function public.ai_daily_limit(uuid) from public, anon, authenticated;
 
-create or replace function public.consume_ai_quota() returns json
+-- Metadatos de un pedido a la IA: solo valores conocidos (el resto se descarta). Uso interno.
+-- {kind, subjects[≤5, ≤60 car.], language, age_band, level, bars{clave: 0-100, ≤20}}
+create or replace function public.ai_meta_clean(p jsonb) returns jsonb
+language plpgsql immutable set search_path = public as
+$$
+declare
+  v_kind text; v_subj text[] := '{}'; v_s text; v_bars jsonb := '{}'::jsonb; k text; v jsonb; n int := 0;
+begin
+  if p is null or jsonb_typeof(p) <> 'object' then p := '{}'::jsonb; end if;
+  v_kind := case when jsonb_typeof(p->'kind') = 'string' then lower(p->>'kind') else '' end;
+  if v_kind not in ('generate','continue','verify','student','playbook') then v_kind := 'other'; end if;
+  if jsonb_typeof(p->'subjects') = 'array' then
+    for v in select e from jsonb_array_elements(p->'subjects') e limit 20 loop
+      exit when coalesce(array_length(v_subj, 1), 0) >= 5;
+      if jsonb_typeof(v) = 'string' then
+        v_s := left(btrim(regexp_replace(regexp_replace(v #>> '{}', '[[:cntrl:]<>]', ' ', 'g'), '\s+', ' ', 'g')), 60);
+        if v_s <> '' and not exists (select 1 from unnest(v_subj) x where lower(x) = lower(v_s)) then v_subj := v_subj || v_s; end if;
+      end if;
+    end loop;
+  end if;
+  if jsonb_typeof(p->'bars') = 'object' then
+    for k, v in select key, value from jsonb_each(p->'bars') limit 50 loop
+      exit when n >= 20;
+      if k ~ '^[a-z][a-z0-9_]{0,40}$' and jsonb_typeof(v) = 'number' then
+        v_bars := v_bars || jsonb_build_object(k, least(greatest(round((v #>> '{}')::numeric), 0), 100)::int);
+        n := n + 1;
+      end if;
+    end loop;
+  end if;
+  return jsonb_build_object('kind', v_kind, 'subjects', to_jsonb(v_subj),
+    'language', case when p->>'language' in ('English','Spanish','Portuguese','French','German','Italian') then p->>'language' end,
+    'age_band', case when p->>'age_band' in ('infant','preschool','early','primary','preteen','teen','olderteen','adult','mixed') then p->>'age_band' end,
+    'level', case when p->>'level' in ('Early Childhood','Primary','Secondary','Intermediate','Advanced','University','Adult Education') then p->>'level' end,
+    'bars', v_bars);
+end $$;
+revoke all on function public.ai_meta_clean(jsonb) from public, anon, authenticated;
+
+-- Suma 1 uso del día y, si viene p_meta (lo manda api/generate.js), anota el pedido en ai_events
+-- (institución y usuario salen del perfil, nunca del pedido). Si no se pudo anotar, el pedido sigue igual.
+-- La versión vieja sin argumentos se reemplaza (llamarla sin nada sigue funcionando: p_meta es opcional).
+drop function if exists public.consume_ai_quota();
+create or replace function public.consume_ai_quota(p_meta jsonb default null) returns json
 language plpgsql volatile security definer set search_path = public as
 $$
 declare
@@ -1058,6 +1127,9 @@ declare
   v_day   date := (now() at time zone 'utc')::date;
   v_limit integer;
   v_used  integer;
+  v_inst  uuid;
+  v_event bigint;
+  m       jsonb;
 begin
   if v_uid is null then raise exception 'No autorizado'; end if;
   v_limit := public.ai_daily_limit(v_uid);
@@ -1068,10 +1140,38 @@ begin
     select count into v_used from public.ai_usage where user_id = v_uid and day = v_day;
     return json_build_object('allowed', false, 'used', v_used, 'limit', v_limit);
   end if;
-  return json_build_object('allowed', true, 'used', v_used, 'limit', v_limit);
+  if p_meta is null then
+    return json_build_object('allowed', true, 'used', v_used, 'limit', v_limit);
+  end if;
+  begin
+    m := public.ai_meta_clean(p_meta);
+    select institution_id into v_inst from public.profiles where id = v_uid;
+    insert into public.ai_events (user_id, inst_id, root_id, kind, subjects, language, age_band, level, bars)
+    values (v_uid, v_inst, case when v_inst is not null then public.billing_root(v_inst) end, m->>'kind',
+            array(select jsonb_array_elements_text(m->'subjects')), m->>'language', m->>'age_band', m->>'level', m->'bars')
+    returning id into v_event;
+  exception when others then v_event := null;
+  end;
+  return json_build_object('allowed', true, 'used', v_used, 'limit', v_limit, 'event', v_event);
 end $$;
-revoke all on function public.consume_ai_quota() from public, anon;
-grant execute on function public.consume_ai_quota() to authenticated;
+revoke all on function public.consume_ai_quota(jsonb) from public, anon;
+grant execute on function public.consume_ai_quota(jsonb) to authenticated;
+
+-- api/generate.js (con el token del usuario) marca cómo terminó su pedido: una sola vez, solo los propios,
+-- dentro de los 15 minutos. Devuelve true si lo marcó.
+create or replace function public.finish_ai_event(p_event bigint, p_ok boolean) returns boolean
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_n integer;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  update public.ai_events set ok = coalesce(p_ok, false), finished_at = now()
+   where id = p_event and user_id = auth.uid() and ok is null and created_at > now() - interval '15 minutes';
+  get diagnostics v_n = row_count;
+  return v_n > 0;
+end $$;
+revoke all on function public.finish_ai_event(bigint, boolean) from public, anon;
+grant execute on function public.finish_ai_event(bigint, boolean) to authenticated;
 
 -- Consultar el uso de hoy sin gastar (para mostrar en la app)
 create or replace function public.get_ai_quota() returns json
@@ -1492,7 +1592,8 @@ begin
   return json_build_object(
     'month', v_month,
     'settings', json_build_object('pack_tokens', s.pack_tokens, 'pack_price', s.pack_price, 'currency', s.currency,
-      'personal_monthly_tokens', s.personal_monthly_tokens, 'default_seats', s.default_seats, 'default_monthly_tokens', s.default_monthly_tokens),
+      'personal_monthly_tokens', s.personal_monthly_tokens, 'default_seats', s.default_seats, 'default_monthly_tokens', s.default_monthly_tokens,
+      'ai_price_input', s.ai_price_input, 'ai_price_output', s.ai_price_output),
     'accounts', coalesce((select json_agg(x order by x.name) from (
       select i.id, i.name, i.slug,
              coalesce(a.seats, s.default_seats) as seats, public.seats_used(i.id) as seats_used,
@@ -1510,6 +1611,165 @@ begin
 end $$;
 revoke all on function public.platform_billing_overview() from public, anon;
 grant execute on function public.platform_billing_overview() to authenticated;
+
+-- ========== INSIGHTS DE LA PLATAFORMA (solo súper admin) ==========
+-- ai_events: sin acceso directo para nadie (lo escriben consume_ai_quota / finish_ai_event).
+alter table public.ai_events enable row level security;
+revoke all on public.ai_events from anon, authenticated;
+revoke all on sequence public.ai_events_id_seq from anon, authenticated;
+
+-- Súper admin: precio de la IA por millón de tokens (USD) para el costo estimado
+create or replace function public.update_ai_prices(p_input numeric, p_output numeric) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_input is null or p_input < 0 or p_input > 1000 or p_output is null or p_output < 0 or p_output > 1000 then
+    raise exception 'Precio de IA inválido (de 0 a 1000 USD por millón de tokens)';
+  end if;
+  update public.platform_settings
+     set ai_price_input = round(p_input, 4), ai_price_output = round(p_output, 4), updated_by = auth.uid(), updated_at = now()
+   where id;
+  return (select json_build_object('ai_price_input', ai_price_input, 'ai_price_output', ai_price_output)
+            from public.platform_settings where id);
+end $$;
+revoke all on function public.update_ai_prices(numeric, numeric) from public, anon;
+grant execute on function public.update_ai_prices(numeric, numeric) to authenticated;
+
+-- Súper admin: uso del producto en los últimos p_days días (UTC), de toda la plataforma o de una unidad
+-- y todo lo que cuelga de ella. p_exclude_self: sin la actividad de quien consulta. Un solo JSON:
+--   usage   {per_day[{day,classes}], classes, saved, handouts, requests, failed, active{d1,d7,d30},
+--            active_period, new_users, returning_users (activos en 2+ semanas distintas), top_institutions[]}
+--   content {classes, subjects[], languages[], age_bands[], levels[], bars[{key,avg,count}],
+--            playbook_institutions, institutions}
+--   costs   {recorded_ever, requests, prompt_tokens, completion_tokens, total_tokens, classes,
+--            price_input, price_output, usd, by_institution[]}   (tokens: solo con la clave del servidor)
+-- Sin nombres ni emails de personas: solo totales.
+create or replace function public.platform_insights(p_days integer, p_unit uuid default null, p_exclude_self boolean default true)
+returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare
+  v_days  integer := least(greatest(coalesce(p_days, 30), 1), 366);
+  v_today date := (now() at time zone 'utc')::date;
+  v_from  date;
+  v_since timestamptz;
+  v_me    uuid := auth.uid();
+  v_excl  boolean := coalesce(p_exclude_self, true);
+  v_units uuid[];
+  v_pin   numeric; v_pout numeric;
+  r json;
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  v_from := v_today - (v_days - 1);
+  v_since := v_from::timestamp at time zone 'utc';
+  if p_unit is not null then
+    if not exists (select 1 from public.institutions where id = p_unit) then raise exception 'Unidad no encontrada'; end if;
+    v_units := array(select p_unit union all select public.institution_descendants(p_unit));
+  end if;
+  select ai_price_input, ai_price_output into v_pin, v_pout from public.platform_settings where id;
+  v_pin := coalesce(v_pin, 2.50); v_pout := coalesce(v_pout, 10.00);
+
+  with
+  ev as (   -- pedidos a la IA del período, en el alcance
+    select e.* from public.ai_events e
+     where e.created_at >= v_since
+       and (v_units is null or e.inst_id = any(v_units))
+       and (not v_excl or e.user_id is distinct from v_me)),
+  gen as (select * from ev where ev.kind = 'generate' and ev.ok),
+  pl as (   -- clases guardadas en el período
+    select p.* from public.plannings p
+     where p.created_at >= v_since
+       and (v_units is null or p.institution_id = any(v_units))
+       and (not v_excl or p.owner_id is distinct from v_me)),
+  act as (  -- actividad (generó o guardó una clase) de los últimos 30 días
+    select e.user_id as uid, e.created_at as ts from public.ai_events e
+     where e.created_at > now() - interval '30 days' and e.user_id is not null
+       and (v_units is null or e.inst_id = any(v_units)) and (not v_excl or e.user_id is distinct from v_me)
+    union all
+    select p.owner_id, p.updated_at from public.plannings p
+     where p.updated_at > now() - interval '30 days'
+       and (v_units is null or p.institution_id = any(v_units)) and (not v_excl or p.owner_id is distinct from v_me)),
+  actp as ( -- actividad del período
+    select ev.user_id as uid, ev.created_at as ts from ev where ev.user_id is not null
+    union all select pl.owner_id, pl.created_at from pl
+    union all
+    select p.owner_id, p.updated_at from public.plannings p
+     where p.updated_at >= v_since
+       and (v_units is null or p.institution_id = any(v_units)) and (not v_excl or p.owner_id is distinct from v_me)),
+  lg as (   -- tokens registrados por el servidor (solo con SUPABASE_SERVICE_ROLE_KEY)
+    select l.* from public.ai_request_log l
+     where l.created_at >= v_since
+       and (v_units is null or l.inst_id = any(v_units))
+       and (not v_excl or l.user_id is distinct from v_me)),
+  subj as (select lower(su) as k, min(su) as label, count(*) as n from gen, unnest(gen.subjects) su group by lower(su)),
+  barq as (select b.key, round(avg((b.value #>> '{}')::numeric), 1) as avg, count(*) as n
+             from gen, jsonb_each(gen.bars) b where jsonb_typeof(b.value) = 'number' group by b.key)
+  select json_build_object(
+    'days', v_days, 'from', v_from, 'to', v_today, 'exclude_self', v_excl,
+    'unit', (select json_build_object('id', i.id, 'name', i.name) from public.institutions i where i.id = p_unit),
+    'tracking_since', (select min(e.created_at) from public.ai_events e),
+    'usage', json_build_object(
+      'per_day', (select coalesce(json_agg(json_build_object('day', d.day, 'classes', coalesce(c.n, 0)) order by d.day), '[]'::json)
+                    from (select v_from + g as day from generate_series(0, v_days - 1) g) d
+                    left join (select (gen.created_at at time zone 'utc')::date as day, count(*) as n from gen group by 1) c on c.day = d.day),
+      'classes', (select count(*) from gen),
+      'saved', (select count(*) from pl),
+      'handouts', (select count(*) from ev where ev.kind = 'student' and ev.ok),
+      'requests', (select count(*) from ev),
+      'failed', (select count(*) from ev where ev.ok = false),
+      'active', json_build_object(
+        'd1', (select count(distinct uid) from act where ts > now() - interval '1 day'),
+        'd7', (select count(distinct uid) from act where ts > now() - interval '7 days'),
+        'd30', (select count(distinct uid) from act)),
+      'active_period', (select count(distinct uid) from actp),
+      'new_users', (select count(*) from public.profiles p
+                     where p.created_at >= v_since
+                       and (v_units is null or p.institution_id = any(v_units))
+                       and (not v_excl or p.id is distinct from v_me)),
+      'returning_users', (select count(*) from (select uid from actp group by uid
+                            having count(distinct date_trunc('week', ts at time zone 'utc')) >= 2) x),
+      'top_institutions', (select coalesce(json_agg(json_build_object('id', t.id, 'name', coalesce(i.name, ''), 'classes', t.n)
+                                                   order by t.n desc, i.name), '[]'::json)
+                             from (select case when v_units is null then gen.root_id else gen.inst_id end as id, count(*) as n
+                                     from gen group by 1 order by 2 desc limit 10) t
+                             left join public.institutions i on i.id = t.id)),
+    'content', json_build_object(
+      'classes', (select count(*) from gen),
+      'subjects', (select coalesce(json_agg(json_build_object('name', x.label, 'count', x.n) order by x.n desc, x.label), '[]'::json)
+                     from (select * from subj order by n desc, label limit 10) x),
+      'languages', (select coalesce(json_agg(json_build_object('name', x.language, 'count', x.n) order by x.n desc, x.language), '[]'::json)
+                      from (select gen.language, count(*) as n from gen where gen.language is not null group by 1) x),
+      'age_bands', (select coalesce(json_agg(json_build_object('name', x.age_band, 'count', x.n) order by x.n desc, x.age_band), '[]'::json)
+                      from (select gen.age_band, count(*) as n from gen where gen.age_band is not null group by 1) x),
+      'levels', (select coalesce(json_agg(json_build_object('name', x.level, 'count', x.n) order by x.n desc, x.level), '[]'::json)
+                   from (select gen.level, count(*) as n from gen where gen.level is not null group by 1) x),
+      'bars', (select coalesce(json_agg(json_build_object('key', barq.key, 'avg', barq.avg, 'count', barq.n) order by barq.key), '[]'::json) from barq),
+      'playbook_institutions', (select count(distinct d.institution_id) from public.institution_documents d
+                                 where v_units is null or d.institution_id = any(v_units)),
+      'institutions', (select count(*) from public.institutions i where v_units is null or i.id = any(v_units))),
+    'costs', (select json_build_object(
+        'recorded_ever', exists (select 1 from public.ai_request_log),
+        'requests', count(*),
+        'prompt_tokens', coalesce(sum(lg.prompt_tokens), 0),
+        'completion_tokens', coalesce(sum(lg.completion_tokens), 0),
+        'total_tokens', coalesce(sum(lg.total_tokens), 0),
+        'classes', count(*) filter (where lg.kind = 'generate'),
+        'price_input', v_pin, 'price_output', v_pout,
+        'usd', round(coalesce(sum(lg.prompt_tokens), 0) / 1e6 * v_pin + coalesce(sum(lg.completion_tokens), 0) / 1e6 * v_pout, 4),
+        'by_institution', (select coalesce(json_agg(json_build_object('id', t.id, 'name', coalesce(i.name, ''), 'tokens', t.tokens,
+                                     'classes', t.classes, 'usd', t.usd) order by t.tokens desc, i.name), '[]'::json)
+                             from (select case when v_units is null then lg.root_id else lg.inst_id end as id,
+                                          sum(lg.total_tokens) as tokens, count(*) filter (where lg.kind = 'generate') as classes,
+                                          round(sum(lg.prompt_tokens) / 1e6 * v_pin + sum(lg.completion_tokens) / 1e6 * v_pout, 4) as usd
+                                     from lg group by 1 order by 2 desc limit 15) t
+                             left join public.institutions i on i.id = t.id))
+      from lg)
+  ) into r;
+  return r;
+end $$;
+revoke all on function public.platform_insights(integer, uuid, boolean) from public, anon;
+grant execute on function public.platform_insights(integer, uuid, boolean) to authenticated;
 
 -- ========== IDENTIDAD DEL SÚPER ADMIN: oculta para admins y docentes ==========
 -- Filas nuevas: created_by / invited_by / uploaded_by que apunten a un súper admin quedan en null.

@@ -4,7 +4,8 @@
 # Creates a throwaway database, loads a Supabase stub (auth/storage/roles) and
 # supabase/migrations/001_base.sql twice (must be idempotent), then runs
 # security.sql (base guarantees), hierarchy.sql (3-level permissions) and billing.sql
-# (plan & usage: seats, monthly AI tokens, token packs); finally re-runs 001_base.sql on the populated
+# (plan & usage: seats, monthly AI tokens, token packs) and insights.sql (AI request metadata + super admin
+# platform insights); finally re-runs 001_base.sql on the populated
 # database (superadmins must be kept, owner references hidden).
 set -e
 cd "$(dirname "$0")/../.."
@@ -15,7 +16,7 @@ trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null' EXIT
 $PSQL -d $DB -f tests/sql/supabase-stub.sql >/dev/null 2>&1
 for i in 1 2; do $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; done
 fail=0
-for t in security hierarchy billing; do
+for t in security hierarchy billing insights; do
   out=$($PSQL -d $DB -f tests/sql/$t.sql 2>&1)
   echo "$out" | grep -E '\*\*FAIL\*\*' || true
   sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
