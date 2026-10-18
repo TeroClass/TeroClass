@@ -1411,7 +1411,7 @@ const I18N_ES={
 'Class plan ready ✓':'Clase lista ✓','Saved ✓':'Guardado ✓','Link copied!':'¡Link copiado!','Fill all fields.':'Completá todos los campos.','Enter a topic or prompt first.':'Escribí un tema o pedido primero.',
 'Nothing to save yet.':'Todavía no hay nada para guardar.','Enter an email.':'Escribí un email.','Master prompt saved ✓':'Pedido maestro guardado ✓','Document saved ✓':'Documento guardado ✓',
 'Name and slug are required.':'Nombre y link son obligatorios.','Only institution admins can invite.':'Solo los admins de la institución pueden invitar.',
-'Open an institution first (Institutions → View).':'Primero abrí una institución (Instituciones → Ver).','Welcome Super Admin! Create your first institution.':'¡Bienvenido, súper admin! Creá tu primera institución.',
+'Choose an institution or unit in the selector at the top first.':'Primero elegí una institución o unidad en el selector de arriba.','Welcome Super Admin! Create your first institution.':'¡Bienvenido, súper admin! Creá tu primera institución.',
 'Generate a lesson plan first.':'Primero generá una clase.','Logo must be under 2MB.':'El logo debe pesar menos de 2 MB.','Copied! Open Google Docs → Ctrl+V (or Cmd+V)':'¡Copiado! Abrí Google Docs → Cmd+V (o Ctrl+V)',
 'Copied as plain text! Paste into Google Docs':'¡Copiado como texto! Pegalo en Google Docs','✓ Copied!':'✓ ¡Copiado!',
 'PH:At least 6 characters':'Al menos 6 caracteres','PH:Create a complete lesson on the passive voice for intermediate learners…':'Ej.: una clase sobre reacciones químicas para 3.º de liceo…',
@@ -1642,7 +1642,7 @@ function getPlaybookCore(orgId){
 async function handlePlaybookUpload(input){
   if(viewAs){input.value='';vaBlocked();return;}
   const orgId=masterOrgId();
-  if(!orgId){showToast('Open an institution first (Institutions → View).','err');input.value='';return;}
+  if(!orgId){showToast('Choose an institution or unit in the selector at the top first.','err');input.value='';return;}
   const files=[...input.files];input.value='';
   for(const file of files){
     const tmp='tmp-'+Date.now()+Math.random();let docId=null;
@@ -2323,7 +2323,7 @@ function openInvite(targetId){
   const orgId=(typeof targetId==='string'&&targetId)||currentOrgId||currentUser?.orgId;
   inviteOrgId=orgId;
   if(!(currentUser?.isOrgAdmin||currentUser?.isSuperAdmin)){showToast('Only institution admins can invite.','err');return;}
-  if(!orgId){showToast('Open an institution first (Institutions → View).','err');return;}
+  if(!orgId){showToast('Choose an institution or unit in the selector at the top first.','err');return;}
   document.getElementById('invite-org-name').textContent=hierPathLabel(orgId)||orgsCache[orgId]?.name||'';
   document.getElementById('invite-link').textContent=window.location.origin+'/org/'+(orgsCache[orgId]?.slug||'');
   document.getElementById('modal-invite').classList.add('active');
@@ -2359,7 +2359,7 @@ function loadMasterSettings(){
 async function saveMasterFields(fields){
   if(vaBlocked())return false;
   const orgId=masterOrgId();
-  if(!orgId){showToast('Open an institution first (Institutions → View).','err');return false;}
+  if(!orgId){showToast('Choose an institution or unit in the selector at the top first.','err');return false;}
   const {error}=await sb.from('institutions').update(fields).eq('id',orgId);
   if(error){showToast('Error: '+error.message,'err');return false;}
   await fetchOrgs();return true;
@@ -3702,7 +3702,7 @@ function methToggle(key,show){
   methSave(id,own);
 }
 async function methAdd(){
-  const id=masterOrgId();if(!id||!orgsCache[id]){showToast('Open an institution first (Institutions → View).','err');return;}
+  const id=masterOrgId();if(!id||!orgsCache[id]){showToast('Choose an institution or unit in the selector at the top first.','err');return;}
   const label=document.getElementById('meth-new-label').value.trim();
   const tip=document.getElementById('meth-new-tip').value.trim();
   const def=parseInt(document.getElementById('meth-new-def').value,10);
