@@ -14,6 +14,10 @@
       "destination": "/public/live-class.css"
     },
     {
+      "source": "/(favicon-32\\.png|favicon-512\\.png|apple-touch-icon\\.png|favicon\\.ico)",
+      "destination": "/public/$1"
+    },
+    {
       "source": "/(.*)",
       "destination": "/public/index.html"
     }
