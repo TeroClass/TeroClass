@@ -808,7 +808,16 @@
     if (blocked()) return;
     const g = id ? GR.groups.find(x => x.id === id) : null;
     const unit = GR.unit; const units = (typeof hierSubtreeIds === 'function' ? hierSubtreeIds(unit) : [unit]).filter(u => orgsCache[u]);
+    GR.teachers = null; // always fresh: someone may have just registered
     const teachers = await loadTeachers(unit);
+    // invited but not registered yet: they can't be assigned until they sign up
+    let pending = [];
+    try {
+      const root = (typeof hierPath === 'function' ? hierPath(unit)[0]?.id : null) || unit;
+      const ids = Object.keys(orgsCache || {}).filter(x => ((typeof hierPath === 'function' ? hierPath(x)[0]?.id : null) || x) === root);
+      if (ids.length) { const r = await sb.from('invitations').select('email').in('institution_id', ids).is('accepted_at', null); pending = (r.data || []).map(x => x.email); }
+    } catch (e) { pending = []; }
+    const pendingHint = pending.length ? `<div class="gc-hint">${esc(tr('Invited, waiting for them to register:'))} <span data-no-i18n>${pending.slice(0, 5).map(esc).join(', ')}${pending.length > 5 ? '…' : ''}</span>. ${esc(tr('They will appear here once they sign up with the institution link.'))}</div>` : '';
     const tOpts = (sel, none) => `<option value="">${esc(tr(none))}</option>` + teachers.map(t => `<option value="${esc(t.id)}"${t.id === sel ? ' selected' : ''} data-no-i18n>${esc(t.name || t.email)}${t.name ? ' · ' + esc(t.email) : ''}</option>`).join('')
       + (sel && !teachers.some(t => t.id === sel) ? `<option value="${esc(sel)}" selected data-no-i18n>${esc((g?.teacher?.id === sel ? g.teacher : g?.substitute)?.name || '—')}</option>` : '');
     const tz = g?.timezone || 'America/Montevideo';
@@ -823,7 +832,7 @@
           <div class="modal-field"><label class="modal-label" for="gc-g-sub">Substitute (optional)</label><select id="gc-g-sub" class="modal-input">${tOpts(g?.substitute?.id || '', 'No substitute')}</select></div>
         </div>
         <div class="modal-field"><label class="modal-label" for="gc-g-tz">Time zone</label><select id="gc-g-tz" class="modal-input">${tzs.map(z => `<option value="${esc(z)}"${z === tz ? ' selected' : ''} data-no-i18n>${esc(tzLabel(z))}</option>`).join('')}</select></div>
-        ${teachers.length ? '' : '<div class="gc-hint">No teachers in this institution yet: invite them first (👤+ Invite).</div>'}
+        ${teachers.length ? '' : '<div class="gc-hint">No teachers in this institution yet: invite them first (👤+ Invite).</div>'}${pendingHint}
         <div class="modal-actions"><button type="button" class="btn-modal-cancel" data-gc="close">Cancel</button><button type="submit" class="btn-modal-save">${g ? 'Save' : 'Create group'}</button></div>
       </form>`);
   }
@@ -1258,7 +1267,7 @@
     'Not assigned yet': 'Sin asignar todavía', 'No substitute': 'Sin suplente', 'Edit group': 'Editar grupo', 'New group': 'Nuevo grupo',
     'A group has one teacher and, optionally, one substitute with the same access to its classes.': 'Un grupo tiene un docente y, si querés, un suplente con el mismo acceso a sus clases.',
     'Group name': 'Nombre del grupo', 'e.g. English B1 – Tue/Thu': 'ej. English B1 – Mar/Jue', 'PH:e.g. English B1 – Tue/Thu': 'ej. English B1 – Mar/Jue', 'Unit': 'Unidad',
-    'Substitute (optional)': 'Suplente (opcional)', 'Time zone': 'Zona horaria', 'No teachers in this institution yet: invite them first (👤+ Invite).': 'Todavía no hay docentes en esta institución: invitalos primero (👤+ Invitar).',
+    'Substitute (optional)': 'Suplente (opcional)', 'Time zone': 'Zona horaria', 'No teachers in this institution yet: invite them first (👤+ Invite).': 'Todavía no hay docentes en esta institución: invitalos primero (👤+ Invitar).', 'Invited, waiting for them to register:': 'Invitados que todavía no se registraron:', 'They will appear here once they sign up with the institution link.': 'Van a aparecer acá cuando se registren con el link de la institución.',
     'Save': 'Guardar', 'Create group': 'Crear grupo', 'The group needs a name.': 'El grupo necesita un nombre.', 'The substitute must be a different person.': 'El suplente tiene que ser otra persona.',
     'Group saved ✓': 'Grupo guardado ✓', 'Group created ✓': 'Grupo creado ✓',
     "Students sign in with this email (a link, no password). They are free: they don't use seats.": 'Los estudiantes entran con este email (un link, sin contraseña). Son gratis: no ocupan asientos.',
