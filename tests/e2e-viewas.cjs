@@ -48,7 +48,8 @@ async function login(page, email, path = '/') {
   await page.click('#tab-login .auth-btn');
   await page.waitForSelector('#screen-app.active');
 }
-const waitToast = (page, re) => page.waitForFunction(src => new RegExp(src).test(document.getElementById('toast').textContent), re.source, { timeout: 8000 });
+// Error toasts carry the tero + apology headline; the message itself is in .tero-err-detail
+const waitToast = (page, re) => page.waitForFunction(src => { const t = document.getElementById('toast'); const d = t.querySelector('.tero-err-detail'); return new RegExp(src).test((d || t).textContent); }, re.source, { timeout: 8000 });
 const clearToast = page => page.evaluate(() => { document.getElementById('toast').textContent = ''; });
 const expectReadOnly = async (page, what) => {
   try { await waitToast(page, /View as is read-only/); } catch (e) { throw new Error('no read-only toast for: ' + what); }

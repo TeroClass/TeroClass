@@ -330,7 +330,16 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 .toast{position:fixed;bottom:18px;right:18px;background:var(--black);color:#fff;padding:9px 16px;border-radius:8px;font-size:12px;font-weight:500;z-index:9999;transform:translateY(50px);opacity:0;transition:all .25s}
 .toast.show{transform:translateY(0);opacity:1}
 .toast.ok{background:#276749}
-.toast.err{background:var(--red)}
+.toast.err{background:#fff;color:#1a1a1a;border:1.5px solid #f3c7c7;box-shadow:0 10px 30px rgba(0,0,0,.18);display:flex;align-items:center;gap:12px;max-width:min(380px,calc(100vw - 36px));padding:12px 16px 12px 10px;cursor:pointer}
+.tero-err-bird{flex:0 0 64px;width:64px;height:64px}
+.tero-err-txt{min-width:0}
+.tero-err-title{font-size:13px;font-weight:600;line-height:1.35;color:#1a1a1a}
+.tero-err-detail{font-size:11.5px;color:#9b2c2c;margin-top:4px;line-height:1.35;word-break:break-word}
+.tero-wing,.tero-wing-far{transform-box:view-box;transform-origin:62px 48px;animation:teroFlap .55s ease-in-out infinite alternate}
+.tero-wing-far{animation-name:teroFlapFar}
+@keyframes teroFlap{from{transform:rotate(0)}to{transform:rotate(40deg)}}
+@keyframes teroFlapFar{from{transform:rotate(4deg)}to{transform:rotate(62deg)}}
+@media (prefers-reduced-motion:reduce){.tero-wing,.tero-wing-far{animation:none}}
 
 /* ── LESSON PLAN DOCUMENT ── */
 .lp-doc{max-width:860px;margin:0 auto;padding-bottom:40px}
@@ -3162,7 +3171,19 @@ const DB_ERRORS=[
 ];
 function dbErr(msg){let m=String(msg||'');for(const [re,en] of DB_ERRORS)if(re.test(m)){m=m.replace(re,en);break;}return m;}
 let toastTimer=null;
-function showToast(msg,type='',ms=3200){const t=document.getElementById('toast');t.textContent=type==='err'?dbErr(msg):msg;t.className='toast '+type;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),ms);}
+// Error toast: animated tero (flapping wings) + apology in the UI language + the actual error
+const TERO_ERR_SVG='<svg class="tero-err-bird" viewBox="0 0 100 100" aria-hidden="true"><path class="tero-wing-far" d="M24 66 C40 54 52 45 63 45 C71 45 71 56 63 62 C53 68 39 68 24 66 Z" fill="#dcdcdc" stroke="#111" stroke-width="2.5" stroke-linejoin="round"/><path d="M50 74 L47 93 L54 93 M58 74 L61 93 L68 93" fill="none" stroke="#111" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 71 C28 61 44 49 58 45 L61 35 C59 25 65 18 73 19 C81 20 85 27 82 34 C79 41 80 50 76 60 C70 72 55 77 40 75 C29 74 19 73 10 71 Z" fill="#fff" stroke="#111" stroke-width="3" stroke-linejoin="round"/><path d="M55 17 C62 22 68 21 74 19" fill="none" stroke="#111" stroke-width="3" stroke-linecap="round"/><path d="M82 26 L95 28.5 L82 31" fill="#111" stroke="#111" stroke-width="2" stroke-linejoin="round"/><circle cx="75.5" cy="25.5" r="2.4" fill="#111"/><path class="tero-wing" d="M20 69 C37 57 51 47 63 47 C72 47 72 58 64 64 C54 70 37 71 20 69 Z" fill="#b5b5b5" stroke="#111" stroke-width="3" stroke-linejoin="round"/></svg>';
+function teroErrTitle(){return uiLang==='es'?'Perdón… nuestro tero está trabajando para encontrar una solución.':'Sorry… our tero is working to find a solution.';}
+function showToast(msg,type='',ms=3200){
+  const t=document.getElementById('toast');
+  if(type==='err'){
+    const detail=trText(dbErr(msg));
+    t.innerHTML=TERO_ERR_SVG+'<div class="tero-err-txt"><div class="tero-err-title" data-no-i18n>'+esc(teroErrTitle())+'</div>'+(detail?'<div class="tero-err-detail">'+esc(detail)+'</div>':'')+'</div>';
+    t.setAttribute('role','alert');t.onclick=()=>t.classList.remove('show');
+    ms=Math.max(ms,6500);
+  }else{t.textContent=msg;t.removeAttribute('role');t.onclick=null;}
+  t.className='toast '+type;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),ms);
+}
 // ══ HIERARCHY + ADMIN / TEACHER MODES ══
 // 3 levels: main institution (madre) › campus/faculty (sede/facultad) › department/area (cátedra/área).
 // Admins of a unit also manage everything below it. Teachers belong to one unit at any level.
