@@ -602,6 +602,7 @@ Cierre y ticket de salida (5 min)
     planning: null,        // {id,title,content,params}
     sampleKey: 'language',
     sessionTitle: '',
+    sessionId: null,       // calendar session (groups-calendar.js): everyone in it joins the same room
     lobby: null,
     room: null,
     insights: { tab: 'student', student: 0, sub: 'overview', role: 'teacher' },
@@ -758,7 +759,7 @@ Cierre y ticket de salida (5 min)
     const c = L.consent;
     return `<div class="lc-wrap lc-lobby">
       ${banner()}
-      <button type="button" class="lc-link" data-lc="back-home">← Back to live classes</button>
+      <button type="button" class="lc-link" data-lc="back-home">${studentBack() ? '← Back to my classes' : '← Back to live classes'}</button>
       <header class="lc-head"><div><h1>Get ready to join</h1><p class="lc-sub" data-no-i18n>${esc(S.sessionTitle)}</p></div>${demoChip()}</header>
       <div class="lc-lobby-grid">
         <section class="lc-card" aria-labelledby="lc-prev-h">
@@ -951,7 +952,10 @@ Cierre y ticket de salida (5 min)
       hand: false, rec: { state: 'off', secs: 0, everOn: false }, secs: 0, remoteScreens: [],
       chat: [], unread: 0, side: isNarrow() ? null : (L.role === 'teacher' ? 'plan' : 'chat'),
       speaking: new Set(), talk: { teacher: 0, students: 0 }, plan, running: -1, participants: [],
-      roomName: `${roomOwnerKey()}-${S.planning?.id ? String(S.planning.id).replace(/-/g, '').slice(0, 10) : randId()}`,
+      // A calendar session → one room for its teacher and students. TODO(live): api/class/token.js grants
+      // roomAdmin by "<ownerKey>-…" rooms; with real LiveKit, look the session up (teacher → admin) instead.
+      roomName: S.sessionId ? `sess-${String(S.sessionId).replace(/[^A-Za-z0-9]/g, '').slice(0, 32)}`
+        : `${roomOwnerKey()}-${S.planning?.id ? String(S.planning.id).replace(/-/g, '').slice(0, 10) : randId()}`,
       endOpen: false,
     };
     const connectOpts = provider => ({
@@ -1423,7 +1427,7 @@ Cierre y ticket de salida (5 min)
     const live = I.live && I.liveSample === S.sampleKey ? I.live : null;
     return `<div class="lc-wrap lc-insights">
       ${banner()}
-      <button type="button" class="lc-link" data-lc="back-home">← Back to live classes</button>
+      <button type="button" class="lc-link" data-lc="back-home">${studentBack() ? '← Back to my classes' : '← Back to live classes'}</button>
       <header class="lc-head">
         <div><h1>Class insights</h1>
           <p class="lc-sub"><span data-no-i18n>${esc(live ? S.sessionTitle : X.title)}</span> · <span data-no-i18n>${esc(X.subject)}</span> · <span data-no-i18n>${live ? Math.max(1, Math.round(live.secs / 60)) : X.durationMin} min</span></p></div>
@@ -1628,9 +1632,21 @@ Cierre y ticket de salida (5 min)
     const doc = document.getElementById('lp-doc');
     return { id: cr.id || null, title: cr.title || '', content: ((doc && doc.innerText) || cr.text || '').trim(), params: cr.params || {} };
   }
+  // Join a scheduled session from the calendar / student dashboard: {id, title, planning?}
+  function openSession(sess) {
+    if (S.room) { toast('A live class is already in progress.', 'err'); openLiveClass(); return; }
+    const p = sess && sess.planning ? sess.planning : null;
+    S.planning = p; S.sessionId = (sess && sess.id) || null;
+    S.sampleKey = pickSampleKey(p || { title: (sess && sess.title) || '', params: {} });
+    S.sessionTitle = (sess && sess.title) || 'Live class';
+    if (typeof showPanel === 'function') showPanel('live');
+    goLobby();
+  }
+  const studentBack = () => !!(window.GC && typeof window.GC.isStudentMode === 'function' && window.GC.isStudentMode());
   function openFromDoc() {
     if (S.room) { toast('A live class is already in progress.', 'err'); openLiveClass(); return; }
     const p = planningFromDoc(); if (!p) return;
+    S.sessionId = null;
     S.planning = p; S.sampleKey = pickSampleKey(p);
     S.sessionTitle = p.title || (p.content.split('\n')[0] || '').trim() || 'Live class';
     if (typeof showPanel === 'function') showPanel('live');
@@ -1655,13 +1671,14 @@ Cierre y ticket de salida (5 min)
         const id = document.getElementById('lc-plan-select')?.value || '';
         const p = id && Array.isArray(plannings) ? plannings.find(x => String(x.id) === id) : null;
         S.planning = p ? { id: p.id, title: p.title, content: p.content, params: p.params || {} } : null;
+        S.sessionId = null;
         S.sampleKey = p ? pickSampleKey(p) : 'language';
         S.sessionTitle = p ? (p.title || 'Live class') : SAMPLES.language.title;
         goLobby(); break;
       }
       case 'join-upcoming': {
         const s = demoSessions().upcoming[i]; if (!s) break;
-        S.planning = null; S.sampleKey = s.sample; S.sessionTitle = s.title; goLobby(); break;
+        S.planning = null; S.sessionId = null; S.sampleKey = s.sample; S.sessionTitle = s.title; goLobby(); break;
       }
       case 'past-insights': {
         const s = demoSessions().past[i]; if (!s) break;
@@ -1669,7 +1686,10 @@ Cierre y ticket de salida (5 min)
         S.insights = { tab: 'student', student: 0, sub: 'overview', role: 'teacher', live: null };
         S.view = 'insights'; render(); break;
       }
-      case 'back-home': teardownLobby(); S.lobby = null; S.view = 'home'; render(); break;
+      case 'back-home':
+        teardownLobby(); S.lobby = null; S.view = 'home';
+        if (studentBack()) { window.GC.backFromLive(); break; } // students: back to their dashboard
+        render(); break;
       case 'lobby-mic': S.lobby.mic = !S.lobby.mic; applyLobbyTrackState(); updatePreviewUi(); break;
       case 'lobby-cam': S.lobby.cam = !S.lobby.cam; applyLobbyTrackState(); updatePreviewUi(); break;
       case 'retry-media': S.lobby.camId = ''; S.lobby.micId = ''; startPreview(); break;
@@ -1793,7 +1813,7 @@ Cierre y ticket de salida (5 min)
   function reset() { teardownRoom(); teardownLobby(); S.lobby = null; S.view = 'home'; }
 
   window.LiveClass = {
-    open: openLiveClass, openFromDoc, onDocShown, reset,
+    open: openLiveClass, openFromDoc, openSession, onDocShown, reset,
     providers: { LiveProvider, DemoProvider, LiveKitProvider }, detectProviderKind,
     parsePlanSections, pickSampleKey, SAMPLES, LK_CDN, CONSENT_VERSION,
     get state() { return S; },
@@ -1819,7 +1839,7 @@ Cierre y ticket de salida (5 min)
     'Speakers are identified by their own microphone, never by voiceprint. No emotion detection.': 'Cada persona se identifica por su propio micrófono, nunca por huella de voz. Sin detección de emociones.',
     'Raw audio is deleted after 30 days.': 'El audio original se borra a los 30 días.',
     // lobby
-    '← Back to live classes': '← Volver a Aula en vivo', 'Get ready to join': 'Preparate para entrar', 'Camera and microphone': 'Cámara y micrófono',
+    '← Back to live classes': '← Volver a Aula en vivo', '← Back to my classes': '← Volver a mis clases', 'Get ready to join': 'Preparate para entrar', 'Camera and microphone': 'Cámara y micrófono',
     'Camera': 'Cámara', 'Microphone': 'Micrófono', 'Camera is off': 'Cámara apagada', 'No camera': 'Sin cámara', 'Not available': 'No disponible',
     'Your camera preview': 'Vista previa de tu cámara', 'Turn microphone off': 'Apagar micrófono', 'Turn microphone on': 'Encender micrófono',
     'Turn camera off': 'Apagar cámara', 'Turn camera on': 'Encender cámara', 'Try again': 'Reintentar',

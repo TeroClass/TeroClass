@@ -127,7 +127,7 @@ select qi.fails('I: institution admin cannot read ai_events', $$select count(*) 
 select qi.fails('I: institution admin cannot change AI prices', $$select public.update_ai_prices(1,1)$$, 'No autorizado');
 select qi.as_user(:'OWNER');
 select qi.eq('I: superadmin: keys', $$select string_agg(k, ',' order by k) from jsonb_object_keys(public.platform_insights(30)::jsonb) k$$,
-  'content,costs,days,exclude_self,from,to,tracking_since,unit,usage');
+  'content,costs,days,exclude_self,from,students,to,tracking_since,unit,usage');
 select qi.fails('I: superadmin cannot read ai_events directly either (only via the RPC)', $$select count(*) from public.ai_events$$, 'permission denied');
 select qi.eq('I: per_day has one entry per day (7 / 30 / 90)', $$select jsonb_array_length(qi.ins(7,null,true,'{usage,per_day}')::jsonb)||'/'||jsonb_array_length(qi.ins(30,null,true,'{usage,per_day}')::jsonb)||'/'||jsonb_array_length(qi.ins(90,null,true,'{usage,per_day}')::jsonb)$$, '7/30/90');
 select qi.eq('I: days clamped (0 → 1, 9999 → 366)', $$select qi.ins(0,null,true,'{days}')||'/'||qi.ins(9999,null,true,'{days}')$$, '1/366');

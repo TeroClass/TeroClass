@@ -5,6 +5,8 @@
 // set_institution_plan, update_platform_settings, platform_billing_overview, get_seat_status (+ seats in invite_member / get_org_branding).
 // Insights: platform_insights (super admin only; data from insightsData(), overridable per test via M.insights.fixture),
 // update_ai_prices (+ ai_price_input / ai_price_output in the platform settings).
+// Groups + students + calendar (tests/mock-students.cjs): list_groups, import_students, my_calendar, student_view,
+// claim_enrollments, calendar tokens/feed…; magic link sign-in (POST /auth/v1/otp; via:"student_link" → role student).
 const fs = require('fs');
 const path = require('path');
 
@@ -15,22 +17,25 @@ const RAW_HTML = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
 const asset = f => fs.readFileSync(path.join(ROOT, 'public', f), 'utf8');
 const HTML = RAW_HTML
   .replace('<link rel="stylesheet" href="/live-class.css">', () => `<style>${asset('live-class.css')}</style>`)
-  .replace('<script src="/live-class.js"></script>', () => `<script>${asset('live-class.js')}</script>`);
+  .replace('<script src="/live-class.js"></script>', () => `<script>${asset('live-class.js')}</script>`)
+  .replace('<link rel="stylesheet" href="/groups-calendar.css">', () => `<style>${asset('groups-calendar.css')}</style>`)
+  .replace('<script src="/groups-calendar.js"></script>', () => `<script>${asset('groups-calendar.js')}</script>`);
 const SB_JS = fs.readFileSync(process.env.SB_JS || '/tmp/package/dist/umd/supabase.js', 'utf8');
 const SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
 // Test-only platform owner (placeholder). The real system never promotes by email: the mock simply
 // seeds this account as an existing superadmin, like production where the role lives in profiles.role.
 const SUPERADMIN_EMAIL = 'owner@teroclass.test';
 
-const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [] };
-const calls = { rpc: [], inserts: {} };
+const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [],
+  class_groups: [], student_enrollments: [], group_members: [], session_series: [], class_sessions: [], session_invitees: [], calendar_tokens: [] };
+const calls = { rpc: [], inserts: {}, otp: [] };
 // billing state (same rules as the SQL functions, simplified): accounts[rootId] = {seats, monthly_tokens, extra}; usage[rootId] = used this month
 const BILL_DEFAULTS = () => ({ settings: { pack_tokens: 2000000, pack_price: 11.99, currency: 'USD', personal_monthly_tokens: 200000, default_seats: 10, default_monthly_tokens: 2000000, ai_price_input: 2.5, ai_price_output: 10 }, accounts: {}, usage: {}, requests: [], log: [] });
 const bill = BILL_DEFAULTS();
 let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
 const insights = { fixture: null }; // tests may set insights.fixture = (body) => json
-function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; calls.rpc = []; calls.inserts = {}; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; }
+function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; calls.rpc = []; calls.inserts = {}; calls.otp = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; }
 // Default insights: deterministic sample data shaped like public.platform_insights (smaller numbers for a unit)
 function insightsData(body) {
   const days = Math.min(Math.max(Number(body.p_days) || 30, 1), 366); const unit = body.p_unit ? instById(body.p_unit) : null;
@@ -44,6 +49,7 @@ function insightsData(body) {
     content: { classes, subjects: [{ name: 'Math', count: 9 * f }, { name: 'History', count: 5 * f }, { name: 'English', count: 3 * f }], languages: [{ name: 'Spanish', count: 12 * f }, { name: 'English', count: 4 * f }],
       age_bands: [{ name: 'teen', count: 8 * f }, { name: 'primary', count: 5 * f }, { name: 'adult', count: 2 * f }], levels: [{ name: 'Secondary', count: 9 * f }],
       bars: [{ key: 'gamification', avg: 42.5, count: 10 }, { key: 'projectbased', avg: 61, count: 10 }, { key: 'c_outdoor_x1', avg: 30, count: 4 }], playbook_institutions: 1, institutions: roots.length || 1 },
+    students: { total: 40 * f, linked: 25 * f, active: 18 * f, groups: 3 * f, sessions: 24 * f },
     costs: { recorded_ever: true, requests: 30 * f, prompt_tokens: 1200000 * f, completion_tokens: 400000 * f, total_tokens: 1600000 * f, classes: 12 * f, price_input: bill.settings.ai_price_input, price_output: bill.settings.ai_price_output,
       usd: Math.round((1.2 * f * bill.settings.ai_price_input + 0.4 * f * bill.settings.ai_price_output) * 10000) / 10000,
       by_institution: roots.slice(0, 5).map((i, n) => ({ id: i.id, name: i.name, tokens: (5 - n) * 200000 * f, classes: (5 - n) * f, usd: (5 - n) * f })) } };
@@ -59,7 +65,9 @@ function newUser(email, meta) {
   let invUse = inv;
   const target = inv ? inv.institution_id : (bySlug ? bySlug.id : null);
   if (target && !seatFree(rootOf(target))) { invUse = null; bySlug = null; } // no free seat → account without institution
-  db.profiles.push({ id, email, created_at: new Date().toISOString(), name: meta.name || '', role: email.toLowerCase() === SUPERADMIN_EMAIL ? 'superadmin' : (invUse ? invUse.role : 'teacher'),
+  const student = meta.via === 'student_link' && !invUse; // magic link from "I'm a student": no invitation → student, no unit
+  if (student) bySlug = null;
+  db.profiles.push({ id, email, created_at: new Date().toISOString(), name: meta.name || '', role: email.toLowerCase() === SUPERADMIN_EMAIL ? 'superadmin' : (invUse ? invUse.role : student ? 'student' : 'teacher'),
     institution_id: invUse ? invUse.institution_id : (bySlug ? bySlug.id : null) });
   if (invUse) invUse.accepted_at = new Date().toISOString();
   return db.users[id];
@@ -145,6 +153,12 @@ async function handleSupabase(route) {
   if (p === '/auth/v1/token') { const u = Object.values(db.users).find(x => x.email === body.email); return u ? json(200, session(u)) : json(400, { error: 'invalid_grant', error_description: 'Invalid login credentials', msg: 'Invalid login credentials' }); }
   if (p === '/auth/v1/user') { const u = tokUser(auth); return u ? json(200, session(u).user) : json(401, { msg: 'bad jwt' }); }
   if (p === '/auth/v1/logout') return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*' } });
+  if (p === '/auth/v1/otp') { // magic link: creates the account if needed (like Supabase with shouldCreateUser); the test then "clicks" it
+    const email = String(body.email || '').trim().toLowerCase(); calls.otp.push(body);
+    if (/ratelimit/.test(email)) return json(429, { code: 429, error_code: 'over_email_send_rate_limit', msg: 'email rate limit exceeded' });
+    if (!Object.values(db.users).some(u => u.email === email)) newUser(email, body.data || {});
+    return json(200, {});
+  }
   const me = tokUser(auth);
   if (p.startsWith('/rest/v1/rpc/')) {
     const fn = p.split('/').pop();
@@ -230,6 +244,7 @@ async function handleSupabase(route) {
       const pr = db.profiles.find(x => x.id === body.p_user); if (!pr) return json(400, { message: 'invalid' });
       pr.institution_id = null; pr.role = 'teacher'; return json(200, null);
     }
+    { const r = students.handle(fn, body, me); if (r) return json(r.status, r.data); }
     if (fn === 'get_document_content') {
       const d = db.institution_documents.find(x => x.id === body.p_id); return d ? json(200, d.content) : json(400, { message: 'not found' });
     }
@@ -241,7 +256,7 @@ async function handleSupabase(route) {
     if (m === 'GET') {
       const meP = db.profiles.find(x => x.id === me.id); const sa = meP?.role === 'superadmin';
       let base = table === 'institutions' ? visibleInstitutions(me) : rows;
-      if (table === 'profiles' && !sa) base = base.filter(r => r.role !== 'superadmin' || r.id === me.id); // RLS: owner hidden
+      if (table === 'profiles' && !sa) base = base.filter(r => (r.role !== 'superadmin' && r.role !== 'student') || r.id === me.id); // RLS: owner + students hidden
       if (table === 'plannings' && !sa) { const owners = new Set(db.profiles.filter(x => x.role === 'superadmin' && x.id !== me.id).map(x => x.id)); base = base.filter(r => !owners.has(r.owner_id)); }
       const out = project(applyFilters(base, url), url);
       const single = (req.headers()['accept'] || '').includes('vnd.pgrst.object');
@@ -254,4 +269,5 @@ async function handleSupabase(route) {
   }
   return json(404, { message: 'unmocked ' + m + ' ' + p });
 }
-module.exports = { db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
+module.exports = { students, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

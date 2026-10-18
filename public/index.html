@@ -684,6 +684,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 }
 </style>
 <link rel="stylesheet" href="/live-class.css">
+<link rel="stylesheet" href="/groups-calendar.css">
 </head>
 <body>
 
@@ -705,6 +706,16 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
       <div class="auth-field"><label class="auth-label">Email</label><input type="email" id="login-email" class="auth-input" placeholder="you@email.com"></div>
       <div class="auth-field"><label class="auth-label">Password</label><input type="password" id="login-password" class="auth-input" placeholder="••••••••"></div>
       <button class="auth-btn" onclick="handleLogin()">Sign in</button>
+      <button type="button" class="auth-student-link" id="auth-student-link" onclick="switchTab('student')"><span aria-hidden="true">🎓</span> <span>I'm a student → get a link by email</span></button>
+    </div>
+    <!-- Students: magic link by email, no password (public/groups-calendar.js) -->
+    <div id="tab-student-login" style="display:none">
+      <div class="auth-student-title">🎓 <span>Student access</span></div>
+      <p class="auth-student-sub">Write the email your school or teacher loaded. We'll send you a link to sign in — no password needed.</p>
+      <div class="auth-field"><label class="auth-label" for="student-email">Email</label><input type="email" id="student-email" class="auth-input" placeholder="you@email.com" autocomplete="email" onkeydown="if(event.key==='Enter')handleStudentLink()"></div>
+      <button class="auth-btn" id="btn-student-link" onclick="handleStudentLink()">Send me a link</button>
+      <div class="auth-student-sent" id="student-sent" role="status" style="display:none"></div>
+      <button type="button" class="auth-student-link back" onclick="switchTab('login')">← I'm a teacher: sign in with password</button>
     </div>
     <div id="tab-register" style="display:none">
       <div id="reg-seats-full" class="reg-notice" style="display:none">This institution has no seats available right now. Ask its admin to free a seat or expand the plan.</div>
@@ -756,11 +767,13 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
       <div class="sib-group" data-group="teach">
         <button class="sib-btn active" id="nav-home" onclick="showPanel('home')"><span class="sib-ico" aria-hidden="true">🏠</span><span class="sib-label">Home</span><span class="sib-tooltip">Home</span></button>
         <button class="sib-btn" id="nav-ai" onclick="showPanel('ai')"><span class="sib-ico" aria-hidden="true">📖</span><span class="sib-label">Classes</span><span class="sib-tooltip">Classes</span></button>
+        <button class="sib-btn" id="nav-calendar" onclick="showPanel('calendar')"><span class="sib-ico" aria-hidden="true">📅</span><span class="sib-label">Calendar</span><span class="sib-tooltip">Calendar</span></button>
         <button class="sib-btn" id="nav-live" onclick="openLiveClass()"><span class="sib-ico" aria-hidden="true">🎥</span><span class="sib-label">Live class</span><span class="sib-tooltip">Live class</span></button>
       </div>
       <!-- Institution: the unit selected in the top bar switcher -->
       <div class="sib-group" data-group="inst">
         <button class="sib-btn" id="nav-structure" style="display:none" onclick="showPanel('structure')"><span class="sib-ico" aria-hidden="true">🌳</span><span class="sib-label">Structure</span><span class="sib-tooltip">Structure</span></button>
+        <button class="sib-btn" id="nav-groups" style="display:none" onclick="showPanel('groups')"><span class="sib-ico" aria-hidden="true">👥</span><span class="sib-label">Groups</span><span class="sib-tooltip">Groups</span></button>
         <button class="sib-btn" id="nav-admin" style="display:none" onclick="showPanel('admin')"><span class="sib-ico" aria-hidden="true">📊</span><span class="sib-label">Dashboard</span><span class="sib-tooltip">Dashboard</span></button>
         <button class="sib-btn" id="nav-branding" style="display:none" onclick="openBrandingNav()"><span class="sib-ico" aria-hidden="true">🎨</span><span class="sib-label">Branding</span><span class="sib-tooltip">Branding</span></button>
         <button class="sib-btn" id="nav-master" style="display:none" onclick="showPanel('master')"><span class="sib-ico" aria-hidden="true">🧠</span><span class="sib-label">AI Settings</span><span class="sib-tooltip">AI Settings</span></button>
@@ -926,6 +939,11 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
           </div>
         </div>
       </div>
+
+      <!-- CALENDAR (teachers / substitutes) · GROUPS (institution admins) · STUDENT dashboard — public/groups-calendar.js -->
+      <div id="panel-calendar" class="panel gc-panel"><div id="gc-cal-root" class="gc-root"></div></div>
+      <div id="panel-groups" class="panel gc-panel"><div id="gc-groups-root" class="gc-root"></div></div>
+      <div id="panel-student" class="panel gc-panel"><div id="gc-student-root" class="gc-root"></div></div>
 
       <!-- LIVE CLASS (public/live-class.js) -->
       <div id="panel-live" class="panel"><div id="lc-root" class="lc-root"></div></div>
@@ -1271,14 +1289,17 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
     <div class="modal-title" id="va-title">👁 View as…</div>
     <div class="modal-sub">See the app exactly as an institution sees it, without creating accounts. Nothing you do is saved.</div>
     <div class="modal-field"><label class="modal-label" for="va-search">Unit</label><input type="search" id="va-search" class="modal-input" placeholder="Search units" autocomplete="off"><div id="va-tree" class="va-tree" role="listbox" aria-label="Units"></div></div>
-    <div class="modal-field"><span class="modal-label">Perspective</span><div class="va-persp"><label><input type="radio" name="va-persp" value="admin" checked> <span>Institution admin</span></label><label><input type="radio" name="va-persp" value="teacher"> <span>Teacher</span></label></div></div>
-    <div class="modal-field"><label class="modal-label" for="va-person">Person (optional)</label><select id="va-person" class="modal-input"></select><div class="va-hint">Pick someone to see their saved classes.</div></div>
+    <div class="modal-field"><span class="modal-label">Perspective</span><div class="va-persp"><label><input type="radio" name="va-persp" value="admin" checked> <span>Institution admin</span></label><label><input type="radio" name="va-persp" value="teacher"> <span>Teacher</span></label><label><input type="radio" name="va-persp" value="student"> <span>Student</span></label></div></div>
+    <div class="modal-field" id="va-group-field" style="display:none"><label class="modal-label" for="va-group">Group</label><select id="va-group" class="modal-input"></select><div class="va-hint">Students see their group's classes, the teacher's name and how many classmates — never their emails.</div></div>
+    <div class="modal-field"><label class="modal-label" for="va-person">Person (optional)</label><select id="va-person" class="modal-input"></select><div class="va-hint" id="va-person-hint">Pick someone to see their saved classes.</div></div>
     <div class="modal-actions">
       <button class="btn-modal-cancel" type="button" onclick="closeModal('modal-viewas')">Cancel</button>
       <button class="btn-modal-save" type="button" id="va-start" data-va="start">Start viewing</button>
     </div>
   </div>
 </div>
+<!-- Groups / calendar dialogs (content rendered by public/groups-calendar.js) -->
+<div class="modal-overlay" id="modal-gc"><div class="modal gc-modal" role="dialog" aria-modal="true" aria-labelledby="gc-modal-title" id="gc-modal-box"></div></div>
 <div class="toast" id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
@@ -1551,7 +1572,7 @@ function setUiLang(lang){
   document.documentElement.lang=lang;
   document.querySelectorAll('.lang-toggle button').forEach(b=>b.classList.toggle('active',b.dataset.lang===lang));
   i18nBusy=true;try{translateTree(document.body);}finally{i18nBusy=false;}
-  if(currentUser){renderClasses();if(document.getElementById('panel-admin')?.classList.contains('active'))renderDashboard();renderInstSwitch();if(isActivePanel('insights'))renderInsightsHtml();}
+  if(currentUser){renderClasses();if(document.getElementById('panel-admin')?.classList.contains('active'))renderDashboard();renderInstSwitch();if(isActivePanel('insights'))renderInsightsHtml();window.GC?.onLang?.();}
 }
 function uiLocale(){return uiLang==='es'?'es-UY':'en-US';}
 function fmtDate(d,opts){try{return new Date(d).toLocaleDateString(uiLocale(),opts);}catch(e){return '';}}
@@ -1742,6 +1763,7 @@ window.onload=async()=>{
   renderSliders();setupSubjectsInput();initI18n();initTeachLang();
   const slug=getOrgSlugFromUrl();
   if(slug)applyOrgBranding(slug);
+  if(/[?&]student\b/.test(location.search))switchTab('student');
   // H6: session ended elsewhere (other tab, expired refresh token, forced sign-out) → back to login, no reload
   sb.auth.onAuthStateChange(event=>{
     if(event==='SIGNED_OUT'&&currentUser)goToLogin(pendingAuthMsg);
@@ -2122,6 +2144,9 @@ function switchTab(tab){
   document.querySelectorAll('.auth-tab').forEach((t,i)=>t.classList.toggle('active',(i===0&&tab==='login')||(i===1&&tab==='register')));
   document.getElementById('tab-login').style.display=tab==='login'?'block':'none';
   document.getElementById('tab-register').style.display=tab==='register'?'block':'none';
+  const stu=document.getElementById('tab-student-login');if(stu)stu.style.display=tab==='student'?'block':'none';
+  document.querySelector('.auth-tabs')?.classList.toggle('student',tab==='student');
+  if(tab==='student')setTimeout(()=>document.getElementById('student-email')?.focus(),30);
   document.getElementById('auth-error').style.display='none';
 }
 function showAuthError(msg,ok){const el=document.getElementById('auth-error');el.textContent=msg;el.classList.toggle('ok',!!ok);el.style.display='block';}
@@ -2173,6 +2198,7 @@ async function sessionExpired(){
 }
 function goToLogin(msg){
   if(viewAs){viewAs=null;vaRenderChrome();}
+  window.GC?.leaveStudentMode?.();
   currentUser=null;plannings=[];currentOrgId=null;orgsCache={};currentResult=null;
   docDirty=false;genToken++;generating=false;saving=false;clearInterval(loadingTimer);
   closeUserMenu();['modal-invite','modal-create-inst'].forEach(closeModal);
@@ -2193,7 +2219,7 @@ function toggleUserMenu(e){
   m.classList.toggle('open',open);document.getElementById('user-avatar').setAttribute('aria-expanded',String(open));
 }
 function closeUserMenu(){const m=document.getElementById('user-menu');if(m)m.classList.remove('open');document.getElementById('user-avatar')?.setAttribute('aria-expanded','false');}
-function roleLabel(u){return u?.isSuperAdmin?'Platform owner':u?.isOrgAdmin?'Institution admin':'Teacher';}
+function roleLabel(u){return u?.isSuperAdmin?'Platform owner':u?.isOrgAdmin?'Institution admin':u?.isStudent?'Student':'Teacher';}
 // Account menu. Only the owner himself ever sees his own name/email here. In View as it shows the simulated person.
 function renderUserMenu(){
   const u=currentUser;if(!u)return;
@@ -2220,7 +2246,7 @@ async function loadProfile(){
   }
   if(!p)return null;
   return {id:p.id,email:p.email,name:p.name||p.email.split('@')[0],role:p.role,
-    isSuperAdmin:p.role==='superadmin',isOrgAdmin:p.role==='org_admin',orgId:p.institution_id};
+    isSuperAdmin:p.role==='superadmin',isOrgAdmin:p.role==='org_admin',isStudent:p.role==='student',orgId:p.institution_id};
 }
 
 async function enterApp(){
@@ -2229,6 +2255,9 @@ async function enterApp(){
 async function enterAppInner(){
   currentUser=await loadProfile();
   if(!currentUser){showAuthError('Could not load your profile. Try again.');await sb.auth.signOut();return;}
+  // Groups + calendar: link enrollments by verified email (claim_enrollments); students get only their dashboard
+  if(window.GC&&await GC.onEnter())return;
+  if(!currentUser)return;
   document.getElementById('screen-auth').style.display='none';
   document.getElementById('screen-app').classList.add('active');
   renderUserMenu();
@@ -2252,10 +2281,13 @@ async function enterAppInner(){
   loadMasterSettings();
   if(currentUser.orgId)loadPlaybooks(currentUser.orgId).then(()=>buildSystemPrompt());
   hierLoadContext();
+  window.GC?.afterEnter?.(); // deep link ?session=<id> (from a calendar event)
 }
 
 // ══ NAVIGATION ══
 function showPanel(name){
+  if(currentUser?.isStudent&&name!=='live')name='student';      // students: only their dashboard (+ the live class)
+  else if(name==='student'&&!currentUser?.isStudent)name='home';
   if(viewAs&&(name==='superadmin'||name==='platform'||name==='insights'||(!currentUser?.isOrgAdmin&&ADMIN_PANELS.includes(name))))name=currentUser?.isOrgAdmin?'structure':'home';
   if((name==='platform'||name==='insights')&&!currentUser?.isSuperAdmin)name=isAdminUser()?'structure':'home';
   if(currentUser?.isSuperAdmin&&!viewAs){
@@ -2272,6 +2304,7 @@ function showPanel(name){
   if(name==='admin')renderDashboard();
   if(name==='superadmin')renderInstitutions();
   if(name==='insights')renderInsights();
+  if(name==='calendar'||name==='groups'||name==='student')window.GC?.render?.(name);
   if(name==='master'){loadMasterSettings();const o=masterOrgId();if(o)loadPlaybooks(o).then(renderPlaybookList);else renderPlaybookList();}
   if(name==='ai'){const o=masterOrgId();if(o&&!playbookCache[o])loadPlaybooks(o).then(()=>buildSystemPrompt());buildSystemPrompt();initSkillsDrag();}
   hierAfterPanel(name);
@@ -3326,8 +3359,8 @@ function showToast(msg,type='',ms=3200){
 // 3 levels: main institution (madre) › campus/faculty (sede/facultad) › department/area (cátedra/área).
 // Admins of a unit also manage everything below it. Teachers belong to one unit at any level.
 const LEVEL_LABELS={1:'Main institution',2:'Campus / Faculty',3:'Department / Area'};
-const ADMIN_PANELS=['structure','admin','branding','master','superadmin','platform'];
-const TEACHER_PANELS=['home','ai'];
+const ADMIN_PANELS=['structure','admin','branding','master','superadmin','platform','groups'];
+const TEACHER_PANELS=['home','ai','calendar'];
 let appMode='teacher';
 let effCache={};            // orgId -> get_effective_config (chain root→node, branding, …)
 let hierCtxFor;             // orgId whose effective config feeds sliders + prompt
@@ -3355,9 +3388,9 @@ function hierApplyMode(){
   const show=(id,on,disp='flex')=>{const el=document.getElementById(id);if(el)el.style.display=on?disp:'none';};
   show('mode-switch',admin,'inline-flex');
   document.querySelectorAll('#mode-switch button').forEach(b=>{const on=b.dataset.mode===(am?'admin':'teacher');b.classList.toggle('active',on);b.setAttribute('aria-pressed',String(on));});
-  show('nav-home',!am);show('nav-ai',!am);
+  show('nav-home',!am);show('nav-ai',!am);show('nav-calendar',!am);
   const unit=sa?!!currentOrgId:!!(currentOrgId||currentUser?.orgId); // super admin: only with a unit chosen in the switcher
-  ['nav-structure','nav-admin','nav-branding','nav-master','nav-billing'].forEach(id=>show(id,am&&unit));
+  ['nav-structure','nav-groups','nav-admin','nav-branding','nav-master','nav-billing'].forEach(id=>show(id,am&&unit));
   show('nav-superadmin',am&&sa);show('nav-insights',am&&sa);show('nav-platform',am&&sa);
   document.querySelectorAll('.icon-sidebar .sib-group').forEach(g=>g.classList.toggle('empty',![...g.querySelectorAll('.sib-btn')].some(b=>b.style.display!=='none')));
   renderInstSwitch();
@@ -3744,6 +3777,7 @@ function renderPlatformTable(){
   const rows=platformRows.filter(p=>!q||normTxt([p.name,p.email,hierPathLabel(p.institution_id)].join(' ')).includes(q));
   body.innerHTML=rows.map(p=>{
     const sa=p.role==='superadmin';
+    if(p.role==='student')return `<tr><td data-no-i18n>${esc(p.name||'—')}</td><td data-no-i18n>${esc(p.email||'')}</td><td><span class="user-menu-role" style="margin-top:0">Student</span></td><td><span class="muted-cell">Groups (no unit)</span></td><td data-no-i18n>${p.created_at?esc(fmtDate(p.created_at,{year:'numeric',month:'short',day:'numeric'})):'—'}</td></tr>`;
     const role=sa?'<span class="user-menu-role" style="margin-top:0">Platform owner</span>':
       `<select class="member-role" data-hc="pf-role" data-id="${esc(p.id)}" data-prev="${esc(p.role)}"${p.institution_id?'':' disabled'}><option value="teacher"${p.role==='teacher'?' selected':''}>Teacher</option><option value="org_admin"${p.role==='org_admin'?' selected':''}>Institution admin</option></select>`;
     const inst=sa?`<span data-no-i18n>${esc(p.institution_id?hierPathLabel(p.institution_id):'—')}</span>`:
@@ -4126,7 +4160,9 @@ function isRealSuperAdmin(){return !!realUser()?.isSuperAdmin;}
 function vaBlocked(){if(!viewAs)return false;showToast(VA_RO,'err');return true;}
 // Safety net: while viewing as someone, only reads reach Supabase, and only the AI preview reaches our API.
 (function vaGuardClient(){
-  const READ_RPC=new Set(['get_effective_config','get_billing_summary','get_seat_status','list_purchase_requests','get_document_content','get_org_branding','get_ai_quota','platform_stats','platform_billing_overview']);
+  const READ_RPC=new Set(['get_effective_config','get_billing_summary','get_seat_status','list_purchase_requests','get_document_content','get_org_branding','get_ai_quota','platform_stats','platform_billing_overview',
+    'list_groups','list_students','list_group_members','unit_calendar','session_people','student_view']); // groups + calendar: reads only
+
   const roResult=()=>({data:null,error:{message:VA_RO,code:'viewas'},status:403,statusText:'View as',count:null});
   const roChain=()=>{const r=roResult();let p;p=new Proxy(function(){},{get(_,k){
       if(k==='then')return (res,rej)=>Promise.resolve(r).then(res,rej);
@@ -4175,7 +4211,7 @@ function vaRenderChrome(){
   document.body.classList.toggle('viewas-on',on);
   if(b){
     if(on){
-      const role=viewAs.perspective==='admin'?'Institution admin':'Teacher';
+      const role=viewAs.perspective==='admin'?'Institution admin':viewAs.perspective==='student'?'Student':'Teacher';
       const who=viewAs.person?` <span class="va-person" data-no-i18n>(${esc(viewAs.person.name||viewAs.person.email||'')})</span>`:'';
       b.innerHTML=`<span aria-hidden="true">👁</span> <span>Viewing as:</span> <b>${esc(role)}</b>${who} <span aria-hidden="true">·</span> <span class="va-path" data-no-i18n>${esc(viewAs.path)}</span> <span aria-hidden="true">—</span> <span class="va-ro">read-only</span> <button type="button" class="va-exit" data-va="exit">Exit</button>`;
       b.style.display='flex';
@@ -4195,7 +4231,7 @@ async function openViewAs(unitId){
   document.getElementById('modal-viewas').classList.add('active');
   setTimeout(()=>document.getElementById('va-search')?.focus(),50);
 }
-function vaPerspective(){return document.querySelector('input[name="va-persp"]:checked')?.value==='teacher'?'teacher':'admin';}
+function vaPerspective(){const v=document.querySelector('input[name="va-persp"]:checked')?.value;return v==='teacher'||v==='student'?v:'admin';}
 function vaRenderTree(){
   const box=document.getElementById('va-tree');if(!box)return;
   const q=normTxt(document.getElementById('va-search')?.value||'').trim();
@@ -4209,7 +4245,11 @@ function vaRenderTree(){
 }
 async function vaLoadPeople(){
   const sel=document.getElementById('va-person');if(!sel)return;
-  const persp=vaPerspective();const unit=VA_PICK.unit;const seq=++VA_PICK.seq;
+  const persp=vaPerspective();const unit=VA_PICK.unit;
+  const gf=document.getElementById('va-group-field');if(gf)gf.style.display=persp==='student'?'block':'none';
+  const ph=document.getElementById('va-person-hint');if(ph)ph.textContent=persp==='student'?'Pick a student to see exactly their dashboard.':'Pick someone to see their saved classes.';
+  if(persp==='student'&&window.GC){++VA_PICK.seq;return GC.vaLoadStudentPick(unit);} // unit → group → (optional) student
+  const seq=++VA_PICK.seq;
   const generic=persp==='admin'?'Generic institution admin of this unit':'Generic teacher of this unit';
   sel.innerHTML=`<option value="">${esc(trText(generic))}</option>`;VA_PICK.people=[];
   if(!unit)return;
@@ -4221,11 +4261,12 @@ async function vaLoadPeople(){
 }
 async function vaStart(){
   if(!VA_PICK.unit){showToast('Choose a unit first.','err');return;}
+  if(vaPerspective()==='student'&&window.GC)return GC.vaStartStudent(VA_PICK.unit);
   const pid=document.getElementById('va-person')?.value||'';
   const person=pid?VA_PICK.people.find(p=>p.id===pid)||null:null;
   await enterViewAs({unitId:VA_PICK.unit,perspective:vaPerspective(),person});
 }
-async function enterViewAs({unitId,perspective,person}){
+async function enterViewAs({unitId,perspective,person,group}){
   if(viewAs||appBooting||!currentUser?.isSuperAdmin)return false; // super admins only, never nested, app loaded
   if(generating){showToast('Wait for the class to finish generating.','err');return false;}
   if(!orgsCache[unitId])await fetchOrgs();
@@ -4236,10 +4277,11 @@ async function enterViewAs({unitId,perspective,person}){
     aiVisible:out.classList.contains('visible'),aiEmpty:document.getElementById('ai-empty').style.display,
     prompt:document.getElementById('prompt-input').value,aiFrag:frag};
   while(out.firstChild)frag.appendChild(out.firstChild); // the owner's open class comes back on Exit, untouched
-  const admin=perspective!=='teacher';
-  viewAs={unitId,perspective:admin?'admin':'teacher',person:person?{id:person.id,name:person.name||'',email:person.email||''}:null,path:vaPathOf(unitId),saved};
-  currentUser={id:person?.id||null,email:person?.email||'',name:person?(person.name||String(person.email||'').split('@')[0]):'',
-    role:admin?'org_admin':'teacher',isSuperAdmin:false,isOrgAdmin:admin,orgId:unitId,viewAs:true};
+  const student=perspective==='student';const admin=!student&&perspective!=='teacher';
+  viewAs={unitId,perspective:student?'student':admin?'admin':'teacher',person:person?{id:person.id,name:person.name||'',email:person.email||''}:null,
+    group:student?(group||null):null,path:vaPathOf(unitId)+(student&&group?.name?' › '+group.name:''),saved};
+  currentUser={id:student?null:(person?.id||null),email:person?.email||'',name:person?(person.name||String(person.email||'').split('@')[0]):'',
+    role:student?'student':admin?'org_admin':'teacher',isSuperAdmin:false,isOrgAdmin:admin,isStudent:student,orgId:student?null:unitId,viewAs:true};
   currentOrgId=unitId;currentResult=null;docDirty=false;plannings=[];
   effCache={};hierCtxFor=undefined;BL.summary=null;BL.confirmBuy=false;BL.warned=true;
   out.classList.remove('visible');document.getElementById('ai-empty').style.display='flex';document.getElementById('prompt-input').value='';
@@ -4248,6 +4290,7 @@ async function enterViewAs({unitId,perspective,person}){
   vaResetBranding();vaRenderChrome();
   await fetchOrgs();if(!viewAs)return false;
   await hierApplyOwnBranding();if(!viewAs)return false;
+  if(student){appMode='teacher';hierApplyMode();await window.GC?.enterStudentMode?.();return !!viewAs;} // student dashboard, read-only
   await loadPlannings();if(!viewAs)return false;
   renderClasses();
   appMode=admin?'admin':'teacher';hierApplyMode();
@@ -4258,6 +4301,7 @@ async function enterViewAs({unitId,perspective,person}){
 async function exitViewAs(){
   if(!viewAs)return;
   const s=viewAs.saved;
+  window.GC?.leaveStudentMode?.();
   genToken++;generating=false;clearInterval(loadingTimer);setGenerateBusy(false);studentGenToken++;
   document.getElementById('ai-loading').classList.remove('visible');
   try{window.LiveClass?.reset?.();}catch(e){}
@@ -4296,7 +4340,7 @@ document.addEventListener('click',e=>{
   }
 });
 document.addEventListener('input',e=>{if(e.target?.id==='va-search')vaRenderTree();});
-document.addEventListener('change',e=>{if(e.target?.name==='va-persp')vaLoadPeople();});
+document.addEventListener('change',e=>{if(e.target?.name==='va-persp')vaLoadPeople();if(e.target?.id==='va-group')window.GC?.vaLoadStudents?.();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal('modal-viewas');});
 I18N_RULES_ES.push([/^Viewing as: (.+)$/,'Viendo como: $1']);
 const I18N_ES_VIEWAS={
@@ -4318,7 +4362,7 @@ Object.assign(I18N_ES,I18N_ES_VIEWAS);
 //   super admin: "All institutions" (null: platform screens) or any unit · admin: their own subtree
 //   (a single unit → static name) · teacher: nothing. View as: locked to the viewed unit.
 // Remembered per person in localStorage (never during View as) and validated against what they can see.
-const INST_PANELS=['structure','admin','branding','master','billing'];
+const INST_PANELS=['structure','groups','admin','branding','master','billing'];
 const ISW_ALL='__all__';
 function iswKey(){const u=realUser();return u?.id?'tc_inst_sel:'+u.id:null;}
 function iswSave(){
@@ -4515,7 +4559,8 @@ function renderInsightsHtml(){
   const customLabel=k=>{for(const o of Object.values(orgsCache)){const cu=(o.methodologyConfig?.custom||[]).find(x=>x.key===k);if(cu)return String(cu.label||k);}return k;};
   const bars=(c.bars||[]).map(b=>{const m=METHODOLOGIES.find(x=>x.key===b.key);const label=m?m.label:customLabel(b.key);return {label,value:b.avg,shown:String(b.avg),noI18n:!m,title:label+' · '+trText('average of')+' '+b.count};});
   const content=`<div class="in-section" id="in-content"><div class="in-section-title">Content <span>Based on the classes generated in the period</span></div>
-    <div class="in-tiles">${inTile('Institutions with a playbook',`${fmtInt(c.playbook_institutions)} / ${fmtInt(c.institutions)}`,'Units with at least one playbook','in-t-playbook')}</div>
+    <div class="in-tiles">${inTile('Institutions with a playbook',`${fmtInt(c.playbook_institutions)} / ${fmtInt(c.institutions)}`,'Units with at least one playbook','in-t-playbook')}
+      ${d.students?inTile('Loaded students',fmtInt(d.students.total),'Totals only: no names or emails.','in-t-students')+inTile('Signed in with their link',fmtInt(d.students.linked),`<span>Loaded students</span> <span data-no-i18n>${pct(d.students.linked,d.students.total)}</span>`,'in-t-linked')+inTile('Had classes in the period',fmtInt(d.students.active),`<span>Groups · classes held</span> <span data-no-i18n>${fmtInt(d.students.groups)} · ${fmtInt(d.students.sessions)}</span>`,'in-t-active-students'):''}</div>
     <div class="in-grid">
       <div class="admin-card"><div class="admin-card-title">Top subjects <span>Top 10</span></div>${inBars((c.subjects||[]).map(r=>({label:r.name,value:r.count,noI18n:true})))}</div>
       <div class="admin-card"><div class="admin-card-title">Teaching languages</div>${inBars((c.languages||[]).map(r=>({label:r.name,value:r.count})))}</div>
@@ -4583,5 +4628,6 @@ const I18N_ES_NAV={
 Object.assign(I18N_ES,I18N_ES_NAV);
 </script>
 <script src="/live-class.js"></script>
+<script src="/groups-calendar.js"></script>
 </body>
 </html>

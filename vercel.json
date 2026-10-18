@@ -18,6 +18,18 @@
       "destination": "/public/$1"
     },
     {
+      "source": "/cal/([0-9a-f]+)\\.ics",
+      "destination": "/api/calendar/feed?token=$1"
+    },
+    {
+      "source": "/groups-calendar.js",
+      "destination": "/public/groups-calendar.js"
+    },
+    {
+      "source": "/groups-calendar.css",
+      "destination": "/public/groups-calendar.css"
+    },
+    {
       "source": "/(.*)",
       "destination": "/public/index.html"
     }

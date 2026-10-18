@@ -43,6 +43,11 @@ create table if not exists public.profiles (
   institution_id uuid references public.institutions(id) on delete set null,
   created_at timestamptz not null default now()
 );
+-- Roles: superadmin / org_admin / teacher / student. Los estudiantes son gratis: nunca ocupan asientos
+-- (seats_used cuenta solo teacher + org_admin) y no pertenecen a una unidad (institution_id null):
+-- su vínculo con cada institución son sus inscripciones (student_enrollments).
+alter table public.profiles drop constraint if exists profiles_role_check;
+alter table public.profiles add constraint profiles_role_check check (role in ('superadmin','org_admin','teacher','student'));
 
 create table if not exists public.invitations (
   id uuid primary key default gen_random_uuid(),
@@ -436,6 +441,9 @@ declare
   v_slug  text := lower(trim(coalesce(new.raw_user_meta_data->>'org_slug', '')));
   v_role  text := 'teacher';
   v_inst  uuid;
+  -- Ingreso de estudiante (link mágico desde "Soy estudiante"): sin invitación queda como estudiante,
+  -- sin institución y sin acceso al generador. Las invitaciones de docentes se aplican igual que siempre.
+  v_student boolean := coalesce(new.raw_user_meta_data->>'via', '') = 'student_link';
 begin
   if v_email <> '' then
     select * into inv from public.invitations
@@ -446,6 +454,8 @@ begin
   if inv.id is not null then
     v_role := inv.role;
     v_inst := inv.institution_id;
+  elsif v_student then
+    v_role := 'student'; v_inst := null;
   elsif v_slug <> '' then
     -- Solo se entra por slug si la institución tiene el registro abierto
     select id into v_inst from public.institutions
@@ -456,7 +466,7 @@ begin
   -- Plan: sin asiento libre en la cuenta, la persona queda sin institución (el alta no falla)
   -- y la invitación sigue pendiente. La pantalla /org/<slug> ya avisa antes de registrarse.
   if v_inst is not null and not public.seat_available(public.billing_root(v_inst)) then
-    v_inst := null; v_role := 'teacher'; inv := null;
+    v_inst := null; v_role := case when v_student then 'student' else 'teacher' end; inv := null;
   end if;
 
   -- Nadie se vuelve súper admin al registrarse: ese rol se otorga solo a mano (ver encabezado).
@@ -673,9 +683,11 @@ create policy inst_delete on public.institutions for delete
 -- Perfiles: los admins ven a su gente, pero solo cada uno edita su propio perfil
 -- (en la práctica, solo el nombre). Roles y bajas: set_member_role / remove_member.
 drop policy if exists prof_select on public.profiles;
+-- Estudiantes: solo se ven a sí mismos (y el súper admin). Los admins ven a sus estudiantes únicamente
+-- a través de las inscripciones que cargó su institución (list_students), nunca por profiles.
 create policy prof_select on public.profiles for select
   using (id = auth.uid() or public.is_superadmin()
-         or (institution_id is not null and role <> 'superadmin' and public.is_admin_of(institution_id)));
+         or (institution_id is not null and role not in ('superadmin','student') and public.is_admin_of(institution_id)));
 drop policy if exists prof_update on public.profiles;
 create policy prof_update on public.profiles for update
   using (id = auth.uid() or public.is_superadmin())
@@ -696,7 +708,7 @@ create policy plan_select on public.plannings for select
              and (public.is_superadmin() or not public.is_superadmin_id(owner_id))));
 drop policy if exists plan_insert on public.plannings;
 create policy plan_insert on public.plannings for insert
-  with check (owner_id = auth.uid()
+  with check (owner_id = auth.uid() and public.my_role() is distinct from 'student'
               and (public.is_superadmin() or institution_id is not distinct from public.my_institution()));
 drop policy if exists plan_update on public.plannings;
 create policy plan_update on public.plannings for update
@@ -841,6 +853,7 @@ begin
     'users',        (select count(*) from public.profiles),
     'teachers',     (select count(*) from public.profiles where role = 'teacher'),
     'admins',       (select count(*) from public.profiles where role = 'org_admin'),
+    'students',     (select count(*) from public.profiles where role = 'student'),
     'classes',      (select count(*) from public.plannings),
     'ai_today',     (select coalesce(sum(count), 0) from public.ai_usage where day = (now() at time zone 'utc')::date),
     'ai_users_today', (select count(*) from public.ai_usage where day = (now() at time zone 'utc')::date and count > 0));
@@ -1033,6 +1046,11 @@ begin
   if exists (select 1 from public.profiles where institution_id = p_inst) then
     raise exception 'Primero mové o quitá a las personas de esta unidad';
   end if;
+  if exists (select 1 from public.class_groups where institution_id = p_inst)
+     or exists (select 1 from public.student_enrollments where institution_id = p_inst)
+     or exists (select 1 from public.class_sessions where institution_id = p_inst) then
+    raise exception 'Primero borrá los grupos, estudiantes y clases de esta unidad';
+  end if;
   delete from public.institutions where id = p_inst;
   return 'deleted';
 end $$;
@@ -1051,6 +1069,7 @@ begin
   select * into t from public.profiles where id = p_user;
   if t.id is null then raise exception 'No autorizado'; end if;
   if t.role = 'superadmin' then raise exception 'No se puede modificar al súper admin'; end if;
+  if t.role = 'student' then raise exception 'Los estudiantes no pertenecen a una unidad: se cargan en los grupos'; end if;
   if p_inst is not null and not exists (select 1 from public.institutions where id = p_inst) then
     raise exception 'No autorizado';
   end if;
@@ -1071,6 +1090,7 @@ grant execute on function public.admin_move_member(uuid, uuid) to authenticated;
 create or replace function public.ai_daily_limit(p_uid uuid) returns integer
 language sql stable security definer set search_path = public as
 $$ select case
+     when p.role = 'student' then 0          -- estudiantes: sin generador
      when p.role = 'superadmin' then 500
      when p.role = 'org_admin' and p.institution_id is not null then 150
      when p.institution_id is not null then 60
@@ -1133,6 +1153,9 @@ declare
 begin
   if v_uid is null then raise exception 'No autorizado'; end if;
   v_limit := public.ai_daily_limit(v_uid);
+  if v_limit <= 0 then -- estudiantes: nunca generan (ni se anota nada en ai_events)
+    return json_build_object('allowed', false, 'used', 0, 'limit', 0);
+  end if;
   insert into public.ai_usage as a (user_id, day, count) values (v_uid, v_day, 1)
   on conflict (user_id, day) do update set count = a.count + 1 where a.count < v_limit
   returning a.count into v_used;
@@ -1748,6 +1771,20 @@ begin
       'playbook_institutions', (select count(distinct d.institution_id) from public.institution_documents d
                                  where v_units is null or d.institution_id = any(v_units)),
       'institutions', (select count(*) from public.institutions i where v_units is null or i.id = any(v_units))),
+    -- Estudiantes: solo totales (nunca emails ni nombres). total = emails distintos cargados; linked = ya
+    -- entraron con su link; active = tuvieron al menos una clase (no cancelada) en el período.
+    'students', (select json_build_object(
+        'total', count(distinct lower(e.email)),
+        'linked', count(distinct e.user_id),
+        'active', count(distinct lower(e.email)) filter (where exists (
+            select 1 from public.class_sessions s
+             where s.status = 'scheduled' and s.starts_at >= v_since and s.starts_at <= now()
+               and (exists (select 1 from public.group_members m where m.group_id = s.group_id and m.enrollment_id = e.id)
+                    or exists (select 1 from public.session_invitees si where si.session_id = s.id and si.enrollment_id = e.id)))),
+        'groups', (select count(*) from public.class_groups g where v_units is null or g.institution_id = any(v_units)),
+        'sessions', (select count(*) from public.class_sessions s where s.status = 'scheduled' and s.starts_at >= v_since
+                       and s.starts_at <= now() and (v_units is null or s.institution_id = any(v_units))))
+      from public.student_enrollments e where v_units is null or e.institution_id = any(v_units)),
     'costs', (select json_build_object(
         'recorded_ever', exists (select 1 from public.ai_request_log),
         'requests', count(*),
@@ -1770,6 +1807,984 @@ begin
 end $$;
 revoke all on function public.platform_insights(integer, uuid, boolean) from public, anon;
 grant execute on function public.platform_insights(integer, uuid, boolean) to authenticated;
+
+-- ========== GRUPOS, ESTUDIANTES Y CALENDARIO ==========
+-- Institución › sede › cátedra › GRUPO (ej. "English B1 – Tue/Thu"). Un grupo pertenece a una unidad, tiene
+-- UN docente y opcionalmente UN suplente (mismo acceso a las clases del grupo) y muchos estudiantes.
+--
+-- PRIVACIDAD (todo se lee y escribe SOLO con las funciones de abajo; las tablas no tienen acceso directo):
+--   · Cada institución ve únicamente los emails y nombres que cargó ella misma: la inscripción
+--     (student_enrollments) es de la unidad que la cargó, con el email tal como se cargó. La ven los admins
+--     de esa unidad (y de sus superiores). Si dos instituciones cargan a la misma persona hay dos
+--     inscripciones y ninguna ve la otra.
+--   · Un docente ve nombre y email de los estudiantes de los grupos donde es docente o suplente (y de los
+--     invitados a sus clases sueltas); nada más.
+--   · Un estudiante ve sus grupos, sus clases, el nombre del docente y sus propios datos. Nunca los emails
+--     de sus compañeros (solo cuántos son).
+--   · Los estudiantes no tienen unidad (profiles.institution_id null) ni ocupan asientos.
+--   · Nada de esto se anota en ai_events; Insights solo recibe totales.
+-- MENORES: muchos estudiantes son menores. Hoy no se graba nada, así que no hay flujo de consentimiento.
+--   TODO(consent): antes de activar la grabación, pedir el consentimiento del adulto responsable (o usar
+--   institutions.consent_managed_by_institution cuando la institución lo gestiona por su cuenta).
+alter table public.institutions add column if not exists consent_managed_by_institution boolean not null default false;
+
+-- ── ayudas de formato (uso interno) ──
+create or replace function public.tc_email_ok(p text) returns boolean
+language sql immutable set search_path = public as
+$$ select p is not null and length(p) <= 254 and p ~ '^[^@[:space:]<>"'',;()]+@[^@[:space:]<>"'',;()]+\.[A-Za-z]{2,24}$' $$;
+create or replace function public.tc_tz_ok(p text) returns boolean
+language sql stable set search_path = public as
+$$ select p is not null and length(p) between 1 and 64 and exists (select 1 from pg_timezone_names where name = p) $$;
+create or replace function public.tc_clean_text(p text, n integer) returns text
+language sql immutable set search_path = public as
+$$ select left(btrim(regexp_replace(regexp_replace(coalesce(p, ''), '[[:cntrl:]<>]', ' ', 'g'), '\s+', ' ', 'g')), n) $$;
+-- fecha + hora local de una zona → instante (timestamptz). Respeta cambios de horario.
+create or replace function public.tc_local_ts(d date, t time, tz text) returns timestamptz
+language sql stable set search_path = public as $$ select (d + t) at time zone tz $$;
+-- días de una serie: 1 = lunes … 7 = domingo (ISO)
+create or replace function public.tc_series_dates(p_days integer[], p_from date, p_to date) returns setof date
+language sql immutable set search_path = public as
+$$ select g::date from generate_series(p_from::timestamp, p_to::timestamp, interval '1 day') g
+    where extract(isodow from g)::int = any(p_days) $$;
+create or replace function public.tc_weekdays(p integer[]) returns integer[]
+language plpgsql immutable set search_path = public as
+$$
+declare v integer[];
+begin
+  if p is null or coalesce(array_length(p, 1), 0) = 0 then raise exception 'Elegí al menos un día de la semana'; end if;
+  if exists (select 1 from unnest(p) x where x is null or x < 1 or x > 7) then raise exception 'Días de la semana inválidos'; end if;
+  select array_agg(distinct x order by x) into v from unnest(p) x;
+  return v;
+end $$;
+create or replace function public.tc_check_duration(p integer) returns void
+language plpgsql immutable set search_path = public as
+$$ begin if p is null or p < 5 or p > 720 then raise exception 'Duración inválida (de 5 a 720 minutos)'; end if; end $$;
+-- token del feed de calendario: 64 caracteres hex (dos UUID v4 aleatorios, ~244 bits)
+create or replace function public.tc_new_token() returns text
+language sql volatile set search_path = public as
+$$ select replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '') $$;
+
+-- ── tablas ──
+create table if not exists public.class_groups (
+  id uuid primary key default gen_random_uuid(),
+  institution_id uuid not null references public.institutions(id) on delete restrict,
+  name text not null check (length(btrim(name)) between 1 and 120),
+  teacher_id uuid references auth.users(id) on delete set null,      -- UN docente
+  substitute_id uuid references auth.users(id) on delete set null,   -- UN suplente (opcional)
+  timezone text not null default 'America/Montevideo',
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint class_groups_sub_differs check (substitute_id is null or substitute_id is distinct from teacher_id)
+);
+create unique index if not exists class_groups_unit_name on public.class_groups (institution_id, lower(btrim(name)));
+create index if not exists class_groups_teacher_idx on public.class_groups (teacher_id);
+create index if not exists class_groups_sub_idx on public.class_groups (substitute_id);
+
+-- Inscripción = "esta unidad cargó este email". El email queda tal como se cargó (sin espacios al costado).
+create table if not exists public.student_enrollments (
+  id uuid primary key default gen_random_uuid(),
+  institution_id uuid not null references public.institutions(id) on delete restrict,
+  email text not null check (public.tc_email_ok(email)),
+  name text not null default '',
+  user_id uuid references auth.users(id) on delete set null,   -- se completa con claim_enrollments()
+  loaded_by uuid references auth.users(id) on delete set null, -- quién lo cargó (admin, o docente en una clase suelta)
+  source text not null default 'manual' check (source in ('manual','csv','session')),
+  claimed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists student_enrollments_unit_email on public.student_enrollments (institution_id, lower(email));
+create index if not exists student_enrollments_email_idx on public.student_enrollments (lower(email));
+create index if not exists student_enrollments_user_idx on public.student_enrollments (user_id);
+
+create table if not exists public.group_members (
+  group_id uuid not null references public.class_groups(id) on delete cascade,
+  enrollment_id uuid not null references public.student_enrollments(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (group_id, enrollment_id)
+);
+create index if not exists group_members_enr_idx on public.group_members (enrollment_id);
+
+-- Serie semanal (las clases se materializan como filas en class_sessions, máximo 1 año)
+create table if not exists public.session_series (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.class_groups(id) on delete cascade,
+  title text not null default '',
+  weekdays integer[] not null,
+  start_time time not null,
+  duration_min integer not null check (duration_min between 5 and 720),
+  start_date date not null,
+  end_date date not null,
+  timezone text not null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint session_series_dates check (end_date >= start_date and end_date <= start_date + 366)
+);
+
+create table if not exists public.class_sessions (
+  id uuid primary key default gen_random_uuid(),
+  institution_id uuid not null references public.institutions(id) on delete restrict,
+  group_id uuid references public.class_groups(id) on delete cascade,      -- null = clase suelta
+  series_id uuid references public.session_series(id) on delete set null,
+  teacher_id uuid references auth.users(id) on delete set null,            -- quién la creó (suelta: su docente)
+  title text not null default '',
+  starts_at timestamptz not null,
+  ends_at timestamptz not null,
+  timezone text not null default 'America/Montevideo',
+  status text not null default 'scheduled' check (status in ('scheduled','cancelled')),
+  modified boolean not null default false,  -- editada sola: editar la serie no la pisa
+  seq integer not null default 0,           -- SEQUENCE del .ics (sube en cada cambio)
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint class_sessions_time check (ends_at > starts_at and ends_at <= starts_at + interval '12 hours')
+);
+create index if not exists class_sessions_group_idx on public.class_sessions (group_id, starts_at);
+create index if not exists class_sessions_series_idx on public.class_sessions (series_id);
+create index if not exists class_sessions_teacher_idx on public.class_sessions (teacher_id, starts_at);
+create index if not exists class_sessions_inst_idx on public.class_sessions (institution_id, starts_at);
+
+-- Invitados por email a una clase (clases sueltas o extra en un grupo)
+create table if not exists public.session_invitees (
+  session_id uuid not null references public.class_sessions(id) on delete cascade,
+  enrollment_id uuid not null references public.student_enrollments(id) on delete cascade,
+  primary key (session_id, enrollment_id)
+);
+create index if not exists session_invitees_enr_idx on public.session_invitees (enrollment_id);
+
+-- Feed de calendario personal (Google Calendar, Outlook, Apple): token aleatorio, se puede regenerar
+create table if not exists public.calendar_tokens (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  token text not null unique check (token ~ '^[0-9a-f]{64}$'),
+  created_at timestamptz not null default now()
+);
+
+-- Sin acceso directo para nadie desde la app: todo pasa por las funciones de abajo.
+alter table public.class_groups        enable row level security;
+alter table public.student_enrollments enable row level security;
+alter table public.group_members       enable row level security;
+alter table public.session_series      enable row level security;
+alter table public.class_sessions      enable row level security;
+alter table public.session_invitees    enable row level security;
+alter table public.calendar_tokens     enable row level security;
+revoke all on public.class_groups, public.student_enrollments, public.group_members, public.session_series,
+              public.class_sessions, public.session_invitees, public.calendar_tokens from anon, authenticated;
+
+drop trigger if exists class_groups_touch on public.class_groups;
+create trigger class_groups_touch before update on public.class_groups for each row execute function public.touch_updated_at();
+drop trigger if exists session_series_touch on public.session_series;
+create trigger session_series_touch before update on public.session_series for each row execute function public.touch_updated_at();
+drop trigger if exists class_sessions_touch on public.class_sessions;
+create trigger class_sessions_touch before update on public.class_sessions for each row execute function public.touch_updated_at();
+drop trigger if exists enrollments_hide_owner on public.student_enrollments;
+create trigger enrollments_hide_owner before insert or update of loaded_by on public.student_enrollments
+  for each row execute function public.hide_superadmin_refs('loaded_by');
+
+-- ── permisos (uso interno y de las políticas) ──
+-- ¿Doy clase en este grupo? (docente o suplente)
+create or replace function public.teaches_group(p_group uuid) returns boolean
+language sql stable security definer set search_path = public as
+$$ select auth.uid() is not null and exists (
+     select 1 from public.class_groups g where g.id = p_group and auth.uid() in (g.teacher_id, g.substitute_id)) $$;
+-- ¿Puedo editar esta clase? Grupo: su docente o suplente actual. Suelta: quien la creó.
+create or replace function public.teaches_session(p_session uuid) returns boolean
+language sql stable security definer set search_path = public as
+$$ select auth.uid() is not null and exists (
+     select 1 from public.class_sessions s left join public.class_groups g on g.id = s.group_id
+      where s.id = p_session
+        and ((s.group_id is not null and auth.uid() in (g.teacher_id, g.substitute_id))
+             or (s.group_id is null and s.teacher_id = auth.uid()
+                 and public.billing_root(public.my_institution()) = public.billing_root(s.institution_id)))) $$;
+-- ¿Este usuario asiste a esta clase como estudiante? (miembro del grupo o invitado)
+create or replace function public.tc_attends(p_session uuid, p_user uuid) returns boolean
+language sql stable security definer set search_path = public as
+$$ select p_user is not null and exists (
+     select 1 from public.student_enrollments e
+      where e.user_id = p_user
+        and (exists (select 1 from public.group_members m join public.class_sessions s on s.group_id = m.group_id
+                      where s.id = p_session and m.enrollment_id = e.id)
+             or exists (select 1 from public.session_invitees i where i.session_id = p_session and i.enrollment_id = e.id))) $$;
+-- Nombre visible de una persona (nunca su email). El súper admin aparece como "TeroClass team" ante los demás.
+create or replace function public.tc_person_name(p_user uuid) returns text
+language sql stable security definer set search_path = public as
+$$ select case when p_user is null then ''
+               when public.is_superadmin_id(p_user) and not public.is_superadmin() then 'TeroClass team'
+               else coalesce((select nullif(btrim(p.name), '') from public.profiles p where p.id = p_user), '') end $$;
+-- Docente/suplente para las pantallas de admin: {id,name,email}; email solo si quien pregunta administra a esa persona
+create or replace function public.tc_person_json(p_user uuid) returns json
+language sql stable security definer set search_path = public as
+$$ select case when p_user is null then null
+               when public.is_superadmin_id(p_user) and not public.is_superadmin() then
+                 json_build_object('id', null, 'name', 'TeroClass team', 'email', null, 'masked', true)
+               else (select json_build_object('id', p.id, 'name', coalesce(p.name, ''),
+                              'email', case when public.is_superadmin() or (p.institution_id is not null and public.is_admin_of(p.institution_id)) then p.email end,
+                              'masked', false)
+                       from public.profiles p where p.id = p_user) end $$;
+-- Docente válido para un grupo de esta unidad: teacher u org_admin de la misma cuenta, que quien asigna administra
+create or replace function public.tc_assert_teacher(p_unit uuid, p_user uuid) returns void
+language plpgsql stable security definer set search_path = public as
+$$
+declare p public.profiles%rowtype;
+begin
+  if p_user is null then return; end if;
+  select * into p from public.profiles where id = p_user;
+  if p.id is null or p.role not in ('teacher','org_admin') or p.institution_id is null
+     or not public.is_admin_of(p.institution_id)
+     or public.billing_root(p.institution_id) is distinct from public.billing_root(p_unit) then
+    raise exception 'Docente no válido para este grupo';
+  end if;
+end $$;
+-- Crea (o encuentra) la inscripción de un email en una unidad. Nombre: se actualiza si viene uno.
+create or replace function public.tc_ensure_enrollment(p_unit uuid, p_email text, p_name text, p_source text) returns uuid
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_email text := btrim(coalesce(p_email, '')); v_name text := public.tc_clean_text(p_name, 120); v_id uuid;
+begin
+  if not public.tc_email_ok(v_email) then raise exception 'Email inválido: %', left(v_email, 80); end if;
+  select id into v_id from public.student_enrollments where institution_id = p_unit and lower(email) = lower(v_email);
+  if v_id is null then
+    insert into public.student_enrollments (institution_id, email, name, loaded_by, source)
+    values (p_unit, v_email, v_name, auth.uid(), coalesce(p_source, 'manual'))
+    on conflict (institution_id, lower(email)) do nothing
+    returning id into v_id;
+    if v_id is null then
+      select id into v_id from public.student_enrollments where institution_id = p_unit and lower(email) = lower(v_email);
+    end if;
+  elsif v_name <> '' then
+    update public.student_enrollments set name = v_name where id = v_id and name is distinct from v_name;
+  end if;
+  return v_id;
+end $$;
+-- La sesión actual viene de un link o código enviado por email (prueba que la persona controla ese email).
+-- Supabase lo informa en el claim "amr" del JWT.
+create or replace function public.tc_session_via_email() returns boolean
+language plpgsql stable set search_path = public as
+$$
+declare j jsonb;
+begin
+  begin j := auth.jwt(); exception when others then return false; end;
+  if j is null or jsonb_typeof(j->'amr') is distinct from 'array' then return false; end if;
+  return exists (select 1 from jsonb_array_elements(j->'amr') e
+                  where (case when jsonb_typeof(e) = 'object' then e->>'method' else e #>> '{}' end)
+                        in ('otp','magiclink','email/signup','invite','recovery','email_change'));
+end $$;
+
+revoke all on function public.tc_email_ok(text) from public, anon, authenticated;
+revoke all on function public.tc_tz_ok(text) from public, anon, authenticated;
+revoke all on function public.tc_clean_text(text, integer) from public, anon, authenticated;
+revoke all on function public.tc_local_ts(date, time, text) from public, anon, authenticated;
+revoke all on function public.tc_series_dates(integer[], date, date) from public, anon, authenticated;
+revoke all on function public.tc_weekdays(integer[]) from public, anon, authenticated;
+revoke all on function public.tc_check_duration(integer) from public, anon, authenticated;
+revoke all on function public.tc_new_token() from public, anon, authenticated;
+revoke all on function public.teaches_group(uuid) from public, anon, authenticated;
+revoke all on function public.teaches_session(uuid) from public, anon, authenticated;
+revoke all on function public.tc_attends(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.tc_person_name(uuid) from public, anon, authenticated;
+revoke all on function public.tc_person_json(uuid) from public, anon, authenticated;
+revoke all on function public.tc_assert_teacher(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.tc_ensure_enrollment(uuid, text, text, text) from public, anon, authenticated;
+revoke all on function public.tc_session_via_email() from public, anon, authenticated;
+-- (las filas nuevas solo se insertan desde funciones security definer, que sí evalúan tc_email_ok)
+
+-- Si un docente deja la institución (o deja de ser docente/admin), deja de ser docente / suplente de sus grupos
+-- (y así pierde el acceso a los emails de esos estudiantes).
+create or replace function public.profiles_groups_cleanup() returns trigger
+language plpgsql security definer set search_path = public as
+$$
+begin
+  if old.institution_id is not null
+     and (new.institution_id is null or new.role not in ('teacher','org_admin')
+          or public.billing_root(new.institution_id) is distinct from public.billing_root(old.institution_id)) then
+    update public.class_groups set teacher_id = null
+     where teacher_id = new.id and public.billing_root(institution_id) = public.billing_root(old.institution_id);
+    update public.class_groups set substitute_id = null
+     where substitute_id = new.id and public.billing_root(institution_id) = public.billing_root(old.institution_id);
+  end if;
+  return new;
+end $$;
+revoke all on function public.profiles_groups_cleanup() from public, anon, authenticated;
+drop trigger if exists profiles_groups_cleanup on public.profiles;
+create trigger profiles_groups_cleanup after update of institution_id, role on public.profiles
+  for each row execute function public.profiles_groups_cleanup();
+
+-- ── ADMIN: grupos y estudiantes de la unidad elegida (y todo lo que cuelga de ella) ──
+create or replace function public.tc_unit_scope(p_unit uuid) returns uuid[]
+language sql stable security definer set search_path = public as
+$$ select array(select p_unit union all select public.institution_descendants(p_unit)) $$;
+revoke all on function public.tc_unit_scope(uuid) from public, anon, authenticated;
+
+create or replace function public.tc_assert_admin(p_unit uuid) returns void
+language plpgsql stable security definer set search_path = public as
+$$ begin
+  if p_unit is null or not exists (select 1 from public.institutions where id = p_unit) or not public.is_admin_of(p_unit) then
+    raise exception 'No autorizado';
+  end if;
+end $$;
+revoke all on function public.tc_assert_admin(uuid) from public, anon, authenticated;
+
+create or replace function public.list_groups(p_unit uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+begin
+  perform public.tc_assert_admin(p_unit);
+  return coalesce((select json_agg(x order by x.unit_name, lower(x.name)) from (
+    select g.id, g.name, g.institution_id, i.name as unit_name, g.timezone,
+           public.tc_person_json(g.teacher_id) as teacher, public.tc_person_json(g.substitute_id) as substitute,
+           (select count(*) from public.group_members m where m.group_id = g.id)::int as students,
+           (select min(s.starts_at) from public.class_sessions s
+             where s.group_id = g.id and s.status = 'scheduled' and s.ends_at > now()) as next_session
+      from public.class_groups g join public.institutions i on i.id = g.institution_id
+     where g.institution_id = any(public.tc_unit_scope(p_unit))) x), '[]'::json);
+end $$;
+
+create or replace function public.list_students(p_unit uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+begin
+  perform public.tc_assert_admin(p_unit);
+  return coalesce((select json_agg(x order by lower(x.name), lower(x.email)) from (
+    select e.id, e.email, e.name, e.institution_id, i.name as unit_name, (e.user_id is not null) as linked, e.source, e.created_at,
+           coalesce((select json_agg(json_build_object('id', g.id, 'name', g.name) order by lower(g.name))
+                       from public.group_members m join public.class_groups g on g.id = m.group_id
+                      where m.enrollment_id = e.id), '[]'::json) as groups
+      from public.student_enrollments e join public.institutions i on i.id = e.institution_id
+     where e.institution_id = any(public.tc_unit_scope(p_unit))
+     limit 10000) x), '[]'::json);
+end $$;
+
+-- Estudiantes de un grupo (nombre + email): admins de su unidad y su docente / suplente
+create or replace function public.list_group_members(p_group uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_inst uuid;
+begin
+  select institution_id into v_inst from public.class_groups where id = p_group;
+  if v_inst is null or not (public.is_admin_of(v_inst) or public.teaches_group(p_group)) then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(x order by lower(x.name), lower(x.email)) from (
+    select e.id as enrollment_id, e.email, e.name, (e.user_id is not null) as linked
+      from public.group_members m join public.student_enrollments e on e.id = m.enrollment_id
+     where m.group_id = p_group) x), '[]'::json);
+end $$;
+
+create or replace function public.create_group(p_unit uuid, p_name text, p_teacher uuid default null,
+                                               p_substitute uuid default null, p_timezone text default 'America/Montevideo')
+returns uuid
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_name text := public.tc_clean_text(p_name, 120); v_tz text := coalesce(nullif(btrim(p_timezone), ''), 'America/Montevideo'); v_id uuid;
+begin
+  perform public.tc_assert_admin(p_unit);
+  if v_name = '' then raise exception 'Nombre del grupo requerido'; end if;
+  if not public.tc_tz_ok(v_tz) then raise exception 'Zona horaria inválida'; end if;
+  if p_substitute is not null and p_substitute = p_teacher then raise exception 'El suplente tiene que ser otra persona'; end if;
+  perform public.tc_assert_teacher(p_unit, p_teacher);
+  perform public.tc_assert_teacher(p_unit, p_substitute);
+  if exists (select 1 from public.class_groups where institution_id = p_unit and lower(btrim(name)) = lower(v_name)) then
+    raise exception 'Ya existe un grupo con ese nombre en esta unidad';
+  end if;
+  insert into public.class_groups (institution_id, name, teacher_id, substitute_id, timezone, created_by)
+  values (p_unit, v_name, p_teacher, p_substitute, v_tz, auth.uid()) returning id into v_id;
+  return v_id;
+end $$;
+
+-- Cambiar nombre, docente, suplente o zona horaria (se mandan todos los valores; null = sin docente / sin suplente)
+create or replace function public.update_group(p_group uuid, p_name text, p_teacher uuid, p_substitute uuid, p_timezone text)
+returns uuid
+language plpgsql volatile security definer set search_path = public as
+$$
+declare g public.class_groups%rowtype; v_name text := public.tc_clean_text(p_name, 120); v_tz text := btrim(coalesce(p_timezone, ''));
+begin
+  select * into g from public.class_groups where id = p_group;
+  if g.id is null or not public.is_admin_of(g.institution_id) then raise exception 'No autorizado'; end if;
+  if v_name = '' then raise exception 'Nombre del grupo requerido'; end if;
+  if not public.tc_tz_ok(v_tz) then raise exception 'Zona horaria inválida'; end if;
+  if p_substitute is not null and p_substitute = p_teacher then raise exception 'El suplente tiene que ser otra persona'; end if;
+  if p_teacher is distinct from g.teacher_id then perform public.tc_assert_teacher(g.institution_id, p_teacher); end if;
+  if p_substitute is distinct from g.substitute_id then perform public.tc_assert_teacher(g.institution_id, p_substitute); end if;
+  if exists (select 1 from public.class_groups where institution_id = g.institution_id and id <> g.id and lower(btrim(name)) = lower(v_name)) then
+    raise exception 'Ya existe un grupo con ese nombre en esta unidad';
+  end if;
+  update public.class_groups set name = v_name, teacher_id = p_teacher, substitute_id = p_substitute, timezone = v_tz where id = p_group;
+  return p_group;
+end $$;
+
+-- Borrar un grupo (con sus clases; los estudiantes siguen cargados en la unidad)
+create or replace function public.delete_group(p_group uuid) returns text
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_inst uuid;
+begin
+  select institution_id into v_inst from public.class_groups where id = p_group;
+  if v_inst is null or not public.is_admin_of(v_inst) then raise exception 'No autorizado'; end if;
+  delete from public.class_groups where id = p_group;
+  return 'deleted';
+end $$;
+
+-- Cargar un estudiante (email + nombre) en una unidad; con p_group, en la unidad de ese grupo y dentro del grupo.
+-- Devuelve {enrollment_id, created, in_group}
+create or replace function public.add_student(p_unit uuid, p_email text, p_name text default '', p_group uuid default null)
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_unit uuid := p_unit; v_id uuid; v_new boolean; v_in boolean := false; n int;
+begin
+  if p_group is not null then
+    select institution_id into v_unit from public.class_groups where id = p_group;
+    if v_unit is null then raise exception 'No autorizado'; end if;
+  end if;
+  perform public.tc_assert_admin(v_unit);
+  if not public.tc_email_ok(btrim(coalesce(p_email, ''))) then raise exception 'Email inválido: %', left(btrim(coalesce(p_email, '')), 80); end if;
+  v_new := not exists (select 1 from public.student_enrollments where institution_id = v_unit and lower(email) = lower(btrim(p_email)));
+  v_id := public.tc_ensure_enrollment(v_unit, p_email, p_name, 'manual');
+  if p_group is not null then
+    insert into public.group_members (group_id, enrollment_id) values (p_group, v_id) on conflict do nothing;
+    get diagnostics n = row_count; v_in := true;
+  end if;
+  return json_build_object('enrollment_id', v_id, 'created', v_new, 'in_group', v_in);
+end $$;
+
+-- Sumar una inscripción a un grupo. Si el grupo es de otra unidad, la inscripción se copia a esa unidad
+-- (así los admins de la unidad del grupo ven a sus estudiantes). Devuelve la inscripción usada.
+create or replace function public.group_add_student(p_group uuid, p_enrollment uuid) returns uuid
+language plpgsql volatile security definer set search_path = public as
+$$
+declare g public.class_groups%rowtype; e public.student_enrollments%rowtype; v_id uuid;
+begin
+  select * into g from public.class_groups where id = p_group;
+  select * into e from public.student_enrollments where id = p_enrollment;
+  if g.id is null or e.id is null or not public.is_admin_of(g.institution_id) or not public.is_admin_of(e.institution_id) then
+    raise exception 'No autorizado';
+  end if;
+  v_id := case when e.institution_id = g.institution_id then e.id
+               else public.tc_ensure_enrollment(g.institution_id, e.email, e.name, e.source) end;
+  insert into public.group_members (group_id, enrollment_id) values (p_group, v_id) on conflict do nothing;
+  return v_id;
+end $$;
+
+create or replace function public.group_remove_student(p_group uuid, p_enrollment uuid) returns text
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_inst uuid;
+begin
+  select institution_id into v_inst from public.class_groups where id = p_group;
+  if v_inst is null or not public.is_admin_of(v_inst) then raise exception 'No autorizado'; end if;
+  delete from public.group_members where group_id = p_group and enrollment_id = p_enrollment;
+  return 'removed';
+end $$;
+
+-- Mover de un grupo a otro (p_from null = solo agregar al destino)
+create or replace function public.move_student(p_enrollment uuid, p_from_group uuid, p_to_group uuid) returns uuid
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_id uuid;
+begin
+  if p_to_group is null then raise exception 'Elegí el grupo de destino'; end if;
+  if p_from_group is not null then
+    if not exists (select 1 from public.class_groups g where g.id = p_from_group and public.is_admin_of(g.institution_id)) then
+      raise exception 'No autorizado';
+    end if;
+  end if;
+  v_id := public.group_add_student(p_to_group, p_enrollment);
+  if p_from_group is not null and p_from_group <> p_to_group then
+    delete from public.group_members where group_id = p_from_group and enrollment_id = p_enrollment;
+  end if;
+  return v_id;
+end $$;
+
+-- Quitar a un estudiante de la unidad (borra la inscripción de esa unidad y su lugar en los grupos)
+create or replace function public.remove_student(p_enrollment uuid) returns text
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_inst uuid;
+begin
+  select institution_id into v_inst from public.student_enrollments where id = p_enrollment;
+  if v_inst is null or not public.is_admin_of(v_inst) then raise exception 'No autorizado'; end if;
+  delete from public.student_enrollments where id = p_enrollment;
+  return 'removed';
+end $$;
+
+-- Importar estudiantes desde un CSV ya leído en el navegador: p_rows = [{line,email,name,group,teacher_email,unit}].
+-- p_commit = false → solo valida (vista previa); true → carga las filas válidas. Idempotente: volver a
+-- importar el mismo archivo no duplica nada. Máximo 2000 filas.
+-- Estado por fila: ok (se carga) · exists (ya estaba) · new_group (se crea el grupo) · error (code).
+-- Códigos: missing_email, bad_email, duplicate, unknown_unit, ambiguous_unit, unknown_teacher, unknown_group,
+--          bad_group; aviso: teacher_ignored (el grupo ya tiene otro docente).
+create or replace function public.import_students(p_unit uuid, p_rows jsonb, p_create_groups boolean default false, p_commit boolean default false)
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare
+  v_scope uuid[]; v_root uuid; r jsonb; i int := 0;
+  v_line int; v_email text; v_name text; v_gname text; v_temail text; v_unitq text;
+  v_unit uuid; v_unit_name text; v_n int; v_teacher uuid; v_group uuid; v_gteacher uuid; v_enr uuid;
+  v_status text; v_code text; v_warn text; v_key text;
+  v_seen text[] := '{}'; v_newg jsonb := '{}'::jsonb; v_out jsonb := '[]'::jsonb;
+  c_ok int := 0; c_exists int := 0; c_err int := 0; c_newrows int := 0;
+begin
+  perform public.tc_assert_admin(p_unit);
+  if p_rows is null or jsonb_typeof(p_rows) <> 'array' then raise exception 'Archivo inválido'; end if;
+  if jsonb_array_length(p_rows) > 2000 then raise exception 'Demasiadas filas (máximo 2000)'; end if;
+  v_scope := public.tc_unit_scope(p_unit); v_root := public.billing_root(p_unit);
+  for r in select * from jsonb_array_elements(p_rows) loop
+    i := i + 1;
+    v_line := case when jsonb_typeof(r->'line') = 'number' then (r->>'line')::int else i + 1 end;
+    v_email := btrim(coalesce(r->>'email', ''));
+    v_name := public.tc_clean_text(r->>'name', 120);
+    v_gname := public.tc_clean_text(r->>'group', 200);
+    v_temail := lower(btrim(coalesce(r->>'teacher_email', '')));
+    v_unitq := btrim(coalesce(r->>'unit', ''));
+    v_status := 'ok'; v_code := null; v_warn := null; v_unit := null; v_unit_name := null; v_group := null; v_teacher := null; v_gteacher := null;
+    -- unidad (por slug o nombre, dentro de la unidad elegida y lo que cuelga)
+    if v_unitq = '' then v_unit := p_unit;
+    else
+      select count(*), min(id::text)::uuid into v_n, v_unit from public.institutions
+       where id = any(v_scope) and (slug = lower(v_unitq) or lower(btrim(name)) = lower(v_unitq));
+      if v_n = 0 then v_status := 'error'; v_code := 'unknown_unit'; v_unit := null;
+      elsif v_n > 1 then v_status := 'error'; v_code := 'ambiguous_unit'; v_unit := null; end if;
+    end if;
+    if v_unit is not null then select name into v_unit_name from public.institutions where id = v_unit; end if;
+    if v_status = 'ok' then
+      if v_email = '' then v_status := 'error'; v_code := 'missing_email';
+      elsif not public.tc_email_ok(v_email) then v_status := 'error'; v_code := 'bad_email';
+      elsif length(v_gname) > 120 then v_status := 'error'; v_code := 'bad_group';
+      end if;
+    end if;
+    if v_status = 'ok' then
+      v_key := lower(v_email) || '|' || v_unit::text || '|' || lower(v_gname);
+      if v_key = any(v_seen) then v_status := 'error'; v_code := 'duplicate'; else v_seen := v_seen || v_key; end if;
+    end if;
+    if v_status = 'ok' and v_temail <> '' then
+      select p.id into v_teacher from public.profiles p join auth.users u on u.id = p.id
+       where lower(btrim(u.email)) = v_temail and p.role in ('teacher','org_admin') and p.institution_id is not null
+         and public.is_admin_of(p.institution_id) and public.billing_root(p.institution_id) = v_root
+       limit 1;
+      if v_teacher is null then v_status := 'error'; v_code := 'unknown_teacher'; end if;
+    end if;
+    if v_status = 'ok' and v_gname <> '' then
+      select id, teacher_id into v_group, v_gteacher from public.class_groups
+       where institution_id = v_unit and lower(btrim(name)) = lower(v_gname);
+      if v_group is null then
+        if not p_commit or p_create_groups then
+          v_status := 'new_group';
+          v_newg := v_newg || jsonb_build_object(v_unit::text || '|' || lower(v_gname), jsonb_build_object('unit', v_unit_name, 'name', v_gname));
+        else v_status := 'error'; v_code := 'unknown_group'; end if;
+      elsif v_teacher is not null and v_gteacher is not null and v_gteacher <> v_teacher then
+        v_warn := 'teacher_ignored';
+      end if;
+    end if;
+    if v_status in ('ok','new_group') then
+      if exists (select 1 from public.student_enrollments e where e.institution_id = v_unit and lower(e.email) = lower(v_email)
+                  and (v_gname = '' or (v_group is not null and exists (select 1 from public.group_members m where m.group_id = v_group and m.enrollment_id = e.id)))) then
+        v_status := 'exists';
+      end if;
+    end if;
+    if p_commit and v_status in ('ok','new_group','exists') then
+      if v_gname <> '' and v_group is null then   -- crear el grupo (una sola vez aunque aparezca en muchas filas)
+        select id, teacher_id into v_group, v_gteacher from public.class_groups where institution_id = v_unit and lower(btrim(name)) = lower(v_gname);
+        if v_group is null then
+          insert into public.class_groups (institution_id, name, teacher_id, timezone, created_by)
+          values (v_unit, v_gname, v_teacher, 'America/Montevideo', auth.uid()) returning id, teacher_id into v_group, v_gteacher;
+        end if;
+      end if;
+      if v_group is not null and v_gteacher is null and v_teacher is not null then
+        update public.class_groups set teacher_id = v_teacher where id = v_group and teacher_id is null;
+      end if;
+      v_enr := public.tc_ensure_enrollment(v_unit, v_email, v_name, 'csv');
+      if v_group is not null then
+        insert into public.group_members (group_id, enrollment_id) values (v_group, v_enr) on conflict do nothing;
+      end if;
+    end if;
+    if v_status = 'error' then c_err := c_err + 1; elsif v_status = 'exists' then c_exists := c_exists + 1;
+    else c_ok := c_ok + 1; if v_status = 'new_group' then c_newrows := c_newrows + 1; end if; end if;
+    v_out := v_out || jsonb_build_array(jsonb_build_object('line', v_line, 'email', left(v_email, 254), 'name', v_name,
+               'group', v_gname, 'unit', v_unit_name, 'status', v_status, 'code', v_code, 'warning', v_warn));
+  end loop;
+  return json_build_object('total', i, 'ok', c_ok, 'exists', c_exists, 'errors', c_err, 'new_group_rows', c_newrows,
+    'new_groups', coalesce((select jsonb_agg(v order by v->>'unit', v->>'name') from jsonb_each(v_newg) x(k, v)), '[]'::jsonb),
+    'committed', coalesce(p_commit, false), 'rows', v_out);
+end $$;
+
+-- ── DOCENTES: sus grupos y sus clases ──
+-- Grupos donde soy docente o suplente
+create or replace function public.my_groups() returns json
+language plpgsql stable security definer set search_path = public as
+$$
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(x order by lower(x.name)) from (
+    select g.id, g.name, i.name as unit_name, g.institution_id, g.timezone,
+           case when g.teacher_id = auth.uid() then 'teacher' else 'substitute' end as role,
+           (select count(*) from public.group_members m where m.group_id = g.id)::int as students
+      from public.class_groups g join public.institutions i on i.id = g.institution_id
+     where auth.uid() in (g.teacher_id, g.substitute_id)) x), '[]'::json);
+end $$;
+
+-- Clases semanales de un grupo: días (1 = lunes … 7 = domingo), hora de inicio, duración, desde / hasta (máx. 1 año)
+create or replace function public.create_series(p_group uuid, p_title text, p_weekdays integer[], p_start_time time,
+                                                p_duration integer, p_start_date date, p_end_date date)
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare g public.class_groups%rowtype; v_days integer[]; v_id uuid; v_n int; v_title text := public.tc_clean_text(p_title, 200);
+begin
+  select * into g from public.class_groups where id = p_group;
+  if g.id is null or not public.teaches_group(p_group) then raise exception 'No autorizado'; end if;
+  v_days := public.tc_weekdays(p_weekdays);
+  perform public.tc_check_duration(p_duration);
+  if p_start_time is null or p_start_date is null or p_end_date is null then raise exception 'Faltan datos de la serie'; end if;
+  if p_end_date < p_start_date then raise exception 'La fecha de fin es anterior a la de inicio'; end if;
+  if p_end_date > p_start_date + 366 then raise exception 'Una serie puede durar como máximo un año'; end if;
+  if p_start_date < (now() at time zone g.timezone)::date - 1 then raise exception 'La serie no puede empezar en el pasado'; end if;
+  insert into public.session_series (group_id, title, weekdays, start_time, duration_min, start_date, end_date, timezone, created_by)
+  values (g.id, v_title, v_days, p_start_time, p_duration, p_start_date, p_end_date, g.timezone, auth.uid()) returning id into v_id;
+  insert into public.class_sessions (institution_id, group_id, series_id, teacher_id, title, starts_at, ends_at, timezone)
+  select g.institution_id, g.id, v_id, auth.uid(), v_title, public.tc_local_ts(d, p_start_time, g.timezone),
+         public.tc_local_ts(d, p_start_time, g.timezone) + make_interval(mins => p_duration), g.timezone
+    from public.tc_series_dates(v_days, p_start_date, p_end_date) d;
+  get diagnostics v_n = row_count;
+  if v_n = 0 then raise exception 'Ninguna fecha coincide con los días elegidos'; end if;
+  return json_build_object('series_id', v_id, 'created', v_n);
+end $$;
+
+-- Editar TODA la serie desde hoy: las clases futuras no editadas una por una se mueven al nuevo horario,
+-- las de días que ya no van se borran y se agregan las nuevas. Las pasadas no cambian.
+create or replace function public.update_series(p_series uuid, p_title text, p_weekdays integer[], p_start_time time,
+                                                p_duration integer, p_end_date date)
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare s public.session_series%rowtype; v_days integer[]; v_today date; v_title text := public.tc_clean_text(p_title, 200);
+        v_del int := 0; v_upd int := 0; v_ins int := 0;
+begin
+  select * into s from public.session_series where id = p_series;
+  if s.id is null or not public.teaches_group(s.group_id) then raise exception 'No autorizado'; end if;
+  v_days := public.tc_weekdays(p_weekdays);
+  perform public.tc_check_duration(p_duration);
+  if p_start_time is null or p_end_date is null then raise exception 'Faltan datos de la serie'; end if;
+  if p_end_date < s.start_date then raise exception 'La fecha de fin es anterior a la de inicio'; end if;
+  if p_end_date > s.start_date + 366 then raise exception 'Una serie puede durar como máximo un año'; end if;
+  v_today := (now() at time zone s.timezone)::date;
+  update public.session_series set title = v_title, weekdays = v_days, start_time = p_start_time,
+         duration_min = p_duration, end_date = p_end_date where id = p_series;
+  delete from public.class_sessions c
+   where c.series_id = p_series and c.starts_at > now() and not c.modified
+     and (c.starts_at at time zone s.timezone)::date not in (select public.tc_series_dates(v_days, greatest(s.start_date, v_today), p_end_date));
+  get diagnostics v_del = row_count;
+  update public.class_sessions c
+     set title = v_title,
+         starts_at = public.tc_local_ts((c.starts_at at time zone s.timezone)::date, p_start_time, s.timezone),
+         ends_at = public.tc_local_ts((c.starts_at at time zone s.timezone)::date, p_start_time, s.timezone) + make_interval(mins => p_duration),
+         seq = c.seq + 1
+   where c.series_id = p_series and c.starts_at > now() and not c.modified;
+  get diagnostics v_upd = row_count;
+  insert into public.class_sessions (institution_id, group_id, series_id, teacher_id, title, starts_at, ends_at, timezone)
+  select g.institution_id, g.id, s.id, auth.uid(), v_title, public.tc_local_ts(d, p_start_time, s.timezone),
+         public.tc_local_ts(d, p_start_time, s.timezone) + make_interval(mins => p_duration), s.timezone
+    from public.tc_series_dates(v_days, greatest(s.start_date, v_today), p_end_date) d
+    join public.class_groups g on g.id = s.group_id
+   where public.tc_local_ts(d, p_start_time, s.timezone) > now()
+     and not exists (select 1 from public.class_sessions c where c.series_id = s.id and (c.starts_at at time zone s.timezone)::date = d);
+  get diagnostics v_ins = row_count;
+  return json_build_object('updated', v_upd, 'created', v_ins, 'removed', v_del);
+end $$;
+
+-- Cancelar toda la serie desde ahora (las clases quedan como canceladas: el feed lo avisa a los calendarios)
+create or replace function public.cancel_series(p_series uuid) returns integer
+language plpgsql volatile security definer set search_path = public as
+$$
+declare s public.session_series%rowtype; v_n int;
+begin
+  select * into s from public.session_series where id = p_series;
+  if s.id is null or not public.teaches_group(s.group_id) then raise exception 'No autorizado'; end if;
+  update public.class_sessions set status = 'cancelled', seq = seq + 1
+   where series_id = p_series and starts_at > now() and status <> 'cancelled';
+  get diagnostics v_n = row_count;
+  return v_n;
+end $$;
+
+-- Una clase suelta: de un grupo (p_group) o sin grupo, invitando estudiantes por email (p_emails).
+-- Un email que todavía no es estudiante de la institución queda cargado por quien lo invita (misma privacidad).
+create or replace function public.create_session(p_group uuid, p_title text, p_starts_at timestamptz, p_duration integer,
+                                                 p_timezone text default null, p_emails text[] default null)
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare g public.class_groups%rowtype; v_inst uuid; v_tz text; v_id uuid; v_e text; v_enr uuid; v_n int := 0;
+        v_title text := public.tc_clean_text(p_title, 200); v_emails text[] := '{}';
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  select coalesce(array_agg(distinct btrim(x)), '{}') into v_emails from unnest(coalesce(p_emails, '{}')) x where btrim(coalesce(x, '')) <> '';
+  if coalesce(array_length(v_emails, 1), 0) > 200 then raise exception 'Demasiados invitados (máximo 200)'; end if;
+  foreach v_e in array v_emails loop
+    if not public.tc_email_ok(v_e) then raise exception 'Email inválido: %', left(v_e, 80); end if;
+  end loop;
+  if p_group is not null then
+    select * into g from public.class_groups where id = p_group;
+    if g.id is null or not public.teaches_group(p_group) then raise exception 'No autorizado'; end if;
+    v_inst := g.institution_id; v_tz := g.timezone;
+  else
+    if coalesce(public.my_role(), '') not in ('teacher','org_admin') or public.my_institution() is null then
+      raise exception 'Para crear una clase sin grupo necesitás pertenecer a una institución';
+    end if;
+    if coalesce(array_length(v_emails, 1), 0) = 0 then raise exception 'Agregá al menos un email de estudiante'; end if;
+    v_inst := public.my_institution();
+    v_tz := coalesce(nullif(btrim(p_timezone), ''), 'America/Montevideo');
+    if not public.tc_tz_ok(v_tz) then raise exception 'Zona horaria inválida'; end if;
+  end if;
+  perform public.tc_check_duration(p_duration);
+  if p_starts_at is null or p_starts_at < now() - interval '1 day' or p_starts_at > now() + interval '400 days' then
+    raise exception 'Fecha de la clase inválida';
+  end if;
+  insert into public.class_sessions (institution_id, group_id, teacher_id, title, starts_at, ends_at, timezone)
+  values (v_inst, p_group, auth.uid(), v_title, p_starts_at, p_starts_at + make_interval(mins => p_duration), v_tz)
+  returning id into v_id;
+  foreach v_e in array v_emails loop
+    v_enr := public.tc_ensure_enrollment(v_inst, v_e, '', 'session');
+    insert into public.session_invitees (session_id, enrollment_id) values (v_id, v_enr) on conflict do nothing;
+    v_n := v_n + 1;
+  end loop;
+  return json_build_object('id', v_id, 'invited', v_n);
+end $$;
+
+-- Editar UNA clase (título, inicio, duración). Si es de una serie queda marcada: editar la serie no la pisa.
+create or replace function public.update_session(p_session uuid, p_title text, p_starts_at timestamptz, p_duration integer)
+returns uuid
+language plpgsql volatile security definer set search_path = public as
+$$
+begin
+  if not public.teaches_session(p_session) then raise exception 'No autorizado'; end if;
+  perform public.tc_check_duration(p_duration);
+  if p_starts_at is null or p_starts_at < now() - interval '1 day' or p_starts_at > now() + interval '400 days' then
+    raise exception 'Fecha de la clase inválida';
+  end if;
+  update public.class_sessions
+     set title = public.tc_clean_text(p_title, 200), starts_at = p_starts_at,
+         ends_at = p_starts_at + make_interval(mins => p_duration), seq = seq + 1, modified = (series_id is not null)
+   where id = p_session;
+  return p_session;
+end $$;
+
+-- Cancelar (o reactivar con p_cancel = false) UNA clase
+create or replace function public.cancel_session(p_session uuid, p_cancel boolean default true) returns text
+language plpgsql volatile security definer set search_path = public as
+$$
+begin
+  if not public.teaches_session(p_session) then raise exception 'No autorizado'; end if;
+  update public.class_sessions
+     set status = case when coalesce(p_cancel, true) then 'cancelled' else 'scheduled' end, seq = seq + 1,
+         modified = (series_id is not null)
+   where id = p_session;
+  return case when coalesce(p_cancel, true) then 'cancelled' else 'scheduled' end;
+end $$;
+
+-- Filas de calendario para una persona (docente, suplente, quien creó una clase suelta o estudiante).
+create or replace function public.tc_calendar_rows(p_user uuid, p_from timestamptz, p_to timestamptz, p_limit integer)
+returns jsonb
+language sql stable security definer set search_path = public as
+$$ select coalesce(jsonb_agg(x order by x.starts_at, x.id), '[]'::jsonb) from (
+     select s.id, coalesce(nullif(s.title, ''), g.name, '') as title, s.title as raw_title, s.starts_at, s.ends_at, s.timezone,
+            s.status, s.seq, s.updated_at, s.group_id, g.name as group_name, i.name as unit_name, s.series_id, s.modified,
+            case when g.id is not null and g.teacher_id = p_user then 'teacher'
+                 when g.id is not null and g.substitute_id = p_user then 'substitute'
+                 when g.id is null and s.teacher_id = p_user then 'teacher'
+                 else 'student' end as role,
+            public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name,
+            ((select count(*) from public.group_members m where m.group_id = s.group_id)
+             + (select count(*) from public.session_invitees si where si.session_id = s.id))::int as people
+       from public.class_sessions s
+       join public.institutions i on i.id = s.institution_id
+       left join public.class_groups g on g.id = s.group_id
+      where s.starts_at < p_to and s.ends_at > p_from
+        and (s.group_id in (select gg.id from public.class_groups gg where p_user in (gg.teacher_id, gg.substitute_id))
+             or (s.group_id is null and s.teacher_id = p_user)
+             or s.group_id in (select m.group_id from public.group_members m
+                                 join public.student_enrollments e on e.id = m.enrollment_id where e.user_id = p_user)
+             or s.id in (select si.session_id from public.session_invitees si
+                           join public.student_enrollments e on e.id = si.enrollment_id where e.user_id = p_user))
+      order by s.starts_at limit p_limit) x $$;
+revoke all on function public.tc_calendar_rows(uuid, timestamptz, timestamptz, integer) from public, anon, authenticated;
+
+-- Mi calendario (máximo 200 días por consulta). can_edit = docente / suplente / quien la creó.
+create or replace function public.my_calendar(p_from timestamptz, p_to timestamptz) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  if p_from is null or p_to is null or p_to <= p_from or p_to - p_from > interval '200 days' then raise exception 'Rango de fechas inválido'; end if;
+  return (select coalesce(jsonb_agg(r || jsonb_build_object('can_edit', r->>'role' <> 'student') order by r->>'starts_at'), '[]'::jsonb)
+            from jsonb_array_elements(public.tc_calendar_rows(auth.uid(), p_from, p_to, 2000)) r)::json;
+end $$;
+
+-- Quiénes están en una clase (nombre + email): su docente / suplente / quien la creó, y los admins de su unidad
+create or replace function public.session_people(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_inst uuid; v_group uuid;
+begin
+  select institution_id, group_id into v_inst, v_group from public.class_sessions where id = p_session;
+  if v_inst is null or not (public.teaches_session(p_session) or public.is_admin_of(v_inst)) then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(x order by lower(x.name), lower(x.email)) from (
+    select e.id as enrollment_id, e.name, e.email, 'group' as via
+      from public.group_members m join public.student_enrollments e on e.id = m.enrollment_id where m.group_id = v_group
+    union
+    select e.id, e.name, e.email, 'invite'
+      from public.session_invitees si join public.student_enrollments e on e.id = si.enrollment_id
+     where si.session_id = p_session
+       and not exists (select 1 from public.group_members m where m.group_id = v_group and m.enrollment_id = e.id)) x), '[]'::json);
+end $$;
+
+-- Admin: calendario (solo lectura) de la unidad y lo que cuelga
+create or replace function public.unit_calendar(p_unit uuid, p_from timestamptz, p_to timestamptz) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+begin
+  perform public.tc_assert_admin(p_unit);
+  if p_from is null or p_to is null or p_to <= p_from or p_to - p_from > interval '200 days' then raise exception 'Rango de fechas inválido'; end if;
+  return coalesce((select json_agg(x order by x.starts_at) from (
+    select s.id, coalesce(nullif(s.title, ''), g.name, '') as title, s.starts_at, s.ends_at, s.timezone, s.status, s.group_id,
+           g.name as group_name, i.name as unit_name, s.series_id, 'admin' as role, false as can_edit,
+           public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name,
+           ((select count(*) from public.group_members m where m.group_id = s.group_id)
+            + (select count(*) from public.session_invitees si where si.session_id = s.id))::int as people
+      from public.class_sessions s join public.institutions i on i.id = s.institution_id
+      left join public.class_groups g on g.id = s.group_id
+     where s.institution_id = any(public.tc_unit_scope(p_unit)) and s.starts_at < p_to and s.ends_at > p_from
+     order by s.starts_at limit 2000) x), '[]'::json);
+end $$;
+
+-- ── ESTUDIANTES ──
+-- Vincular mis inscripciones: el email REAL de mi cuenta (auth.users, verificado) igual al cargado, sin
+-- importar mayúsculas, y solo si esta sesión se abrió con un link/código enviado a ese email.
+-- No cambia el rol (los docentes/admins que además son estudiantes ven esas clases en su calendario).
+create or replace function public.claim_enrollments() returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_uid uuid := auth.uid(); v_email text; v_conf timestamptz; v_n int := 0; v_ok boolean;
+begin
+  if v_uid is null then raise exception 'No autorizado'; end if;
+  select lower(btrim(u.email)), u.email_confirmed_at into v_email, v_conf from auth.users u where u.id = v_uid;
+  v_ok := v_email is not null and v_email <> '' and v_conf is not null and public.tc_session_via_email();
+  if v_ok then
+    update public.student_enrollments set user_id = v_uid, claimed_at = now()
+     where lower(email) = v_email and user_id is null;
+    get diagnostics v_n = row_count;
+  end if;
+  return json_build_object('linked', v_n, 'verified', v_ok, 'role', public.my_role(),
+    'enrollments', (select count(*) from public.student_enrollments where user_id = v_uid));
+end $$;
+
+-- Panel del estudiante: sus grupos (con el nombre del docente y CUÁNTOS compañeros, nunca sus emails),
+-- sus clases (desde ayer hasta 120 días) y sus datos. Súper admin ("Ver como"): p_group y/o p_enrollment.
+create or replace function public.student_view(p_group uuid default null, p_enrollment uuid default null) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_enr uuid[] := '{}'; v_groups uuid[] := '{}'; v_name text := ''; v_email text := '';
+begin
+  if p_group is null and p_enrollment is null then
+    if auth.uid() is null then raise exception 'No autorizado'; end if;
+    v_enr := array(select id from public.student_enrollments where user_id = auth.uid());
+    select coalesce(u.email, '') into v_email from auth.users u where u.id = auth.uid();
+    select coalesce((select nullif(name, '') from public.student_enrollments where user_id = auth.uid() and name <> '' order by created_at limit 1),
+                    (select nullif(name, '') from public.profiles where id = auth.uid()), '') into v_name;
+  else
+    if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+    if p_enrollment is not null then
+      select array[id], email, name into v_enr, v_email, v_name from public.student_enrollments where id = p_enrollment;
+      if v_enr is null then raise exception 'No autorizado'; end if;
+    else
+      if not exists (select 1 from public.class_groups where id = p_group) then raise exception 'No autorizado'; end if;
+      v_groups := array[p_group];
+    end if;
+  end if;
+  v_groups := v_groups || array(select distinct m.group_id from public.group_members m where m.enrollment_id = any(v_enr));
+  return json_build_object(
+    'me', json_build_object('name', coalesce(v_name, ''), 'email', coalesce(v_email, '')),
+    'enrollments', coalesce(array_length(v_enr, 1), 0),
+    'groups', coalesce((select json_agg(x order by lower(x.name)) from (
+        select g.id, g.name, i.name as unit_name, r.name as institution_name, g.timezone,
+               public.tc_person_name(g.teacher_id) as teacher_name, public.tc_person_name(g.substitute_id) as substitute_name,
+               (select count(*) from public.group_members m where m.group_id = g.id)::int as classmates
+          from public.class_groups g join public.institutions i on i.id = g.institution_id
+          join public.institutions r on r.id = public.billing_root(g.institution_id)
+         where g.id = any(v_groups)) x), '[]'::json),
+    'sessions', coalesce((select json_agg(x order by x.starts_at) from (
+        select s.id, coalesce(nullif(s.title, ''), g.name, '') as title, s.starts_at, s.ends_at, s.timezone, s.status,
+               g.name as group_name, public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name
+          from public.class_sessions s left join public.class_groups g on g.id = s.group_id
+         where (s.group_id = any(v_groups)
+                or exists (select 1 from public.session_invitees si where si.session_id = s.id and si.enrollment_id = any(v_enr)))
+           and s.ends_at > now() - interval '1 day' and s.starts_at < now() + interval '120 days'
+         order by s.starts_at limit 300) x), '[]'::json),
+    -- TODO(insights): leer student_insights cuando la grabación esté activa (002_live_class.sql)
+    'insights', '[]'::json);
+end $$;
+
+-- ── CALENDARIO EXTERNO (Google Calendar, Outlook, Apple) sin proveedor de email ──
+-- Mi token del feed (lo crea si falta; p_reset = true lo cambia y el link viejo deja de funcionar)
+create or replace function public.my_calendar_token(p_reset boolean default false) returns text
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_uid uuid := auth.uid();
+begin
+  if v_uid is null then raise exception 'No autorizado'; end if;
+  if coalesce(p_reset, false) then delete from public.calendar_tokens where user_id = v_uid; end if;
+  insert into public.calendar_tokens (user_id, token) values (v_uid, public.tc_new_token()) on conflict (user_id) do nothing;
+  return (select token from public.calendar_tokens where user_id = v_uid);
+end $$;
+
+-- Feed: lo llama api/calendar/feed.js con la clave publicable (anon). Solo las clases de la persona dueña
+-- del token (60 días para atrás, 400 para adelante), sin emails ni datos de otros estudiantes.
+-- Token inválido o desconocido → lista vacía.
+create or replace function public.calendar_feed(p_token text) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_uid uuid;
+begin
+  if p_token is null or p_token !~ '^[0-9a-f]{64}$' then return '[]'::json; end if;
+  select user_id into v_uid from public.calendar_tokens where token = p_token;
+  if v_uid is null then return '[]'::json; end if;
+  return (select coalesce(jsonb_agg(jsonb_build_object('id', r->'id', 'title', r->'title', 'group_name', r->'group_name',
+            'starts_at', r->'starts_at', 'ends_at', r->'ends_at', 'status', r->'status', 'seq', r->'seq',
+            'updated_at', r->'updated_at', 'teacher_name', r->'teacher_name', 'role', r->'role') order by r->>'starts_at'), '[]'::jsonb)
+            from jsonb_array_elements(public.tc_calendar_rows(v_uid, now() - interval '60 days', now() + interval '400 days', 1000)) r)::json;
+end $$;
+
+-- Para api/notify (con el token de quien da la clase): la clase y los emails de sus estudiantes
+create or replace function public.session_notify_payload(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+begin
+  if not public.teaches_session(p_session) then raise exception 'No autorizado'; end if;
+  return (select json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name, ''), 'group_name', g.name,
+            'starts_at', s.starts_at, 'ends_at', s.ends_at, 'timezone', s.timezone, 'status', s.status, 'seq', s.seq,
+            'teacher_name', public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)),
+            'recipients', coalesce((select json_agg(json_build_object('email', p->>'email', 'name', p->>'name'))
+                                      from json_array_elements(public.session_people(p_session)) p), '[]'::json))
+            from public.class_sessions s left join public.class_groups g on g.id = s.group_id where s.id = p_session);
+end $$;
+
+-- Permisos de las funciones de la app
+do $$
+declare f text;
+begin
+  foreach f in array array[
+    'list_groups(uuid)', 'list_students(uuid)', 'list_group_members(uuid)',
+    'create_group(uuid, text, uuid, uuid, text)', 'update_group(uuid, text, uuid, uuid, text)', 'delete_group(uuid)',
+    'add_student(uuid, text, text, uuid)', 'group_add_student(uuid, uuid)', 'group_remove_student(uuid, uuid)',
+    'move_student(uuid, uuid, uuid)', 'remove_student(uuid)', 'import_students(uuid, jsonb, boolean, boolean)',
+    'my_groups()', 'create_series(uuid, text, integer[], time, integer, date, date)',
+    'update_series(uuid, text, integer[], time, integer, date)', 'cancel_series(uuid)',
+    'create_session(uuid, text, timestamptz, integer, text, text[])', 'update_session(uuid, text, timestamptz, integer)',
+    'cancel_session(uuid, boolean)', 'my_calendar(timestamptz, timestamptz)', 'session_people(uuid)',
+    'unit_calendar(uuid, timestamptz, timestamptz)', 'claim_enrollments()', 'student_view(uuid, uuid)',
+    'my_calendar_token(boolean)', 'session_notify_payload(uuid)'] loop
+    execute format('revoke all on function public.%s from public, anon', f);
+    execute format('grant execute on function public.%s to authenticated', f);
+  end loop;
+end $$;
+revoke all on function public.calendar_feed(text) from public;
+grant execute on function public.calendar_feed(text) to anon, authenticated;
 
 -- ========== IDENTIDAD DEL SÚPER ADMIN: oculta para admins y docentes ==========
 -- Filas nuevas: created_by / invited_by / uploaded_by que apunten a un súper admin quedan en null.

@@ -393,7 +393,7 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     const w = await page.evaluate(() => document.querySelector('.icon-sidebar').getBoundingClientRect().width);
     if (w < 80 || w > 90) throw new Error('sidebar width ' + w);
     const labels = await page.$$eval('.icon-sidebar .sib-btn', bs => bs.filter(b => b.offsetParent).map(b => b.querySelector('.sib-label').textContent));
-    if (JSON.stringify(labels) !== '["Live class","Structure","Dashboard","Branding","AI Settings","Plan & usage","Institutions","Insights","Platform"]') throw new Error('labels: ' + JSON.stringify(labels));
+    if (JSON.stringify(labels) !== '["Live class","Structure","Groups","Dashboard","Branding","AI Settings","Plan & usage","Institutions","Insights","Platform"]') throw new Error('labels: ' + JSON.stringify(labels));
     const tips = await page.$$eval('.icon-sidebar .sib-btn', bs => bs.every(b => b.querySelector('.sib-tooltip')?.textContent === b.querySelector('.sib-label').textContent));
     if (!tips) throw new Error('tooltips missing');
     const seps = await page.$$eval('.sib-group', gs => gs.filter(g => g.offsetParent).map(g => getComputedStyle(g).borderTopWidth));
