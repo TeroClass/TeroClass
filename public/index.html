@@ -615,7 +615,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 .isw-empty{padding:10px;font-size:12px;color:var(--ink-muted)}
 
 /* ── INSIGHTS (super admin) ── */
-#panel-insights{flex-direction:column;overflow-y:auto;padding:24px 28px;background:var(--bg)}
+#panel-metrics{flex-direction:column;overflow-y:auto;padding:24px 28px;background:var(--bg)}
 .in-filters{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:-8px 0 18px}
 .in-seg{display:inline-flex;border:1.5px solid var(--border);border-radius:9px;overflow:hidden;background:var(--white)}
 .in-seg button{border:none;background:transparent;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;color:var(--ink-muted);font-family:'Inter',sans-serif;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
@@ -671,7 +671,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 @media (max-width:640px){
   .admin-grid{grid-template-columns:1fr}
   .metrics-grid{grid-template-columns:repeat(2,1fr)}
-  #panel-admin,#panel-superadmin,#panel-structure,#panel-platform,#panel-billing,#panel-insights{padding:16px}
+  #panel-admin,#panel-superadmin,#panel-structure,#panel-platform,#panel-billing,#panel-metrics{padding:16px}
 }
 @media (max-width:480px){
   .inst-switch{flex:0 1 auto;min-width:72px}
@@ -684,6 +684,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 }
 </style>
 <link rel="stylesheet" href="/live-class.css">
+<link rel="stylesheet" href="/insights-view.css">
 <link rel="stylesheet" href="/groups-calendar.css">
 </head>
 <body>
@@ -768,6 +769,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
         <button class="sib-btn active" id="nav-home" onclick="showPanel('home')"><span class="sib-ico" aria-hidden="true">🏠</span><span class="sib-label">Home</span><span class="sib-tooltip">Home</span></button>
         <button class="sib-btn" id="nav-ai" onclick="showPanel('ai')"><span class="sib-ico" aria-hidden="true">📖</span><span class="sib-label">Classes</span><span class="sib-tooltip">Classes</span></button>
         <button class="sib-btn" id="nav-calendar" onclick="showPanel('calendar')"><span class="sib-ico" aria-hidden="true">📅</span><span class="sib-label">Calendar</span><span class="sib-tooltip">Calendar</span></button>
+        <button class="sib-btn" id="nav-insights" onclick="showPanel('insights')"><span class="sib-ico" aria-hidden="true">💡</span><span class="sib-label">Insights</span><span class="sib-tooltip">Insights</span></button>
         <button class="sib-btn" id="nav-live" onclick="openLiveClass()"><span class="sib-ico" aria-hidden="true">🎥</span><span class="sib-label">Live class</span><span class="sib-tooltip">Live class</span></button>
       </div>
       <!-- Institution: the unit selected in the top bar switcher -->
@@ -775,6 +777,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
         <button class="sib-btn" id="nav-structure" style="display:none" onclick="showPanel('structure')"><span class="sib-ico" aria-hidden="true">🌳</span><span class="sib-label">Structure</span><span class="sib-tooltip">Structure</span></button>
         <button class="sib-btn" id="nav-groups" style="display:none" onclick="showPanel('groups')"><span class="sib-ico" aria-hidden="true">👥</span><span class="sib-label">Groups</span><span class="sib-tooltip">Groups</span></button>
         <button class="sib-btn" id="nav-admin" style="display:none" onclick="showPanel('admin')"><span class="sib-ico" aria-hidden="true">📊</span><span class="sib-label">Dashboard</span><span class="sib-tooltip">Dashboard</span></button>
+        <button class="sib-btn" id="nav-unit-insights" style="display:none" onclick="showPanel('unit-insights')"><span class="sib-ico" aria-hidden="true">💡</span><span class="sib-label">Insights</span><span class="sib-tooltip">Insights</span></button>
         <button class="sib-btn" id="nav-branding" style="display:none" onclick="openBrandingNav()"><span class="sib-ico" aria-hidden="true">🎨</span><span class="sib-label">Branding</span><span class="sib-tooltip">Branding</span></button>
         <button class="sib-btn" id="nav-master" style="display:none" onclick="showPanel('master')"><span class="sib-ico" aria-hidden="true">🧠</span><span class="sib-label">AI Settings</span><span class="sib-tooltip">AI Settings</span></button>
         <button class="sib-btn" id="nav-billing" style="display:none" onclick="showPanel('billing')"><span class="sib-ico" aria-hidden="true">💳</span><span class="sib-label">Plan &amp; usage</span><span class="sib-tooltip">Plan &amp; usage</span></button>
@@ -782,7 +785,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
       <!-- Platform: super admin only -->
       <div class="sib-group" data-group="platform">
         <button class="sib-btn" id="nav-superadmin" style="display:none" onclick="showPanel('superadmin')"><span class="sib-ico" aria-hidden="true">🏛️</span><span class="sib-label">Institutions</span><span class="sib-tooltip">Institutions</span></button>
-        <button class="sib-btn" id="nav-insights" style="display:none" onclick="showPanel('insights')"><span class="sib-ico" aria-hidden="true">📈</span><span class="sib-label">Insights</span><span class="sib-tooltip">Insights</span></button>
+        <button class="sib-btn" id="nav-metrics" style="display:none" onclick="showPanel('metrics')"><span class="sib-ico" aria-hidden="true">📈</span><span class="sib-label">Metrics</span><span class="sib-tooltip">Metrics</span></button>
         <button class="sib-btn" id="nav-platform" style="display:none" onclick="showPanel('platform')"><span class="sib-ico" aria-hidden="true">🛰️</span><span class="sib-label">Platform</span><span class="sib-tooltip">Platform</span></button>
       </div>
       <div class="icon-sidebar-bottom">
@@ -1200,16 +1203,20 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
         <div id="pf-billing"></div>
       </div>
 
-      <!-- SUPER ADMIN: INSIGHTS (product usage analytics) -->
-      <div id="panel-insights" class="panel">
-        <div class="sa-header"><div class="sa-title">📈 Insights</div></div>
+      <!-- SUPER ADMIN: METRICS (product usage analytics; "Insights" are the class insights below) -->
+      <div id="panel-metrics" class="panel">
+        <div class="sa-header"><div class="sa-title">📈 Metrics</div></div>
         <div class="in-filters" id="in-filters">
           <div class="in-seg" role="group" aria-label="Period"><button type="button" data-in-days="7">7 days</button><button type="button" data-in-days="30">30 days</button><button type="button" data-in-days="90">90 days</button></div>
           <div class="in-seg" role="group" aria-label="Scope"><button type="button" data-in-scope="all">All institutions</button><button type="button" data-in-scope="unit" id="in-scope-unit"><span>Selected unit</span></button></div>
           <label class="switch-row in-excl"><input type="checkbox" id="in-excl" checked> <span>Exclude my own activity</span></label>
         </div>
-        <div id="insights-root"></div>
+        <div id="metrics-root"></div>
       </div>
+
+      <!-- INSIGHTS (class insights): Teaching (teacher / substitute; students: My insights) and Institution (admins) -->
+      <div id="panel-insights" class="panel"><div id="ins-root" class="lc-root ins-root"></div></div>
+      <div id="panel-unit-insights" class="panel"><div id="ins-unit-root" class="lc-root ins-root"></div></div>
 
     </div><!-- /main-content -->
   </div><!-- /app-body -->
@@ -1572,7 +1579,7 @@ function setUiLang(lang){
   document.documentElement.lang=lang;
   document.querySelectorAll('.lang-toggle button').forEach(b=>b.classList.toggle('active',b.dataset.lang===lang));
   i18nBusy=true;try{translateTree(document.body);}finally{i18nBusy=false;}
-  if(currentUser){renderClasses();if(document.getElementById('panel-admin')?.classList.contains('active'))renderDashboard();renderInstSwitch();if(isActivePanel('insights'))renderInsightsHtml();window.GC?.onLang?.();}
+  if(currentUser){renderClasses();if(document.getElementById('panel-admin')?.classList.contains('active'))renderDashboard();renderInstSwitch();if(isActivePanel('metrics'))renderInsightsHtml();window.GC?.onLang?.();window.TCInsightsPanel?.onLang?.();}
 }
 function uiLocale(){return uiLang==='es'?'es-UY':'en-US';}
 function fmtDate(d,opts){try{return new Date(d).toLocaleDateString(uiLocale(),opts);}catch(e){return '';}}
@@ -2286,10 +2293,11 @@ async function enterAppInner(){
 
 // ══ NAVIGATION ══
 function showPanel(name){
-  if(currentUser?.isStudent&&name!=='live')name='student';      // students: only their dashboard (+ the live class)
+  if(currentUser?.isStudent&&name!=='live'&&name!=='insights')name='student'; // students: only their dashboard (+ the live class and My insights)
   else if(name==='student'&&!currentUser?.isStudent)name='home';
-  if(viewAs&&(name==='superadmin'||name==='platform'||name==='insights'||(!currentUser?.isOrgAdmin&&ADMIN_PANELS.includes(name))))name=currentUser?.isOrgAdmin?'structure':'home';
-  if((name==='platform'||name==='insights')&&!currentUser?.isSuperAdmin)name=isAdminUser()?'structure':'home';
+  if(viewAs&&(name==='superadmin'||name==='platform'||name==='metrics'||(!currentUser?.isOrgAdmin&&ADMIN_PANELS.includes(name))))name=currentUser?.isOrgAdmin?'structure':'home';
+  if((name==='platform'||name==='metrics')&&!currentUser?.isSuperAdmin)name=isAdminUser()?'structure':'home';
+  if(name==='unit-insights'&&!isAdminUser())name='insights';            // Institution → Insights: admins only
   if(currentUser?.isSuperAdmin&&!viewAs){
     if(name==='superadmin')iswSetAll();                              // "Institutions" = "All institutions" + the list
     else if(INST_PANELS.includes(name)&&!currentOrgId)name='superadmin'; // institution screens need a unit
@@ -2303,7 +2311,8 @@ function showPanel(name){
   if(name==='home')renderClasses();
   if(name==='admin')renderDashboard();
   if(name==='superadmin')renderInstitutions();
-  if(name==='insights')renderInsights();
+  if(name==='metrics')renderInsights();
+  if(name==='insights'||name==='unit-insights')window.TCInsightsPanel?.render?.(name);
   if(name==='calendar'||name==='groups'||name==='student')window.GC?.render?.(name);
   if(name==='master'){loadMasterSettings();const o=masterOrgId();if(o)loadPlaybooks(o).then(renderPlaybookList);else renderPlaybookList();}
   if(name==='ai'){const o=masterOrgId();if(o&&!playbookCache[o])loadPlaybooks(o).then(()=>buildSystemPrompt());buildSystemPrompt();initSkillsDrag();}
@@ -3360,7 +3369,7 @@ function showToast(msg,type='',ms=3200){
 // Admins of a unit also manage everything below it. Teachers belong to one unit at any level.
 const LEVEL_LABELS={1:'Main institution',2:'Campus / Faculty',3:'Department / Area'};
 const ADMIN_PANELS=['structure','admin','branding','master','superadmin','platform','groups'];
-const TEACHER_PANELS=['home','ai','calendar'];
+const TEACHER_PANELS=['home','ai','calendar','insights'];
 let appMode='teacher';
 let effCache={};            // orgId -> get_effective_config (chain root→node, branding, …)
 let hierCtxFor;             // orgId whose effective config feeds sliders + prompt
@@ -3388,10 +3397,11 @@ function hierApplyMode(){
   const show=(id,on,disp='flex')=>{const el=document.getElementById(id);if(el)el.style.display=on?disp:'none';};
   show('mode-switch',admin,'inline-flex');
   document.querySelectorAll('#mode-switch button').forEach(b=>{const on=b.dataset.mode===(am?'admin':'teacher');b.classList.toggle('active',on);b.setAttribute('aria-pressed',String(on));});
-  show('nav-home',!am);show('nav-ai',!am);show('nav-calendar',!am);
+  show('nav-home',!am);show('nav-ai',!am);show('nav-calendar',!am);show('nav-insights',!am);
   const unit=sa?!!currentOrgId:!!(currentOrgId||currentUser?.orgId); // super admin: only with a unit chosen in the switcher
   ['nav-structure','nav-groups','nav-admin','nav-branding','nav-master','nav-billing'].forEach(id=>show(id,am&&unit));
-  show('nav-superadmin',am&&sa);show('nav-insights',am&&sa);show('nav-platform',am&&sa);
+  show('nav-unit-insights',am&&(unit||sa)); // class insights of the selected unit (super admin: also "All institutions")
+  show('nav-superadmin',am&&sa);show('nav-metrics',am&&sa);show('nav-platform',am&&sa);
   document.querySelectorAll('.icon-sidebar .sib-group').forEach(g=>g.classList.toggle('empty',![...g.querySelectorAll('.sib-btn')].some(b=>b.style.display!=='none')));
   renderInstSwitch();
   show('btn-invite-top',am);
@@ -3998,7 +4008,7 @@ function platformBillingHtml(){
       <label class="bl-field"><span class="modal-label">Currency</span><input type="text" id="pfs-currency" class="settings-input" maxlength="3" value="${esc(s.currency||'USD')}"></label>
       ${num('pfs-personal',s.personal_monthly_tokens,'Free monthly tokens (users without an institution)','1000')}${num('pfs-seats',s.default_seats,'Default seats for a new institution')}${num('pfs-monthly',s.default_monthly_tokens,'Default monthly tokens for a new institution','1000')}</div>
     <div class="bl-row"><button class="btn-modal-save" data-bl="pf-save-settings">Save settings</button> <span class="bl-hint">Buy button preview:</span> <span class="bl-preview" id="pfs-preview">${blBuyLabelHtml(s.pack_tokens,s.pack_price,s.currency)}</span></div></div>
-  <div class="admin-card bl-pf-card" id="pf-ai-prices-card"><div class="admin-card-title">AI cost estimate <span>Used by Insights · USD per 1M tokens</span></div>
+  <div class="admin-card bl-pf-card" id="pf-ai-prices-card"><div class="admin-card-title">AI cost estimate <span>Used by Metrics · USD per 1M tokens</span></div>
     <div class="bl-settings">${num('pfs-ai-in',s.ai_price_input??2.5,'Input tokens (USD per 1M)','0.01')}${num('pfs-ai-out',s.ai_price_output??10,'Output tokens (USD per 1M)','0.01')}</div>
     <div class="bl-row"><button class="btn-modal-save" data-bl="pf-save-prices">Save prices</button> <span class="bl-hint">Default: GPT-4o (input 2.50 · output 10.00). Only an estimate: check your Azure bill for the real cost.</span></div></div>
   <div class="admin-card bl-pf-card" id="pf-plans-card"><div class="admin-card-title">Institutions: plan and usage <span>This month (UTC)</span></div>
@@ -4077,7 +4087,7 @@ document.addEventListener('input',e=>{
   p.innerHTML=blBuyLabelHtml(g('pfs-pack'),g('pfs-price'),g('pfs-currency').toUpperCase());
 });
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal('modal-budget');});
-ADMIN_PANELS.push('billing','insights');
+ADMIN_PANELS.push('billing','metrics','unit-insights');
 DB_ERRORS.push(
   [/No quedan asientos disponibles en el plan de la institución \((\d+) de (\d+) en uso\)/,"No seats left in the institution's plan ($1 of $2 in use). Ask the TeroClass team to add seats."],
   [/Ya hay una solicitud de compra pendiente[^]*$/,'There is already a pending purchase request for this institution.'],
@@ -4161,7 +4171,8 @@ function vaBlocked(){if(!viewAs)return false;showToast(VA_RO,'err');return true;
 // Safety net: while viewing as someone, only reads reach Supabase, and only the AI preview reaches our API.
 (function vaGuardClient(){
   const READ_RPC=new Set(['get_effective_config','get_billing_summary','get_seat_status','list_purchase_requests','get_document_content','get_org_branding','get_ai_quota','platform_stats','platform_billing_overview',
-    'list_groups','list_students','list_group_members','unit_calendar','session_people','student_view']); // groups + calendar: reads only
+    'list_groups','list_students','list_group_members','unit_calendar','session_people','student_view', // groups + calendar: reads only
+    'list_insight_sessions','get_session_insights','my_insights','my_insight']); // class insights: reads only
 
   const roResult=()=>({data:null,error:{message:VA_RO,code:'viewas'},status:403,statusText:'View as',count:null});
   const roChain=()=>{const r=roResult();let p;p=new Proxy(function(){},{get(_,k){
@@ -4461,12 +4472,12 @@ function setInstSel(id,opts={}){
   const cur=(document.querySelector('.panel.active')?.id||'').replace('panel-','');
   if(opts.panel)showPanel(opts.panel);
   else if(id===null){
-    if(cur==='insights'||cur==='platform')showPanel(cur);                                       // platform screens: just refresh
+    if(cur==='metrics'||cur==='platform'||cur==='unit-insights')showPanel(cur);                 // platform screens (+ Insights of All): just refresh
     else if(appMode==='admin'||cur==='superadmin'||INST_PANELS.includes(cur))showPanel('superadmin'); // → list of institutions
     else if(changed)hierLoadContext();                                                          // teacher mode: new AI context
   }
   else if(cur==='superadmin')showPanel('admin');
-  else if(INST_PANELS.includes(cur)||cur==='insights'){if(cur==='branding')openBrandingNav();else showPanel(cur);}
+  else if(INST_PANELS.includes(cur)||cur==='metrics'||cur==='unit-insights'){if(cur==='branding')openBrandingNav();else showPanel(cur);}
   else if(changed)hierLoadContext();
 }
 document.addEventListener('click',e=>{
@@ -4487,7 +4498,7 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&e.target?.id==='isw-search'){const first=m.querySelector('.isw-opt:not(.all)')||m.querySelector('.isw-opt');if(first){e.preventDefault();first.click();}}
 });
 
-// ══ INSIGHTS (super admin: product usage analytics) ══
+// ══ METRICS (super admin: product usage analytics; was "Insights" — the class insights are public/insights-panel.js) ══
 // One RPC (platform_insights) → three areas: usage & activity, content, costs. Charts are CSS bars.
 const IN={days:30,scope:'auto',excl:true,data:null,status:undefined,seq:0,key:''};
 const IN_AGE_LABELS={infant:'Babies (0–2)',preschool:'Preschool (3–5)',early:'Ages 6–7',primary:'Ages 8–10',preteen:'Ages 11–12',teen:'Ages 13–15',olderteen:'Ages 16–18',adult:'Adults',mixed:'Mixed ages'};
@@ -4503,12 +4514,12 @@ function inFilters(){
   const ex=document.getElementById('in-excl');if(ex)ex.checked=IN.excl;
 }
 async function renderInsights(){
-  const box=document.getElementById('insights-root');if(!box||!currentUser?.isSuperAdmin||viewAs)return;
+  const box=document.getElementById('metrics-root');if(!box||!currentUser?.isSuperAdmin||viewAs)return;
   inFilters();
   const unit=inUnit();const key=[IN.days,unit||'',IN.excl].join('|');const seq=++IN.seq;
   if(!IN.data||IN.key!==key)box.innerHTML='<div class="in-loading">Loading…</div>';
   const [res,st]=await Promise.all([sb.rpc('platform_insights',{p_days:IN.days,p_unit:unit,p_exclude_self:IN.excl}),IN.status===undefined?loadBillingStatus():Promise.resolve(IN.status)]);
-  if(seq!==IN.seq||!currentUser||!isActivePanel('insights'))return;
+  if(seq!==IN.seq||!currentUser||!isActivePanel('metrics'))return;
   IN.status=st;
   if(res.error){box.innerHTML=`<div class="admin-card in-empty">${esc(dbErr(res.error.message))}</div>`;return;}
   IN.data=blJson(res.data);IN.key=key;
@@ -4533,7 +4544,7 @@ function inDayChart(days){
 }
 function inInstName(r){return r.id?r.name:trText('No institution (personal / platform team)');}
 function renderInsightsHtml(){
-  const box=document.getElementById('insights-root');const d=IN.data;if(!box||!d)return;
+  const box=document.getElementById('metrics-root');const d=IN.data;if(!box||!d)return;
   inFilters();
   const u=d.usage||{},c=d.content||{},k=d.costs||{};
   const pct=(a,b)=>b>0?Math.round(a/b*100)+'%':'—';
@@ -4560,7 +4571,7 @@ function renderInsightsHtml(){
   const bars=(c.bars||[]).map(b=>{const m=METHODOLOGIES.find(x=>x.key===b.key);const label=m?m.label:customLabel(b.key);return {label,value:b.avg,shown:String(b.avg),noI18n:!m,title:label+' · '+trText('average of')+' '+b.count};});
   const content=`<div class="in-section" id="in-content"><div class="in-section-title">Content <span>Based on the classes generated in the period</span></div>
     <div class="in-tiles">${inTile('Institutions with a playbook',`${fmtInt(c.playbook_institutions)} / ${fmtInt(c.institutions)}`,'Units with at least one playbook','in-t-playbook')}
-      ${d.students?inTile('Loaded students',fmtInt(d.students.total),'Totals only: no names or emails.','in-t-students')+inTile('Signed in with their link',fmtInt(d.students.linked),`<span>Loaded students</span> <span data-no-i18n>${pct(d.students.linked,d.students.total)}</span>`,'in-t-linked')+inTile('Had classes in the period',fmtInt(d.students.active),`<span>Groups · classes held</span> <span data-no-i18n>${fmtInt(d.students.groups)} · ${fmtInt(d.students.sessions)}</span>`,'in-t-active-students'):''}</div>
+      ${d.students?inTile('Loaded students',fmtInt(d.students.total),'Totals only: no names or emails.','in-t-students')+inTile('Signed in with their link',fmtInt(d.students.linked),`<span>Loaded students</span> <span data-no-i18n>${pct(d.students.linked,d.students.total)}</span>`,'in-t-linked')+inTile('Had classes in the period',fmtInt(d.students.active),`<span>Groups · classes held</span> <span data-no-i18n>${fmtInt(d.students.groups)} · ${fmtInt(d.students.sessions)}</span>`,'in-t-active-students')+inTile('Classes with insights',fmtInt(d.students.insight_sessions||0),'Teacher report generated (demo included)','in-t-insight-sessions'):''}</div>
     <div class="in-grid">
       <div class="admin-card"><div class="admin-card-title">Top subjects <span>Top 10</span></div>${inBars((c.subjects||[]).map(r=>({label:r.name,value:r.count,noI18n:true})))}</div>
       <div class="admin-card"><div class="admin-card-title">Teaching languages</div>${inBars((c.languages||[]).map(r=>({label:r.name,value:r.count})))}</div>
@@ -4594,7 +4605,8 @@ document.addEventListener('click',e=>{
 document.addEventListener('change',e=>{if(e.target?.id==='in-excl'){IN.excl=e.target.checked;renderInsights();}});
 DB_ERRORS.push([/Unidad no encontrada/,'Unit not found.'],[/Precio de IA inválido[^]*$/,'Invalid AI price (0 to 1000 USD per million tokens).']);
 const I18N_ES_NAV={
-'Insights':'Insights','📈 Insights':'📈 Insights','Live class':'Aula en vivo',
+'Insights':'Insights','Metrics':'Métricas','📈 Metrics':'📈 Métricas','Live class':'Aula en vivo',
+'Classes with insights':'Clases con insights','Teacher report generated (demo included)':'Con informe del docente (incluye demo)',
 'PH:Search units':'Buscar unidades','Search units':'Buscar unidades','No units yet.':'Todavía no hay unidades.','Institution':'Institución',
 'Locked while viewing as this unit':'Bloqueado mientras ves como esta unidad',
 'Choose one in the selector above':'Elegí una en el selector de arriba','Change unit':'Cambiar unidad','Choose a unit in the selector above':'Elegí una unidad en el selector de arriba',
@@ -4620,15 +4632,17 @@ const I18N_ES_NAV={
 'Average, including handouts and checks':'Promedio, incluye fichas y verificaciones','Cost per class':'Costo por clase','Average estimate':'Estimación promedio',
 'By institution':'Por institución','Tokens and estimated cost':'Tokens y costo estimado','Classes':'Clases','Tokens':'Tokens',
 'No AI token usage recorded in this period.':'No hay consumo de tokens de IA registrado en este período.','Prices per 1M tokens:':'Precios por millón de tokens:','Change in Platform':'Cambiar en Plataforma',
-'AI cost estimate':'Costo estimado de la IA','Used by Insights · USD per 1M tokens':'Lo usa Insights · USD por millón de tokens','Input tokens (USD per 1M)':'Tokens de entrada (USD por millón)','Output tokens (USD per 1M)':'Tokens de salida (USD por millón)',
+'AI cost estimate':'Costo estimado de la IA','Used by Metrics · USD per 1M tokens':'Lo usa Métricas · USD por millón de tokens','Input tokens (USD per 1M)':'Tokens de entrada (USD por millón)','Output tokens (USD per 1M)':'Tokens de salida (USD por millón)',
 'Save prices':'Guardar precios','Default: GPT-4o (input 2.50 · output 10.00). Only an estimate: check your Azure bill for the real cost.':'Por defecto: GPT-4o (entrada 2,50 · salida 10,00). Es solo una estimación: el costo real está en tu factura de Azure.',
 'Prices saved ✓':'Precios guardados ✓','Use a price between 0 and 1000, like 2.50.':'Usá un precio entre 0 y 1000, por ejemplo 2.50.','Unit not found.':'Unidad no encontrada.','Invalid AI price (0 to 1000 USD per million tokens).':'Precio de IA inválido (de 0 a 1000 USD por millón de tokens).',
 'Loading…':'Cargando…'
 };
 Object.assign(I18N_ES,I18N_ES_NAV);
 </script>
+<script src="/insights-view.js"></script>
 <script src="/live-class.js"></script>
 <script src="/csv-import.js"></script>
 <script src="/groups-calendar.js"></script>
+<script src="/insights-panel.js"></script>
 </body>
 </html>

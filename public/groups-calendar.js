@@ -6,7 +6,8 @@
  *  · Teachers / substitutes: "Calendar" panel (Teaching group): week view + agenda (mobile), weekly series
  *    and one-off classes (for a group or ad hoc by email), edit / cancel one class or the whole series,
  *    "Join" → the live class demo (public/live-class.js) for that session.
- *  · Students (role "student", magic link by email): ONLY their dashboard — Calendar, Enter class, My insights.
+ *  · Students (role "student", magic link by email): ONLY their dashboard — Calendar, Enter class, My insights
+ *    (the full "My insights" screen is public/insights-panel.js).
  *  · Every class: "Add to Google Calendar" + .ics; personal subscription feed (/cal/<token>.ics);
  *    email notifications through /api/notify/session (no-op until RESEND_API_KEY exists → copy link).
  *  · View as → Student (super admin, read-only).
@@ -59,6 +60,7 @@
   const pad = n => String(n).padStart(2, '0');
   const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   const hm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const endOfToday = () => { const x = new Date(); x.setHours(23, 59, 59, 999); return x.getTime(); };
   function localDateTime(dateStr, timeStr) {   // "2026-10-20" + "18:00" in the viewer's time zone → Date
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || ''); const t = /^(\d{1,2}):(\d{2})/.exec(timeStr || '');
     if (!m || !t) return null;
@@ -301,9 +303,14 @@
       : '<div class="gs-none">No classes scheduled yet.</div>';
     const feed = va ? '<div class="gc-hint">The calendar subscription is personal (not available in View as).</div>'
       : `<div class="gs-feed"><span>Add all my classes to my calendar:</span> <button type="button" class="tree-btn" data-gc="subscribe">🔗 Subscribe (Google, Outlook, Apple)</button></div>`;
-    // 💡 My insights (empty / demo until recording is active; ready for student_insights)
+    // 💡 My insights: the newest ones (own only; demo data until recording is active) → the full list in Insights
     const ins = Array.isArray(d.insights) && d.insights.length
-      ? `<div class="gs-ins-list">${d.insights.map(x => `<div class="gs-ins-item"><b data-no-i18n>${esc(x.title || '')}</b><div class="gc-meta" data-no-i18n>${esc(x.summary || '')}</div></div>`).join('')}</div>`
+      ? `<div class="gs-ins-list">${d.insights.map(x => `<button type="button" class="gs-ins-item" data-gc="ins-open" data-id="${esc(x.id)}">
+          <span class="gs-ins-top"><b data-no-i18n>${esc(x.title || x.group_name || '')}</b>${x.is_demo ? ' <span class="gc-chip">Demo</span>' : ''}</span>
+          <span class="gc-meta"><span data-no-i18n>${esc(fDay(x.starts_at))}</span>${x.teacher_name ? ` <span class="gs-dot">·</span> <span data-no-i18n>${esc(x.teacher_name)}</span>` : ''}</span>
+          ${x.summary ? `<span class="gs-ins-sum" data-no-i18n>${esc(x.summary)}</span>` : ''}
+          ${x.has_message ? '<span class="gc-chip ok">💬 <span>Message from your teacher</span></span>' : ''}</button>`).join('')}</div>
+        <button type="button" class="tree-btn gs-ins-all" data-gc="ins-all">💡 <span>See all my insights</span> →</button>`
       : `<div class="gs-ins-empty">
           <div class="gs-ins-art" aria-hidden="true"><span>🗣️</span><span>📚</span><span>💬</span></div>
           <div class="gs-ins-title">Your insights will appear here after your classes</div>
@@ -478,6 +485,8 @@
       <div class="gc-join-row">${joinButtonHtml(s)}${isStaffRow(s) || s.status === 'cancelled' ? '' : '<span class="gc-hint">The class opens 10 minutes before it starts.</span>'}</div>
       <div class="gc-sec-title">Add to calendar</div>
       <div class="gc-btn-row"><a class="tree-btn" href="${esc(googleUrl(s))}" target="_blank" rel="noopener">Google Calendar</a><button type="button" class="tree-btn" data-gc="ics" data-id="${esc(s.id)}">⬇ <span>.ics (Outlook, Apple)</span></button></div>
+      ${staff && s.status !== 'cancelled' && Date.parse(s.starts_at) <= endOfToday() && window.TCInsightsPanel ? `<div class="gc-sec-title">Insights</div>
+        <div class="gc-btn-row"><button type="button" class="tree-btn" data-gc="ins-view" data-id="${esc(s.id)}">💡 <span>View insights</span></button>${inViewAs() ? '' : `<button type="button" class="tree-btn" data-gc="ins-gen" data-id="${esc(s.id)}">✨ <span>Generate demo insights</span></button>`}</div>` : ''}
       ${staff ? `<div class="gc-sec-title"><span>Students</span> <span class="gc-count">(<b>${Number(s.people) || 0}</b>)</span></div><div id="gc-people" class="gc-people"><div class="in-loading">Loading…</div></div>` : ''}
       ${canEdit ? `<div class="gc-sec-title">Invite</div>
         <div class="gc-btn-row"><button type="button" class="tree-btn" data-gc="notify" data-id="${esc(s.id)}" data-kind="invite">✉️ <span>Email the students</span></button><button type="button" class="tree-btn" data-gc="copy-invite" data-id="${esc(s.id)}">🔗 <span>Copy invitation link</span></button></div>
@@ -720,7 +729,7 @@
     const j = joinState(s); const staff = isStaffRow(s);
     if (j.k === 'cancelled' || (!staff && j.k !== 'open')) { showToast(j.k === 'soon' ? opensAt(s) : 'This class is not available.', 'err'); return; }
     closeGc();
-    if (window.LiveClass?.openSession) window.LiveClass.openSession({ id: s.id, title: sTitle(s), role: staff ? 'teacher' : 'student' });
+    if (window.LiveClass?.openSession) window.LiveClass.openSession({ id: s.id, title: sTitle(s), group: s.group_name || '', role: staff ? 'teacher' : 'student' });
     else showToast('The live class is not available.', 'err');
   }
 
@@ -1198,6 +1207,14 @@
       case 'logout': if (typeof handleLogout === 'function') handleLogout(); break;
       case 'st-reload': ST.data = null; ST.error = null; renderStudent(); break;
       case 'join': join(id); break;
+      case 'ins-open': if (window.TCInsightsPanel) window.TCInsightsPanel.openMine(id); break;
+      case 'ins-all': showPanel('insights'); break;
+      case 'ins-view': { const s = findRow(id); closeGc(); if (window.TCInsightsPanel) window.TCInsightsPanel.openSession(id, { unit: s?.role === 'admin' }); break; }
+      case 'ins-gen': {
+        const s = findRow(id); if (!s || !window.TCInsightsPanel) break;
+        window.TCInsightsPanel.generate(id, { title: sTitle(s), group: s.group_name || '' }, el).then(ok => { if (ok) { closeGc(); window.TCInsightsPanel.openSession(id, { unit: s.role === 'admin' }); } });
+        break;
+      }
       case 'ics': { const s = findRow(id); if (s) download(`teroclass-${ymd(new Date(s.starts_at))}.ics`, sessionIcs(s), 'text/calendar;charset=utf-8'); break; }
       case 'subscribe': subscribeDialog(); break;
       case 'copy-feed': copyText($('gc-feed-url')?.value || '').then(ok => showToast(ok ? 'Link copied ✓' : 'Could not copy: select the link and copy it.', ok ? 'ok' : 'err')); break;
@@ -1317,6 +1334,8 @@
     'The calendar subscription is personal (not available in View as).': 'La suscripción al calendario es personal (no disponible en "Ver como").',
     'Add all my classes to my calendar:': 'Sumar todas mis clases a mi calendario:', '🔗 Subscribe (Google, Outlook, Apple)': '🔗 Suscribirme (Google, Outlook, Apple)',
     'My insights': 'Mis insights', 'Your insights will appear here after your classes': 'Tus insights van a aparecer acá después de tus clases',
+    'See all my insights': 'Ver todos mis insights', 'Message from your teacher': 'Mensaje de tu docente', 'Insights': 'Insights', 'View insights': 'Ver insights',
+    'Generate demo insights': 'Generar insights de demo', 'Demo': 'Demo',
     "After each recorded class you'll see a recap, your progress and personal feedback from your teacher.": 'Después de cada clase grabada vas a ver un repaso, tu progreso y una devolución personal de tu docente.',
     'Speaking time': 'Tiempo de habla', 'New words': 'Palabras nuevas', 'Progress': 'Progreso', 'Preview': 'Vista previa',
     // calendar

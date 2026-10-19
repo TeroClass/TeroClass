@@ -14,6 +14,18 @@
       "destination": "/public/live-class.css"
     },
     {
+      "source": "/insights-view.js",
+      "destination": "/public/insights-view.js"
+    },
+    {
+      "source": "/insights-view.css",
+      "destination": "/public/insights-view.css"
+    },
+    {
+      "source": "/insights-panel.js",
+      "destination": "/public/insights-panel.js"
+    },
+    {
       "source": "/(favicon-32\\.png|favicon-512\\.png|apple-touch-icon\\.png|favicon\\.ico)",
       "destination": "/public/$1"
     },

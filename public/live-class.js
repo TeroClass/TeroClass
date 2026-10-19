@@ -6,7 +6,10 @@
  * livekit-client SDK is loaded from jsDelivr and LiveKitProvider is used instead.
  *
  * Depends on globals from index.html: sb, currentUser, plannings, currentResult, esc, showToast,
- * showPanel, formatDoc, trText, uiLang, I18N_ES, I18N_RULES_ES, loadScriptOnce.
+ * showPanel, formatDoc, trText, uiLang, I18N_ES, I18N_RULES_ES, loadScriptOnce; and on public/insights-view.js
+ * (window.TCInsightsView: sample data + insights renderers shared with the Insights panels).
+ * Ending a class from the calendar (teacher / substitute) stores demo insights for that class
+ * (generate_demo_insights) and opens them in Insights (public/insights-panel.js).
  * All user data (names, titles, chat, plan text) is escaped with esc() / formatDoc().
  */
 (function () {
@@ -15,7 +18,8 @@
   const LK_VERSION = '2.22.3';
   const LK_CDN = `https://cdn.jsdelivr.net/npm/livekit-client@${LK_VERSION}/dist/livekit-client.umd.js`;
   const CONSENT_VERSION = '2026-10';
-  const DEMO_BANNER = 'Demo data — real insights activate when the live classroom is connected';
+  const V = window.TCInsightsView; // shared insights view (loaded before this file)
+  const DEMO_BANNER = V.DEMO_BANNER;
 
   const tr = s => (typeof trText === 'function' ? trText(s) : s);
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -29,7 +33,7 @@
   const EMAIL_RE = /^[^\s@<>"']{1,64}@[^\s@<>"']{1,190}\.[A-Za-z]{2,24}$/;
 
   // ════════════════════════════════════════════════════════════════════════════════════════
-  // SAMPLE DATA (demo). Real data will come from student_insights / teacher_insights.
+  // SAMPLE PLANS (demo). The sample insights live in public/insights-view.js (TCInsightsView.SAMPLES).
   // ════════════════════════════════════════════════════════════════════════════════════════
   const SAMPLE_PLAN_EN = `Week 3 - Class 2 - B1 - Making plans
 Today's Objectives:
@@ -68,292 +72,7 @@ Actividad 2: balanceo de ecuaciones en parejas (20 min)
 Cierre y ticket de salida (5 min)
 - ¿Por qué no podemos cambiar los subíndices?`;
 
-  const SAMPLES = {
-    language: {
-      key: 'language', kind: 'language', lang: 'en',
-      title: 'Making plans: future forms (B1)', subject: 'English · B1', durationMin: 45, participants: 8,
-      recap: {
-        summary: "We practised talking about future plans with 'going to', the present continuous and 'will'. After a warm-up about weekend plans, pairs organised a class trip and presented it to the group.",
-        topics: [
-          { title: 'Going to vs present continuous', bullets: ["'Going to' for intentions: I'm going to study abroad.", "Present continuous for fixed arrangements: We're meeting at 6.", 'Time expressions: tonight, next week, on Saturday.'] },
-          { title: 'Making suggestions', bullets: ["Why don't we…? / How about + -ing?", "Agreeing and disagreeing politely: That sounds great! / I'm not sure about that.", 'Linking ideas: first, then, after that.'] },
-          { title: 'Planning the class trip', bullets: ['Pairs chose a destination, a budget and a schedule.', 'Each pair presented their plan in 2 minutes.', 'The class voted for the best plan: a day in Colonia.'] },
-        ],
-      },
-      students: [
-        {
-          name: 'Valentina Ruiz', highlight: 'Volunteered twice and led her pair’s presentation.',
-          progress: { speakingMin: 7.4, teacherMin: 23.1, vocab: 412, vocabDelta: 23, level: 'B1', levelPrev: 'A2+', wpm: 96, wpmDelta: 8, score: 74, scoreDelta: 6 },
-          tracker: [
-            { concept: 'Going to (intentions)', difficulty: 'Easy', used: 9, updated: 'Today', mastery: 86 },
-            { concept: 'Present continuous (arrangements)', difficulty: 'Medium', used: 5, updated: 'Today', mastery: 68 },
-            { concept: 'Will (spontaneous decisions)', difficulty: 'Easy', used: 4, updated: 'Today', mastery: 80 },
-            { concept: 'How about + -ing', difficulty: 'Medium', used: 3, updated: 'Today', mastery: 55 },
-            { concept: 'Prepositions of time (on / at / in)', difficulty: 'Medium', used: 6, updated: '2 classes ago', mastery: 61 },
-          ],
-          pron: [
-            { item: '/θ/ in “think”, “Thursday”', score: 62, tip: 'Put the tip of your tongue between your teeth. You said “tink”.' },
-            { item: 'Final -ed /t/ in “booked”', score: 78, tip: 'One syllable: /bʊkt/, not “book-ed”.' },
-            { item: 'Word stress: ho-TEL', score: 91, tip: 'Well done — stress on the second syllable.' },
-          ],
-          didWell: [
-            { text: "I'm going to visit my grandmother on Sunday.", note: 'Correct “going to” with a time expression.' },
-            { text: "Why don't we take the train? It's cheaper.", note: 'Natural suggestion with a reason.' },
-          ],
-          improve: [
-            { original: 'We are go to the museum tomorrow.', corrected: 'We are going to the museum tomorrow.', explanation: 'The present continuous needs the -ing form: are going.' },
-            { original: 'How about to visit Colonia?', corrected: 'How about visiting Colonia?', explanation: 'After “How about” use the -ing form.' },
-            { original: 'In Saturday we travel.', corrected: "On Saturday we're travelling.", explanation: 'Use “on” with days, and the present continuous for a fixed plan.' },
-          ],
-          vocab: [
-            { word: 'itinerary', pos: 'noun', level: 'B2', def: 'A detailed plan of a journey.', quote: 'Our itinerary starts in Colonia at nine.', example: 'The travel agent sent us the itinerary.' },
-            { word: 'book', pos: 'verb', level: 'A2', def: 'To reserve a seat, room or ticket.', quote: 'We already booked the bus.', example: 'I need to book a table for four.' },
-            { word: 'affordable', pos: 'adjective', level: 'B1', def: 'Not expensive; cheap enough to pay for.', quote: 'The hostel is more affordable.', example: 'We found an affordable hotel near the beach.' },
-            { word: 'look forward to', pos: 'phrasal verb', level: 'B1', def: 'To feel happy about something that is going to happen.', quote: "I'm looking forward to the trip!", example: "I'm looking forward to the weekend." },
-          ],
-        },
-        {
-          name: 'Mateo Fernández', highlight: 'Asked two great follow-up questions during the presentations.',
-          progress: { speakingMin: 4.1, teacherMin: 23.1, vocab: 356, vocabDelta: 11, level: 'A2+', levelPrev: 'A2+', wpm: 78, wpmDelta: 3, score: 63, scoreDelta: 4 },
-          tracker: [
-            { concept: 'Going to (intentions)', difficulty: 'Easy', used: 6, updated: 'Today', mastery: 72 },
-            { concept: 'Present continuous (arrangements)', difficulty: 'Medium', used: 2, updated: 'Today', mastery: 45 },
-            { concept: 'Will (spontaneous decisions)', difficulty: 'Easy', used: 3, updated: 'Today', mastery: 70 },
-            { concept: 'Question forms (What are you doing…?)', difficulty: 'Medium', used: 4, updated: 'Today', mastery: 58 },
-          ],
-          pron: [
-            { item: 'Weak form of “to” /tə/', score: 58, tip: '“going to” sounds like “gonna” in fast speech: /ˈɡəʊɪŋ tə/.' },
-            { item: '/v/ vs /b/ in “visit”, “vote”', score: 66, tip: 'Top teeth on the bottom lip for /v/.' },
-            { item: 'Intonation in Wh- questions', score: 84, tip: 'Good falling intonation at the end.' },
-          ],
-          didWell: [
-            { text: 'What are you going to do there?', note: 'Correct question with “going to”.' },
-            { text: "I'll bring the snacks!", note: 'Natural use of “will” for an offer.' },
-          ],
-          improve: [
-            { original: 'I going to travel in July.', corrected: "I'm going to travel in July.", explanation: 'Don’t forget the verb “be”: I am (I’m) going to…' },
-            { original: 'Tomorrow I meet my friends.', corrected: "Tomorrow I'm meeting my friends.", explanation: 'Use the present continuous for arrangements with a time.' },
-          ],
-          vocab: [
-            { word: 'budget', pos: 'noun', level: 'B1', def: 'The amount of money you can spend.', quote: 'Our budget is two thousand pesos.', example: 'We have a small budget for the trip.' },
-            { word: 'vote', pos: 'verb', level: 'B1', def: 'To choose officially, often by raising your hand.', quote: 'I vote for Colonia.', example: 'Let’s vote for the best idea.' },
-            { word: 'snack', pos: 'noun', level: 'A2', def: 'A small amount of food eaten between meals.', quote: "I'll bring the snacks!", example: 'Fruit is a healthy snack.' },
-          ],
-        },
-        {
-          name: 'Sofía Pereira', highlight: 'Excellent fluency; helped her partner with vocabulary.',
-          progress: { speakingMin: 6.2, teacherMin: 23.1, vocab: 538, vocabDelta: 19, level: 'B1+', levelPrev: 'B1', wpm: 112, wpmDelta: 5, score: 81, scoreDelta: 3 },
-          tracker: [
-            { concept: 'Going to (intentions)', difficulty: 'Easy', used: 7, updated: 'Today', mastery: 92 },
-            { concept: 'Present continuous (arrangements)', difficulty: 'Medium', used: 6, updated: 'Today', mastery: 84 },
-            { concept: 'Will vs going to', difficulty: 'Hard', used: 5, updated: 'Today', mastery: 66 },
-            { concept: 'Linking words (first, then, after that)', difficulty: 'Easy', used: 8, updated: 'Today', mastery: 88 },
-          ],
-          pron: [
-            { item: 'Schwa in “travelling”, “museum”', score: 74, tip: 'Reduce unstressed vowels: /ˈtræv(ə)lɪŋ/.' },
-            { item: 'Linking: “going_to_a”', score: 81, tip: 'Connect words smoothly in fast speech.' },
-            { item: '/h/ in “holiday”, “hotel”', score: 89, tip: 'Clear /h/, not a Spanish “j”.' },
-          ],
-          didWell: [
-            { text: "First we're taking the bus, then we're visiting the old town.", note: 'Sequencing with present continuous — very natural.' },
-            { text: "That sounds great, but I'm not sure about the price.", note: 'Polite partial disagreement.' },
-          ],
-          improve: [
-            { original: "I think it's going to rain, so I'm going to take an umbrella… no, I'll take!", corrected: "I'll take an umbrella.", explanation: '“Take” needs an object: take an umbrella.' },
-            { original: 'We will to stay two nights.', corrected: 'We will stay two nights.', explanation: 'No “to” after “will”.' },
-          ],
-          vocab: [
-            { word: 'old town', pos: 'noun', level: 'B1', def: 'The historic centre of a city.', quote: "We're visiting the old town.", example: 'The old town has beautiful streets.' },
-            { word: 'sightseeing', pos: 'noun', level: 'B1', def: 'Visiting interesting places as a tourist.', quote: 'We need time for sightseeing.', example: 'We went sightseeing in Rome.' },
-            { word: 'worth it', pos: 'expression', level: 'B2', def: 'Good enough to justify the cost or effort.', quote: 'The ferry is expensive but it’s worth it.', example: 'The long walk was worth it.' },
-          ],
-        },
-      ],
-      teacher: {
-        metrics: [
-          { label: 'Teacher talk time', value: '52%', sub: '23 of 45 min' },
-          { label: 'Student talk time', value: '48%', sub: 'goal ≥ 60%' },
-          { label: 'Questions asked', value: '36', sub: '14 open · 22 closed' },
-          { label: 'Average wait time', value: '1.8 s', sub: 'after questions' },
-          { label: 'Students who spoke', value: '7 / 8', sub: '1 student silent' },
-          { label: 'Longest teacher turn', value: '6:40', sub: 'grammar explanation' },
-        ],
-        highlights: [
-          { title: 'Rapport', text: 'You used every student’s name (31 times) and students laughed together during the warm-up (min 2–6).' },
-          { title: 'Task setup', text: 'You modelled the trip task with one pair before starting; all pairs started within 40 seconds.' },
-        ],
-        focus: { title: 'Student talk time', text: 'Teacher talk was 52% (23 min). The future-forms explanation ran 6 min 40 s without student turns (min 9–16).' },
-        action: { title: 'Next class', text: 'Replace the explanation with a 3-minute guided discovery: give 6 example sentences and let pairs sort them into “plan” vs “arrangement”.' },
-        areas: [
-          { area: 'Purpose & Alignment', rating: 'strength', evidence: 'Objectives on screen at min 1; you referred back to them at min 30 (“Remember, arrangements!”).', impact: 'Students knew what success looked like.', next: 'Ask students to self-assess against the objectives in the exit ticket.' },
-          { area: 'Rapport', rating: 'strength', evidence: '31 uses of students’ names; 4 moments of shared laughter; Lucas was invited back after being quiet.', impact: 'Safe atmosphere; 7 of 8 students spoke.', next: 'Keep it — add a quick personal check-in for the silent student.' },
-          { area: 'STT & Participation', rating: 'focus', evidence: 'Student talk 48% vs goal 60%. Camila did not speak; Valentina spoke 7.4 min, Mateo 4.1 min.', impact: 'Less practice time for the target language.', next: 'Use pair work before whole-class answers; assign roles so quieter students speak first.' },
-          { area: 'Instructions & Task Setup', rating: 'strength', evidence: 'Instructions in 3 short steps + model; one ICQ (“Do you write or speak?”).', impact: 'Pairs started in under 40 s.', next: 'Add a time limit on screen.' },
-          { area: 'Scaffolding', rating: 'developing', evidence: 'Sentence frames shown for suggestions, but not for disagreeing.', impact: '3 pairs avoided disagreeing politely.', next: 'Add frames: “I see your point, but…”, “What about…?”' },
-          { area: 'Language Input', rating: 'developing', evidence: 'Future forms explained in one 6:40 block with 9 example sentences.', impact: 'Attention dropped (2 students turned cameras off).', next: 'Chunk input: 2 minutes, then a quick check, then practice.' },
-          { area: 'Monitoring & Feedback', rating: 'strength', evidence: 'You visited 4 of 4 breakout pairs; noted 6 errors for later.', impact: 'Delayed correction kept fluency high.', next: 'Share the error board at the end (it was skipped).' },
-          { area: 'Error Correction', rating: 'developing', evidence: '11 corrections, 9 of them recasts; 2 elicited (“Is it ‘go’ or…?”).', impact: 'Recasts are often not noticed: the same error (“are go”) appeared 4 more times.', next: 'Use more elicitation for the target structure.' },
-          { area: 'Questions & Interaction', rating: 'developing', evidence: '36 questions: 14 open, 22 closed; average wait time 1.8 s.', impact: 'Short wait time favours the fastest students.', next: 'Wait 3–5 s after open questions; use “think, pair, share”.' },
-          { area: 'Pacing & Transitions', rating: 'focus', evidence: 'Activity 1 planned 10 min, took 16; closing planned 5 min, took 2 (exit ticket skipped).', impact: 'No evidence collected at the end of class.', next: 'Set a visible timer per activity (the class plan timer can do this).' },
-          { area: 'Materials & Tech', rating: 'strength', evidence: 'Slides and shared map worked; screen share used 2 times without delay.', impact: 'Smooth flow.', next: 'Keep.' },
-          { area: 'Personalization', rating: 'strength', evidence: 'Trip destinations came from students’ own ideas (Colonia, Punta del Este).', impact: 'High engagement in Activity 2.', next: 'Link homework to their chosen trip.' },
-          { area: 'Evidence of Learning', rating: 'developing', evidence: 'Correct present continuous for arrangements rose from 40% to 68% of attempts during the class.', impact: 'Progress, but the exit ticket was skipped.', next: 'Keep 5 minutes for the exit ticket.' },
-        ],
-        planVsActual: [
-          { section: 'Warm-up: weekend plans', planned: 5, actual: 7, note: 'High engagement; 2 min over.' },
-          { section: 'Activity 1: future forms', planned: 10, actual: 16, note: '6:40 teacher explanation without student turns.' },
-          { section: 'Activity 2: plan the class trip', planned: 15, actual: 12, note: 'Shortened to recover time.' },
-          { section: 'Presentations', planned: 10, actual: 8, note: 'Two pairs did not present.' },
-          { section: 'Closing & exit ticket', planned: 5, actual: 2, note: 'Exit ticket skipped.' },
-        ],
-        form: {
-          evidence: 'Teacher talk 52% (23 min); one 6:40 explanation; 36 questions (14 open) with 1.8 s average wait time; exit ticket skipped.',
-          worked: 'Warm rapport (names, humour) and a very clear model of the trip task: all pairs started in under 40 seconds.',
-          priority: 'Student talk time and pacing of the input stage.',
-          next: 'Guided discovery in pairs instead of the explanation, with a 3-minute timer; keep 5 minutes for the exit ticket.',
-        },
-      },
-    },
-
-    chemistry: {
-      key: 'chemistry', kind: 'discipline', lang: 'es',
-      title: 'Reacciones químicas: balanceo de ecuaciones (3°B)', subject: 'Química · 3°B', durationMin: 50, participants: 8,
-      recap: {
-        summary: 'Vimos qué es una reacción química, distinguimos reactivos y productos, y comprobamos con una demostración que la masa se conserva. Después balanceamos ecuaciones en parejas.',
-        topics: [
-          { title: 'Reactivos y productos', bullets: ['Los reactivos están a la izquierda de la flecha; los productos, a la derecha.', 'La flecha se lee “produce” o “da”.', 'Ejemplo: CH₄ + 2O₂ → CO₂ + 2H₂O.'] },
-          { title: 'Ley de conservación de la masa', bullets: ['La masa total antes y después de la reacción es la misma.', 'En la bolsa cerrada la balanza marcó 152 g antes y después.', 'Si la bolsa está abierta, el gas se escapa y parece que “se pierde” masa.'] },
-          { title: 'Balanceo de ecuaciones', bullets: ['Se cuentan los átomos de cada elemento a cada lado.', 'Solo se cambian coeficientes, nunca subíndices.', '2H₂ + O₂ → 2H₂O quedó balanceada en clase.'] },
-        ],
-      },
-      students: [
-        {
-          name: 'Valentina Ruiz', highlight: 'Explicó al grupo por qué la masa no cambia en la bolsa cerrada.',
-          progress: { speakingMin: 5.8, teacherMin: 24.5, vocab: 14, vocabDelta: 6, level: 'Explica con sus palabras', levelPrev: 'Explica con apoyo', wpm: 4, wpmDelta: 2, score: 82, scoreDelta: 9 },
-          tracker: [
-            { concept: 'Reactivo / producto', difficulty: 'Básico', used: 7, updated: 'Hoy', mastery: 90 },
-            { concept: 'Conservación de la masa', difficulty: 'Intermedio', used: 5, updated: 'Hoy', mastery: 85 },
-            { concept: 'Coeficiente vs subíndice', difficulty: 'Intermedio', used: 4, updated: 'Hoy', mastery: 70 },
-            { concept: 'Balanceo por tanteo', difficulty: 'Avanzado', used: 3, updated: 'Hoy', mastery: 62 },
-          ],
-          pron: [
-            { item: 'Conservación de la masa', score: 90, tip: 'La usó bien para explicar la demostración.' },
-            { item: 'Coeficiente vs subíndice', score: 70, tip: 'Una vez cambió un subíndice (H₂O → H₂O₂) al balancear.' },
-            { item: 'Reactivo / producto', score: 95, tip: 'Identificó correctamente todos los reactivos y productos.' },
-          ],
-          didWell: [
-            { text: 'La masa no cambia porque los átomos se reorganizan, no desaparecen.', note: 'Explicación correcta de la conservación de la masa a nivel de partículas.' },
-            { text: 'El metano y el oxígeno son los reactivos.', note: 'Uso preciso de “reactivo”.' },
-          ],
-          improve: [
-            { original: 'Le pongo un 2 abajo al oxígeno del agua: H₂O₂.', corrected: 'Pongo un coeficiente delante: 2H₂O.', explanation: 'Cambiar el subíndice crea otra sustancia (agua oxigenada). Solo se cambian coeficientes.' },
-            { original: 'El gas se evaporó y por eso pesa menos.', corrected: 'El gas salió de la bolsa abierta, por eso la balanza marca menos.', explanation: 'La masa no se destruye: el gas escapó del sistema.' },
-          ],
-          vocab: [
-            { word: 'reactivo', pos: 'sustantivo', level: 'Básico', def: 'Sustancia que se transforma en una reacción química.', quote: 'El metano y el oxígeno son los reactivos.', example: 'En la combustión, el oxígeno es un reactivo.' },
-            { word: 'coeficiente', pos: 'sustantivo', level: 'Intermedio', def: 'Número delante de una fórmula que indica cuántas moléculas hay.', quote: 'Le agrego un coeficiente 2 al agua.', example: 'En 2H₂O el coeficiente es 2.' },
-            { word: 'subíndice', pos: 'sustantivo', level: 'Intermedio', def: 'Número pequeño dentro de una fórmula que indica cuántos átomos de un elemento hay.', quote: 'El subíndice no se toca.', example: 'En CO₂ el subíndice del oxígeno es 2.' },
-            { word: 'sistema cerrado', pos: 'concepto', level: 'Avanzado', def: 'Sistema que no intercambia materia con el exterior.', quote: 'Con la bolsa cerrada es un sistema cerrado.', example: 'Un frasco tapado es un sistema cerrado.' },
-          ],
-        },
-        {
-          name: 'Mateo Fernández', highlight: 'Hizo la pregunta clave: “¿adónde fue el gas?”.',
-          progress: { speakingMin: 3.2, teacherMin: 24.5, vocab: 9, vocabDelta: 3, level: 'Explica con apoyo', levelPrev: 'Explica con apoyo', wpm: 3, wpmDelta: 1, score: 64, scoreDelta: 5 },
-          tracker: [
-            { concept: 'Reactivo / producto', difficulty: 'Básico', used: 4, updated: 'Hoy', mastery: 75 },
-            { concept: 'Conservación de la masa', difficulty: 'Intermedio', used: 2, updated: 'Hoy', mastery: 55 },
-            { concept: 'Coeficiente vs subíndice', difficulty: 'Intermedio', used: 3, updated: 'Hoy', mastery: 48 },
-          ],
-          pron: [
-            { item: 'Reactivo / producto', score: 75, tip: 'Una vez llamó “producto” al oxígeno.' },
-            { item: 'Conservación de la masa', score: 55, tip: 'Dijo que la masa “se pierde” cuando sale el gas.' },
-            { item: 'Coeficiente vs subíndice', score: 48, tip: 'Confunde los dos términos al explicar.' },
-          ],
-          didWell: [
-            { text: '¿Adónde fue el gas cuando abrimos la bolsa?', note: 'Pregunta que llevó a toda la clase a la idea de sistema cerrado.' },
-          ],
-          improve: [
-            { original: 'La masa se pierde cuando sale el gas.', corrected: 'La masa se conserva; el gas sale del sistema y la balanza no lo mide.', explanation: 'La materia no se destruye: cambia de lugar o de forma.' },
-            { original: 'El subíndice es el número grande de adelante.', corrected: 'El coeficiente es el número de adelante; el subíndice es el pequeño de abajo.', explanation: 'Coeficiente = cantidad de moléculas; subíndice = átomos dentro de la molécula.' },
-          ],
-          vocab: [
-            { word: 'producto', pos: 'sustantivo', level: 'Básico', def: 'Sustancia que se forma en una reacción química.', quote: 'El agua es un producto.', example: 'El CO₂ es un producto de la combustión.' },
-            { word: 'balanza', pos: 'sustantivo', level: 'Básico', def: 'Instrumento para medir la masa.', quote: 'La balanza marcaba 152 gramos.', example: 'Usamos la balanza antes y después.' },
-            { word: 'gas', pos: 'sustantivo', level: 'Básico', def: 'Estado de la materia sin forma ni volumen propios.', quote: '¿Adónde fue el gas?', example: 'El dióxido de carbono es un gas.' },
-          ],
-        },
-        {
-          name: 'Sofía Pereira', highlight: 'Balanceó la ecuación del metano sin ayuda y la explicó en la pizarra.',
-          progress: { speakingMin: 4.9, teacherMin: 24.5, vocab: 17, vocabDelta: 5, level: 'Explica y justifica', levelPrev: 'Explica con sus palabras', wpm: 2, wpmDelta: 0, score: 91, scoreDelta: 4 },
-          tracker: [
-            { concept: 'Coeficiente vs subíndice', difficulty: 'Intermedio', used: 6, updated: 'Hoy', mastery: 94 },
-            { concept: 'Balanceo por tanteo', difficulty: 'Avanzado', used: 5, updated: 'Hoy', mastery: 88 },
-            { concept: 'Conservación de la masa', difficulty: 'Intermedio', used: 3, updated: 'Hoy', mastery: 86 },
-          ],
-          pron: [
-            { item: 'Balanceo por tanteo', score: 88, tip: 'Explicó el orden: primero C, luego H, al final O.' },
-            { item: 'Coeficiente vs subíndice', score: 94, tip: 'Uso preciso de ambos términos.' },
-            { item: 'Combustión', score: 72, tip: 'Dijo “quemar es destruir”; revisar la idea de transformación.' },
-          ],
-          didWell: [
-            { text: 'Primero balanceo el carbono, después el hidrógeno y al final el oxígeno.', note: 'Estrategia de balanceo clara y justificada.' },
-            { text: 'Si cambio el subíndice ya no es agua, es otra sustancia.', note: 'Comprende por qué no se tocan los subíndices.' },
-          ],
-          improve: [
-            { original: 'Cuando algo se quema, se destruye.', corrected: 'Cuando algo se quema, se transforma en otras sustancias (CO₂ y H₂O).', explanation: 'En una reacción química los átomos se reorganizan; nada se destruye.' },
-          ],
-          vocab: [
-            { word: 'combustión', pos: 'sustantivo', level: 'Intermedio', def: 'Reacción de una sustancia con oxígeno que libera energía.', quote: 'La combustión del metano da CO₂ y agua.', example: 'La vela se apaga cuando no hay oxígeno para la combustión.' },
-            { word: 'ecuación química', pos: 'concepto', level: 'Intermedio', def: 'Representación de una reacción con fórmulas y una flecha.', quote: 'La ecuación química ya está balanceada.', example: 'H₂ + O₂ → H₂O es una ecuación química sin balancear.' },
-            { word: 'por tanteo', pos: 'expresión', level: 'Avanzado', def: 'Método de balanceo probando coeficientes hasta igualar los átomos.', quote: 'Lo balanceé por tanteo.', example: 'Balanceamos la ecuación por tanteo.' },
-          ],
-        },
-      ],
-      teacher: {
-        metrics: [
-          { label: 'Teacher talk time', value: '49%', sub: '24,5 de 50 min' },
-          { label: 'Student talk time', value: '51%', sub: 'meta ≥ 50%' },
-          { label: 'Questions asked', value: '29', sub: '12 abiertas · 17 cerradas' },
-          { label: 'Average wait time', value: '2,6 s', sub: 'después de preguntar' },
-          { label: 'Students who spoke', value: '6 / 8', sub: '2 sin intervenir' },
-          { label: 'Longest teacher turn', value: '4:10', sub: 'explicación de balanceo' },
-        ],
-        highlights: [
-          { title: 'Indagación', text: 'La demostración de la bolsa cerrada generó 9 hipótesis de estudiantes antes de pesar (min 12–19).' },
-          { title: 'Preguntas', text: '12 preguntas abiertas del tipo “¿por qué…?” y espera promedio de 2,6 s.' },
-        ],
-        focus: { title: 'Corrección de concepciones erróneas', text: 'La idea “la masa se pierde” apareció 5 veces y se corrigió con la respuesta correcta en 4 de ellas, sin que el estudiante la reformulara.' },
-        action: { title: 'Próxima clase', text: 'Ante una concepción errónea, pedir a otro estudiante que la contraste con la evidencia (152 g antes y después) y que el autor la reformule.' },
-        areas: [
-          { area: 'Purpose & Alignment', rating: 'strength', evidence: 'Objetivos leídos al inicio y retomados en el cierre (min 46).', impact: 'Los estudiantes vincularon la demostración con el objetivo.', next: 'Pedir que cada estudiante escriba qué objetivo logró.' },
-          { area: 'Rapport', rating: 'strength', evidence: 'Clima distendido; 3 estudiantes pidieron la palabra espontáneamente.', impact: 'Se animaron a proponer hipótesis equivocadas.', next: 'Mantener.' },
-          { area: 'STT & Participation', rating: 'developing', evidence: 'Habla estudiantil 51%; Camila y Joaquín no intervinieron.', impact: 'Dos estudiantes sin evidencia de aprendizaje oral.', next: 'Asignar roles en parejas (quien balancea / quien explica).' },
-          { area: 'Instructions & Task Setup', rating: 'strength', evidence: 'Consigna de balanceo con un ejemplo resuelto en la pizarra.', impact: 'Todas las parejas comenzaron en menos de 1 minuto.', next: 'Mostrar el tiempo disponible.' },
-          { area: 'Scaffolding', rating: 'strength', evidence: 'Tabla de conteo de átomos por elemento entregada en la Actividad 2.', impact: '7 de 8 parejas balancearon la primera ecuación.', next: 'Retirar la tabla gradualmente en la próxima clase.' },
-          { area: 'Language Input', rating: 'developing', evidence: '“Coeficiente” y “subíndice” se definieron oralmente pero no quedaron escritos.', impact: 'Mateo confundió los términos 3 veces.', next: 'Dejar un glosario visible con ejemplo de cada término.' },
-          { area: 'Monitoring & Feedback', rating: 'strength', evidence: 'Recorriste 4 de 4 grupos y diste feedback específico (“contá los oxígenos otra vez”).', impact: 'Las parejas corrigieron sus propios errores.', next: 'Mantener.' },
-          { area: 'Error Correction', rating: 'focus', evidence: '“La masa se pierde” apareció 5 veces; en 4 diste la respuesta correcta directamente.', impact: 'La concepción errónea reapareció en el ticket de salida.', next: 'Devolver la pregunta al grupo y pedir que el estudiante reformule.' },
-          { area: 'Questions & Interaction', rating: 'strength', evidence: '29 preguntas, 12 abiertas; espera promedio 2,6 s.', impact: 'Respuestas más elaboradas.', next: 'Subir la espera a 3–5 s en preguntas de “¿por qué?”.' },
-          { area: 'Pacing & Transitions', rating: 'developing', evidence: 'Actividad 1 planificada en 15 min, duró 19; cierre en 3 min.', impact: 'Ticket de salida apurado.', next: 'Usar el temporizador del plan por actividad.' },
-          { area: 'Materials & Tech', rating: 'strength', evidence: 'Video y simulador funcionaron; la cámara mostró bien la balanza.', impact: 'Todos vieron la medición.', next: 'Mantener.' },
-          { area: 'Personalization', rating: 'developing', evidence: 'Un solo nivel de ecuaciones para todos.', impact: 'Sofía terminó en 4 min y esperó.', next: 'Preparar una ecuación de desafío (C₃H₈ + O₂).' },
-          { area: 'Evidence of Learning', rating: 'developing', evidence: 'Ticket de salida: 6 de 8 respuestas correctas sobre subíndices.', impact: '2 estudiantes todavía cambian subíndices.', next: 'Retomar con esos 2 estudiantes al inicio de la próxima clase.' },
-        ],
-        planVsActual: [
-          { section: 'Inicio: ¿qué pasa cuando algo se quema?', planned: 10, actual: 9, note: 'Buena lluvia de ideas.' },
-          { section: 'Actividad 1: conservación de la masa', planned: 15, actual: 19, note: 'Las hipótesis llevaron más tiempo (valioso).' },
-          { section: 'Actividad 2: balanceo en parejas', planned: 20, actual: 19, note: '7 de 8 parejas completaron.' },
-          { section: 'Cierre y ticket de salida', planned: 5, actual: 3, note: 'Ticket apurado.' },
-        ],
-        form: {
-          evidence: '9 hipótesis de estudiantes antes de la medición; 12 preguntas abiertas; “la masa se pierde” apareció 5 veces y se corrigió directamente en 4.',
-          worked: 'La demostración en bolsa cerrada y la tabla de conteo de átomos: 7 de 8 parejas balancearon la primera ecuación.',
-          priority: 'Corrección de concepciones erróneas.',
-          next: 'Devolver la concepción errónea al grupo, contrastar con la evidencia y pedir que el estudiante la reformule.',
-        },
-      },
-    },
-  };
+  const SAMPLES = V.SAMPLES;
 
   // ════════════════════════════════════════════════════════════════════════════════════════
   // PROVIDERS
@@ -613,13 +332,7 @@ Cierre y ticket de salida (5 min)
   const clearViewTimers = () => { S.timers.forEach(t => { clearInterval(t); clearTimeout(t); }); S.timers = []; };
   const root = () => document.getElementById('lc-root');
 
-  function pickSampleKey(planning) {
-    const p = (planning && planning.params) || {};
-    const subj = [(p.subjects || []).join(' '), planning?.title || ''].join(' ');
-    if (/chem|qu[ií]m|scien|cienc|f[ií]sic|physic|biolog|matem|math|histor|geogra/i.test(subj)) return 'chemistry';
-    if (/english|ingl[eé]s|language|idioma|\besl\b|\befl\b|french|franc[eé]s|portugu|italian|german|alem[aá]n/i.test(subj)) return 'language';
-    return p.language === 'Spanish' ? 'chemistry' : 'language';
-  }
+  const pickSampleKey = V.pickSampleKey;
 
   // Timed sections from headings like "Activity 1 (15 min)" / "Actividad 1 (15 minutos)" / "Warm-up – 5'"
   const MIN_RE = /(\d{1,3})\s*(?:min(?:utos?|utes?|s)?\.?|['’′])(?=[\s).,;:\]–-]|$)/i;
@@ -641,8 +354,8 @@ Cierre y ticket de salida (5 min)
   // ════════════════════════════════════════════════════════════════════════════════════════
   // SHARED UI
   // ════════════════════════════════════════════════════════════════════════════════════════
-  const banner = (compact) => `<div class="lc-banner${compact ? ' compact' : ''}" role="note"><span aria-hidden="true">🧪</span> <span>${DEMO_BANNER}</span></div>`;
-  const demoChip = () => '<span class="lc-chip lc-chip-demo">Demo</span>';
+  const banner = V.banner;
+  const demoChip = V.demoChip;
 
   function demoSessions() {
     const now = new Date();
@@ -1348,10 +1061,40 @@ Cierre y ticket de salida (5 min)
       recordedCount: R.participants.filter(p => p.recorded).length, talk: { ...R.talk }, role: R.role,
       plan: R.plan.sections.map(s => ({ title: s.generic ? '' : s.title, planned: s.minutes, actual: Math.round(s.elapsed / 60) })),
     };
+    const sess = S.sessionId && R.role === 'teacher' && S.sessionRole !== 'student' ? { id: S.sessionId, title: S.sessionTitle, group: S.sessionGroup } : null;
     teardownRoom();
     S.processing = summary;
-    S.insights = { tab: 'student', student: 0, sub: 'overview', role: summary.role, live: summary, liveSample: S.sampleKey };
+    S.insights = { tab: 'student', student: 0, sub: 'overview', role: summary.role, live: summary, liveSample: S.sampleKey, saved: null, saving: !!sess };
     S.view = 'processing'; render(); runProcessing();
+    if (sess) saveDemoInsights(sess);
+  }
+
+  // A calendar class ended by its teacher / substitute: store demo insights for it (idempotent; the database
+  // checks the caller teaches that class). Nothing is stored for the free "Start live class" demo or in View as.
+  async function saveDemoInsights(sess) {
+    const I = S.insights;
+    try {
+      if (typeof viewAs !== 'undefined' && viewAs) throw new Error('view as');
+      const payload = V.buildDemoPayload({ key: S.sampleKey, title: sess.title, group: sess.group });
+      const { error } = await sb.rpc('generate_demo_insights', { p_session: sess.id, p_payload: payload });
+      if (error) throw error;
+      I.saved = { id: sess.id };
+    } catch (e) { if (!(e && e.message === 'view as')) console.warn('demo insights not saved', e); }
+    I.saving = false;
+    if (S.insights !== I) return;
+    if (I.saved && S.view === 'insights') rerenderInsights(); // offer "Open in Insights" (no jump while reading)
+  }
+  // After "processing": the stored insights of the class (Insights panel) when they were saved; otherwise the sample.
+  function finishProcessing() {
+    const I = S.insights; I.finished = true;
+    if (I.saved && window.TCInsightsPanel) { openSavedInsights(I.saved.id); return; }
+    S.view = 'insights'; render();
+  }
+  function openSavedInsights(id) {
+    if (!window.TCInsightsPanel) return;
+    S.view = 'home';
+    window.TCInsightsPanel.openSession(id, { from: 'live' });
+    toast('Demo insights saved for this class.', 'ok');
   }
 
   // ════════════════════════════════════════════════════════════════════════════════════════
@@ -1394,7 +1137,7 @@ Cierre y ticket de salida (5 min)
       if (pct >= 100) {
         if (li) li.dataset.state = 'done';
         i++; t = 0;
-        if (i >= PROC_STEPS.length) { clearInterval(iv); S.timers.push(setTimeout(() => { if (S.view === 'processing') { S.view = 'insights'; render(); } }, 350)); }
+        if (i >= PROC_STEPS.length) { clearInterval(iv); S.timers.push(setTimeout(() => { if (S.view === 'processing') finishProcessing(); }, 350)); }
       }
     }, tick);
     S.timers.push(iv);
@@ -1403,24 +1146,13 @@ Cierre y ticket de salida (5 min)
   // ════════════════════════════════════════════════════════════════════════════════════════
   // INSIGHTS
   // ════════════════════════════════════════════════════════════════════════════════════════
-  const LABELS = {
-    language: {
-      metrics: ['Speaking time', 'Vocabulary size', 'Speaking level (CEFR)', 'Words per minute', 'Grammar score'],
-      tracker: 'Grammar tracker', feedbackA: 'Pronunciation', feedbackB: 'Grammar', vocab: 'Vocabulary',
-      vocabCols: ['Word', 'Part of speech', 'CEFR', 'Definition', 'From the lesson', 'Example'],
-    },
-    discipline: {
-      metrics: ['Speaking time', 'Subject terms used', 'Explanation level', 'Questions asked', 'Concept accuracy'],
-      tracker: 'Concept tracker', feedbackA: 'Concept use', feedbackB: 'Terms and reasoning', vocab: 'Key terms',
-      vocabCols: ['Term', 'Type', 'Level', 'Definition', 'From the lesson', 'Example'],
-    },
-  };
-  const SUBTABS = [['overview', 'Overview'], ['recap', 'Recap'], ['progress', 'Progress'], ['feedback', 'Feedback'], ['vocab', 'Vocabulary']];
-  const D = s => `<span data-no-i18n>${esc(s)}</span>`; // sample/user data: never translated
-  const delta = (v, unit = '') => v > 0 ? `<span class="lc-delta up">▲ <span data-no-i18n>${v}${unit}</span></span>` : v < 0 ? `<span class="lc-delta down">▼ <span data-no-i18n>${Math.abs(v)}${unit}</span></span>` : '<span class="lc-delta">= <span>no change</span></span>';
+  // The live-class demo shows the SAMPLE insights, rendered by the shared view (public/insights-view.js).
+  // A class from the calendar ended by its teacher / substitute is also stored as demo insights for that
+  // class (generate_demo_insights) and then opened in Insights (see endClass / finishProcessing).
+  const SUBKEYS = V.SUBTABS.map(([k]) => k);
 
   function insightsHtml() {
-    const X = SAMPLES[S.sampleKey] || SAMPLES.language;
+    const X = V.sampleModel(S.sampleKey);
     const I = S.insights;
     const showTeacher = I.role === 'teacher';
     if (!showTeacher) I.tab = 'student';
@@ -1437,176 +1169,34 @@ Cierre y ticket de salida (5 min)
           <button type="button" class="lc-btn lc-sm${S.sampleKey === 'chemistry' ? ' active' : ''}" data-lc="sample" data-k="chemistry" aria-pressed="${S.sampleKey === 'chemistry'}">Chemistry (ES)</button>
         </div>
       </header>
+      ${S.insights.saved ? `<div class="ins-saved-note" role="status"><span aria-hidden="true">💡</span> <span>Demo insights saved for this class.</span> <button type="button" class="lc-btn lc-sm" data-lc="open-saved">Open in Insights</button></div>` : ''}
       <div class="lc-tabs" role="tablist" aria-label="${esc(tr('Insights'))}">
         <button type="button" role="tab" class="lc-tab${I.tab === 'student' ? ' active' : ''}" aria-selected="${I.tab === 'student'}" data-lc="ins-tab" data-k="student" id="lc-ins-student">🎒 <span>Student insights</span></button>
         ${showTeacher ? `<button type="button" role="tab" class="lc-tab${I.tab === 'teacher' ? ' active' : ''}" aria-selected="${I.tab === 'teacher'}" data-lc="ins-tab" data-k="teacher" id="lc-ins-teacher">👩‍🏫 <span>Teacher insights</span></button>` : ''}
       </div>
-      <div class="lc-ins-body" role="tabpanel">${I.tab === 'teacher' && showTeacher ? teacherInsightsHtml(X) : studentInsightsHtml(X)}</div>
+      <div class="lc-ins-body" role="tabpanel">${I.tab === 'teacher' && showTeacher ? teacherInsightsHtml(X, live) : studentInsightsHtml(X)}</div>
     </div>`;
   }
 
   function studentInsightsHtml(X) {
     const I = S.insights;
     const idx = Math.min(I.student, X.students.length - 1);
-    const st = X.students[idx];
-    return `<div class="lc-student-pick" role="group" aria-label="${esc(tr('Choose a student'))}">
-        ${X.students.map((s, i) => `<button type="button" class="lc-person-chip${i === idx ? ' active' : ''}" data-lc="pick-student" data-i="${i}" aria-pressed="${i === idx}"><span class="lc-avatar xs" style="background:${colorFor(s.name)}" aria-hidden="true" data-no-i18n>${esc(initials(s.name))}</span> <span data-no-i18n>${esc(s.name)}</span></button>`).join('')}
-      </div>
-      <div class="lc-subtabs" role="tablist" aria-label="${esc(tr('Student insights'))}">
-        ${SUBTABS.map(([k, l]) => `<button type="button" role="tab" class="lc-subtab${I.sub === k ? ' active' : ''}" aria-selected="${I.sub === k}" data-lc="ins-sub" data-k="${k}" id="lc-sub-${k}">${k === 'vocab' ? LABELS[X.kind].vocab : l}</button>`).join('')}
-      </div>
-      <div class="lc-sub-body">${({ overview: overviewHtml, recap: recapHtml, progress: progressHtml, feedback: feedbackHtml, vocab: vocabHtml })[I.sub](X, st, idx)}</div>`;
-  }
-
-  function metricCards(X, st) {
-    const p = st.progress; const L = LABELS[X.kind];
-    const studentPct = Math.round(p.speakingMin / (p.speakingMin + p.teacherMin) * 100);
-    return [
-      { label: L.metrics[0], value: `${String(p.speakingMin).replace('.', X.lang === 'es' ? ',' : '.')} min`, extra: `<span data-no-i18n>${studentPct}%</span> <span>of class talk</span>` },
-      { label: L.metrics[1], value: String(p.vocab), extra: delta(p.vocabDelta) },
-      { label: L.metrics[2], value: p.level, extra: p.levelPrev && p.levelPrev !== p.level ? `<span class="lc-delta up">▲ <span>from</span> <span data-no-i18n>${esc(p.levelPrev)}</span></span>` : delta(0) },
-      { label: L.metrics[3], value: String(p.wpm), extra: delta(p.wpmDelta) },
-      { label: L.metrics[4], value: `${p.score}%`, extra: delta(p.scoreDelta, '%') },
-    ];
-  }
-
-  function overviewHtml(X, st, idx) {
     const key = `${X.key}:${idx}`;
-    const msg = S.messages[key] || '';
-    return `<div class="lc-grid-2">
-      <section class="lc-card lc-msgbox">
-        <h3>Message to <span data-no-i18n>${esc(st.name.split(' ')[0])}</span></h3>
-        <label class="lc-sr" for="lc-teacher-msg">Message to the student</label>
-        <textarea id="lc-teacher-msg" rows="5" maxlength="4000" placeholder="Write a personal note for this student…" data-key="${esc(key)}">${esc(msg)}</textarea>
-        <div class="lc-row">
-          <button type="button" class="lc-btn" data-lc="draft-msg" id="lc-draft-msg">✨ Draft with assistant</button>
-          <button type="button" class="lc-btn lc-primary" data-lc="send-msg">Send to student</button>
-        </div>
-        <p class="lc-fine">Demo: messages are not sent.</p>
-      </section>
-      <section class="lc-card">
-        <h3>Highlight</h3>
-        <p class="lc-quote" data-no-i18n>${esc(st.highlight)}</p>
-        <h3>At a glance</h3>
-        <div class="lc-metrics compact">${metricCards(X, st).map(m => `<div class="lc-metric"><div class="lc-metric-lb">${m.label}</div><div class="lc-metric-v" data-no-i18n>${esc(m.value)}</div><div class="lc-metric-x">${m.extra}</div></div>`).join('')}</div>
-      </section>
-    </div>`;
+    return V.studentTabsHtml(X, idx, I.sub, { P: 'lc', msg: { mode: 'demo', text: S.messages[key] || '', key } });
   }
 
-  function recapHtml(X) {
-    return `<section class="lc-card">
-      <h3>Class summary</h3>
-      <p class="lc-lead" data-no-i18n>${esc(X.recap.summary)}</p>
-      <ol class="lc-topics">${X.recap.topics.map((t, i) => `<li class="lc-topic"><span class="lc-topic-n" aria-hidden="true">${i + 1}</span><div><h4 data-no-i18n>${esc(t.title)}</h4><ul>${t.bullets.map(b => `<li data-no-i18n>${esc(b)}</li>`).join('')}</ul></div></li>`).join('')}</ol>
-    </section>`;
-  }
-
-  function progressHtml(X, st) {
-    const p = st.progress; const L = LABELS[X.kind];
-    const tot = p.speakingMin + p.teacherMin; const sp = Math.round(p.speakingMin / tot * 100);
-    return `<div class="lc-metrics">${metricCards(X, st).map(m => `<div class="lc-metric"><div class="lc-metric-lb">${m.label}</div><div class="lc-metric-v" data-no-i18n>${esc(m.value)}</div><div class="lc-metric-x">${m.extra}</div></div>`).join('')}</div>
-      <section class="lc-card">
-        <h3>Speaking time</h3>
-        <div class="lc-split" role="img" aria-label="${esc(`${tr('Student')} ${sp}% · ${tr('Teacher')} ${100 - sp}%`)}">
-          <span class="lc-split-a" style="width:${sp}%"></span><span class="lc-split-b" style="width:${100 - sp}%"></span>
-        </div>
-        <div class="lc-split-legend"><span><i class="lc-dot a"></i> <span data-no-i18n>${esc(st.name.split(' ')[0])}</span> · <b data-no-i18n>${String(p.speakingMin)} min (${sp}%)</b></span>
-          <span><i class="lc-dot b"></i> <span>Teacher</span> · <b data-no-i18n>${String(p.teacherMin)} min (${100 - sp}%)</b></span></div>
-      </section>
-      <section class="lc-card">
-        <h3>${L.tracker}</h3>
-        <div class="lc-table-wrap"><table class="lc-table">
-          <thead><tr><th scope="col">Concept</th><th scope="col">Difficulty</th><th scope="col">Used</th><th scope="col">Updated</th><th scope="col">Mastery</th></tr></thead>
-          <tbody>${st.tracker.map(r => `<tr><td data-no-i18n>${esc(r.concept)}</td><td><span class="lc-chip lc-diff-${esc(String(r.difficulty).toLowerCase().replace(/[^a-záéíóú]/g, ''))}" data-no-i18n>${esc(r.difficulty)}</span></td><td data-no-i18n>${r.used}×</td><td data-no-i18n>${esc(r.updated)}</td>
-            <td><div class="lc-mastery"><div class="lc-progress"><span style="width:${r.mastery}%" class="${r.mastery >= 80 ? 'good' : r.mastery >= 60 ? 'mid' : 'low'}"></span></div><b data-no-i18n>${r.mastery}%</b></div></td></tr>`).join('')}</tbody>
-        </table></div>
-      </section>`;
-  }
-
-  function feedbackHtml(X, st) {
-    const L = LABELS[X.kind];
-    return `<section class="lc-card">
-        <h3>${L.feedbackA}</h3>
-        <div class="lc-pron">${st.pron.map(p => `<div class="lc-pron-card">
-          <div class="lc-ring" style="--p:${p.score}" role="img" aria-label="${p.score}%"><span data-no-i18n>${p.score}%</span></div>
-          <div><div class="lc-pron-item" data-no-i18n>${esc(p.item)}</div><div class="lc-pron-tip" data-no-i18n>${esc(p.tip)}</div></div></div>`).join('')}</div>
-      </section>
-      <div class="lc-grid-2">
-        <section class="lc-card lc-good">
-          <h3>✅ <span>${X.kind === 'language' ? 'Did well' : 'Used correctly'}</span></h3>
-          ${st.didWell.map(d => `<div class="lc-fb"><div class="lc-fb-quote" data-no-i18n>“${esc(d.text)}”</div><div class="lc-fb-note" data-no-i18n>${esc(d.note)}</div></div>`).join('')}
-        </section>
-        <section class="lc-card lc-improve">
-          <h3>🎯 <span>Can improve</span></h3>
-          ${st.improve.map(d => `<div class="lc-fb"><div class="lc-fix"><span class="lc-wrong" data-no-i18n>${esc(d.original)}</span> <span aria-hidden="true">→</span><span class="lc-sr">corrected:</span> <span class="lc-right" data-no-i18n>${esc(d.corrected)}</span></div><div class="lc-fb-note" data-no-i18n>${esc(d.explanation)}</div></div>`).join('')}
-        </section>
-      </div>
-      <p class="lc-fine"><span>${L.feedbackB}</span>: <span>based on the student’s own microphone track.</span></p>`;
-  }
-
-  function vocabHtml(X, st) {
-    const C = LABELS[X.kind].vocabCols;
-    return `<section class="lc-card">
-      <h3>${LABELS[X.kind].vocab}</h3>
-      <div class="lc-vocab">${st.vocab.map(v => `<article class="lc-vocab-card">
-        <header><b class="lc-vocab-word" data-no-i18n>${esc(v.word)}</b> <span class="lc-chip" title="${esc(tr(C[1]))}" data-no-i18n>${esc(v.pos)}</span> <span class="lc-chip lc-chip-lvl" title="${esc(tr(C[2]))}" data-no-i18n>${esc(v.level)}</span></header>
-        <dl>
-          <dt>${C[3]}</dt><dd data-no-i18n>${esc(v.def)}</dd>
-          <dt>${C[4]}</dt><dd class="lc-quote" data-no-i18n>“${esc(v.quote)}”</dd>
-          <dt>${C[5]}</dt><dd data-no-i18n>${esc(v.example)}</dd>
-        </dl></article>`).join('')}</div>
-    </section>`;
-  }
-
-  const RATING = { strength: 'Strength', developing: 'Developing', focus: 'Focus' };
-  function teacherInsightsHtml(X) {
-    const T = X.teacher;
-    const live = S.insights.live && S.insights.liveSample === X.key ? S.insights.live : null;
-    const refl = S.reflections[X.key] || (S.reflections[X.key] = { ...T.form, reflection: '' });
-    const pva = T.planVsActual;
-    return `<div class="lc-metrics">${T.metrics.map(m => `<div class="lc-metric"><div class="lc-metric-lb">${m.label}</div><div class="lc-metric-v" data-no-i18n>${esc(m.value)}</div><div class="lc-metric-x" data-no-i18n>${esc(m.sub)}</div></div>`).join('')}</div>
-      ${live && live.secs > 5 ? `<p class="lc-fine lc-live-note"><span>From your demo session:</span> <span>Teacher</span> <b data-no-i18n>${mmss(live.talk.teacher)}</b> · <span>Students</span> <b data-no-i18n>${mmss(live.talk.students)}</b> · <span>Recorded</span> <b data-no-i18n>${mmss(live.recSecs)}</b></p>` : ''}
-      <div class="lc-hfa">
-        ${T.highlights.map(h => `<section class="lc-card lc-hfa-card hl"><div class="lc-hfa-k">⭐ <span>Highlight</span></div><h4 data-no-i18n>${esc(h.title)}</h4><p data-no-i18n>${esc(h.text)}</p></section>`).join('')}
-        <section class="lc-card lc-hfa-card fo"><div class="lc-hfa-k">🎯 <span>Focus</span></div><h4 data-no-i18n>${esc(T.focus.title)}</h4><p data-no-i18n>${esc(T.focus.text)}</p></section>
-        <section class="lc-card lc-hfa-card ac"><div class="lc-hfa-k">🛠️ <span>Action</span></div><h4 data-no-i18n>${esc(T.action.title)}</h4><p data-no-i18n>${esc(T.action.text)}</p></section>
-      </div>
-      <section class="lc-card">
-        <h3>Plan vs what happened</h3>
-        <div class="lc-table-wrap"><table class="lc-table">
-          <thead><tr><th scope="col">Activity</th><th scope="col">Planned</th><th scope="col">Actual</th><th scope="col">Difference</th><th scope="col">Note</th></tr></thead>
-          <tbody>${pva.map(r => { const d = r.actual - r.planned; return `<tr><td data-no-i18n>${esc(r.section)}</td><td data-no-i18n>${r.planned} min</td><td data-no-i18n>${r.actual} min</td><td><span class="lc-diff ${d > 0 ? 'over' : d < 0 ? 'under' : ''}" data-no-i18n>${d > 0 ? '+' : ''}${d} min</span></td><td data-no-i18n>${esc(r.note)}</td></tr>`; }).join('')}</tbody>
-        </table></div>
-      </section>
-      <section class="lc-card">
-        <h3>Classroom observation · 13 areas</h3>
-        <p class="lc-hint">Evidence → Impact → Next step. Evidence, not labels: minutes, quotes and counts from the class.</p>
-        <div class="lc-areas">${T.areas.map((a, i) => `<details class="lc-area r-${a.rating}" ${a.rating === 'focus' ? 'open' : ''}>
-          <summary><span class="lc-area-n" data-no-i18n>${i + 1}</span> <span class="lc-area-name">${a.area}</span> <span class="lc-chip lc-rating ${a.rating}">${RATING[a.rating]}</span></summary>
-          <div class="lc-eins">
-            <div><div class="lc-eins-k">Evidence</div><p data-no-i18n>${esc(a.evidence)}</p></div>
-            <div><div class="lc-eins-k">Impact</div><p data-no-i18n>${esc(a.impact)}</p></div>
-            <div><div class="lc-eins-k">Next step</div><p data-no-i18n>${esc(a.next)}</p></div>
-          </div></details>`).join('')}</div>
-      </section>
-      <section class="lc-card lc-form">
-        <h3>Observation summary</h3>
-        <div class="lc-field"><label for="lc-f-evidence">Evidence I noticed</label><textarea id="lc-f-evidence" data-refl="evidence" rows="3" maxlength="2000">${esc(refl.evidence)}</textarea></div>
-        <div class="lc-field"><label for="lc-f-worked">What worked well</label><textarea id="lc-f-worked" data-refl="worked" rows="2" maxlength="2000">${esc(refl.worked)}</textarea></div>
-        <div class="lc-field"><label for="lc-f-priority">Priority area</label><textarea id="lc-f-priority" data-refl="priority" rows="2" maxlength="2000">${esc(refl.priority)}</textarea></div>
-        <div class="lc-field"><label for="lc-f-next">Suggested next step</label><textarea id="lc-f-next" data-refl="next" rows="2" maxlength="2000">${esc(refl.next)}</textarea></div>
-        <div class="lc-field"><label for="lc-f-reflection">Teacher reflection</label><textarea id="lc-f-reflection" data-refl="reflection" rows="4" maxlength="8000" placeholder="What would you keep, change or try next time?">${esc(refl.reflection)}</textarea></div>
-        <button type="button" class="lc-btn lc-primary" data-lc="save-reflection" id="lc-save-reflection">Save reflection</button>
-        <p class="lc-fine">Private: only you and your institution's admins can see teacher insights.</p>
-      </section>`;
-  }
-
-  function draftMessage(X, st) {
-    const first = st.name.split(' ')[0];
-    const good = st.didWell[0]; const fix = st.improve[0];
-    const lc = s => s.charAt(0).toLowerCase() + s.slice(1);
-    if (X.lang === 'es') return `¡Hola ${first}! Muy buen trabajo hoy: ${lc(good.note)} Para la próxima: ${fix.explanation} Probá explicarlo así: “${fix.corrected}”. ¡Nos vemos en la próxima clase!`;
-    return `Hi ${first}! Great work today — ${lc(good.note)} One thing to practise: ${fix.explanation} Try saying “${fix.corrected}” a few times this week. See you next class!`;
+  function demoReflection(X) { return S.reflections[X.key] || (S.reflections[X.key] = { ...X.teacher.form, reflection: '' }); }
+  function teacherInsightsHtml(X, live) {
+    const refl = demoReflection(X);
+    let date = ''; try { date = new Date().toLocaleDateString(typeof uiLocale === 'function' ? uiLocale() : undefined, { day: 'numeric', month: 'short', year: 'numeric' }); } catch (e) { /* ignore */ }
+    return V.teacherReportHtml(X, {
+      P: 'lc',
+      header: { teacher: (currentUser && currentUser.name) || '', group: X.subject, date,
+        students: X.participants, duration: live ? Math.max(1, Math.round(live.secs / 60)) : X.durationMin },
+      live: live && live.secs > 5 ? `<span>From your demo session:</span> <span>Teacher</span> <b data-no-i18n>${mmss(live.talk.teacher)}</b> · <span>Students</span> <b data-no-i18n>${mmss(live.talk.students)}</b> · <span>Recorded</span> <b data-no-i18n>${mmss(live.recSecs)}</b>` : '',
+      fields: { editable: true, values: refl },
+      reflection: { mode: 'edit', text: refl.reflection, demo: true },
+    });
   }
 
   // ════════════════════════════════════════════════════════════════════════════════════════
@@ -1639,7 +1229,8 @@ Cierre y ticket de salida (5 min)
     S.planning = p; S.sessionId = (sess && sess.id) || null;
     // role in THIS class (calendar row): a teacher enrolled in someone else's group joins as a student
     S.sessionRole = sess && (sess.role === 'teacher' || sess.role === 'student') ? sess.role : null;
-    S.sampleKey = pickSampleKey(p || { title: (sess && sess.title) || '', params: {} });
+    S.sessionGroup = (sess && sess.group) || '';
+    S.sampleKey = pickSampleKey(p || { title: [(sess && sess.title) || '', S.sessionGroup].join(' '), params: {} });
     S.sessionTitle = (sess && sess.title) || 'Live class';
     if (typeof showPanel === 'function') showPanel('live');
     goLobby();
@@ -1716,19 +1307,20 @@ Cierre y ticket de salida (5 min)
       case 'sec-next': if (R) secNext(); break;
       case 'lower-hand': if (R && R.provider._setHand) R.provider._setHand(el.dataset.id, false); break;
       case 'mute-p': if (R && R.provider.muteRemote) R.provider.muteRemote(el.dataset.id); break;
-      case 'skip-processing': clearViewTimers(); S.view = 'insights'; render(); break;
+      case 'skip-processing': clearViewTimers(); finishProcessing(); break;
+      case 'open-saved': if (S.insights.saved) openSavedInsights(S.insights.saved.id); break;
       case 'sample': S.sampleKey = el.dataset.k === 'chemistry' ? 'chemistry' : 'language'; S.insights.student = 0; render(); break;
       case 'ins-tab': S.insights.tab = el.dataset.k === 'teacher' ? 'teacher' : 'student'; rerenderInsights(`#lc-ins-${S.insights.tab}`); break;
-      case 'ins-sub': S.insights.sub = SUBTABS.some(([k]) => k === el.dataset.k) ? el.dataset.k : 'overview'; rerenderInsights(`#lc-sub-${S.insights.sub}`); break;
+      case 'ins-sub': S.insights.sub = SUBKEYS.includes(el.dataset.k) ? el.dataset.k : 'overview'; rerenderInsights(`#lc-sub-${S.insights.sub}`); break;
       case 'pick-student': S.insights.student = i || 0; rerenderInsights(`.lc-person-chip[data-i="${i || 0}"]`); break;
       case 'draft-msg': {
-        const X = SAMPLES[S.sampleKey]; const st = X.students[S.insights.student] || X.students[0];
-        const ta = document.getElementById('lc-teacher-msg'); if (!ta) break;
-        ta.value = draftMessage(X, st); S.messages[ta.dataset.key] = ta.value; ta.focus();
+        const X = V.sampleModel(S.sampleKey); const st = X.students[S.insights.student] || X.students[0];
+        const ta = root().querySelector('#lc-teacher-msg'); if (!ta) break;
+        ta.value = V.draftMessage(X, st); S.messages[ta.dataset.key] = ta.value; ta.focus();
         toast('Draft ready — edit it before sending.', 'ok'); break;
       }
       case 'send-msg': {
-        const ta = document.getElementById('lc-teacher-msg');
+        const ta = root().querySelector('#lc-teacher-msg');
         if (!ta || !ta.value.trim()) { toast('Write a message first.', 'err'); break; }
         toast('Demo: the message was not sent. In the real classroom the student sees it with their insights.', 'ok'); break;
       }
@@ -1753,7 +1345,7 @@ Cierre y ticket de salida (5 min)
       else if (t.id === 'lc-g-email') { L.guardian.email = t.value; syncConsentUi(); }
     }
     if (t.id === 'lc-teacher-msg') S.messages[t.dataset.key] = t.value;
-    if (t.dataset.refl) { const X = SAMPLES[S.sampleKey]; (S.reflections[X.key] || (S.reflections[X.key] = { ...X.teacher.form, reflection: '' }))[t.dataset.refl] = t.value; }
+    if (t.dataset.refl) demoReflection(V.sampleModel(S.sampleKey))[t.dataset.refl] = t.value;
   }
   function onChange(e) {
     const t = e.target; if (!root()?.contains(t)) return;
@@ -1827,7 +1419,6 @@ Cierre y ticket de salida (5 min)
   // ════════════════════════════════════════════════════════════════════════════════════════
   if (typeof I18N_ES === 'object' && I18N_ES) Object.assign(I18N_ES, {
     'Live class': 'Aula en vivo', '▶ Start live class': '▶ Iniciar clase en vivo', 'Demo': 'Demo',
-    [DEMO_BANNER]: 'Datos de demostración: los insights reales se activan cuando se conecte el aula en vivo',
     'Teach online from TeroClass: video, your class plan beside you, and learning insights after class.': 'Dá clase online desde TeroClass: video, tu planificación al lado y aprendizajes de cada estudiante después de la clase.',
     'Start a live class': 'Iniciar una clase en vivo', 'Class plan': 'Planificación', 'Sample plan (no saved class)': 'Plan de ejemplo (sin clase guardada)',
     'Tip: save a class first and it will appear here with its activity timers.': 'Consejo: guardá una clase y va a aparecer acá con los temporizadores de cada actividad.',
@@ -1901,40 +1492,12 @@ Cierre y ticket de salida (5 min)
     'Nothing was recorded in this demo — the insights below use sample data.': 'En esta demo no se grabó nada: los insights usan datos de ejemplo.',
     "In the real classroom this takes a few minutes after class; you'll be notified when the insights are ready.": 'En el aula real esto lleva unos minutos después de la clase; te avisamos cuando los insights estén listos.',
     'Skip': 'Saltar',
-    // insights
+    // insights (labels of the shared view are in public/insights-view.js)
     'Class insights': 'Insights de la clase', 'Sample': 'Ejemplo', 'Sample:': 'Ejemplo:', 'Language class (EN)': 'Clase de idioma (EN)', 'Chemistry (ES)': 'Química (ES)',
-    'Student insights': 'Insights del estudiante', 'Teacher insights': 'Insights del docente', 'Choose a student': 'Elegí un estudiante',
-    'Overview': 'Resumen', 'Recap': 'Repaso', 'Progress': 'Progreso', 'Feedback': 'Devolución', 'Vocabulary': 'Vocabulario', 'Key terms': 'Términos clave',
-    'Message to': 'Mensaje para', 'Message to the student': 'Mensaje para el estudiante', 'PH:Write a personal note for this student…': 'Escribí una nota personal para este estudiante…',
-    '✨ Draft with assistant': '✨ Redactar con el asistente', 'Send to student': 'Enviar al estudiante', 'Demo: messages are not sent.': 'Demo: los mensajes no se envían.',
-    'Highlight': 'Destacado', 'At a glance': 'De un vistazo', 'of class talk': 'del habla en clase', 'from': 'desde', 'no change': 'sin cambios',
-    'Speaking time': 'Tiempo de habla', 'Vocabulary size': 'Vocabulario activo', 'Speaking level (CEFR)': 'Nivel oral (MCER)', 'Words per minute': 'Palabras por minuto', 'Grammar score': 'Puntaje de gramática',
-    'Subject terms used': 'Términos de la materia usados', 'Explanation level': 'Nivel de explicación', 'Questions asked': 'Preguntas hechas', 'Concept accuracy': 'Precisión conceptual',
-    'Class summary': 'Resumen de la clase', 'Grammar tracker': 'Seguimiento de gramática', 'Concept tracker': 'Seguimiento de conceptos',
-    'Concept': 'Concepto', 'Difficulty': 'Dificultad', 'Used': 'Usado', 'Updated': 'Actualizado', 'Mastery': 'Dominio',
-    'Pronunciation': 'Pronunciación', 'Grammar': 'Gramática', 'Concept use': 'Uso de conceptos', 'Terms and reasoning': 'Términos y razonamiento',
-    'Did well': 'Lo hizo bien', 'Used correctly': 'Usado correctamente', 'Can improve': 'Puede mejorar', 'corrected:': 'corregido:',
-    'based on the student’s own microphone track.': 'basado en la pista del micrófono del propio estudiante.',
-    'Word': 'Palabra', 'Part of speech': 'Categoría gramatical', 'CEFR': 'MCER', 'Definition': 'Definición', 'From the lesson': 'En la clase', 'Example': 'Ejemplo',
-    'Term': 'Término', 'Type': 'Tipo', 'Level': 'Nivel',
-    'Teacher talk time': 'Habla del docente', 'Student talk time': 'Habla de estudiantes', 'Average wait time': 'Tiempo de espera promedio',
-    'Students who spoke': 'Estudiantes que hablaron', 'Longest teacher turn': 'Intervención docente más larga',
-    'From your demo session:': 'De tu sesión de demo:', 'Focus': 'Foco', 'Action': 'Acción',
-    'Plan vs what happened': 'Plan vs. lo que pasó', 'Activity': 'Actividad', 'Actual': 'Real', 'Difference': 'Diferencia', 'Note': 'Nota',
-    'Classroom observation · 13 areas': 'Observación de clase · 13 áreas',
-    'Evidence → Impact → Next step. Evidence, not labels: minutes, quotes and counts from the class.': 'Evidencia → Impacto → Próximo paso. Evidencia, no etiquetas: minutos, citas y conteos de la clase.',
-    'Strength': 'Fortaleza', 'Developing': 'En desarrollo', 'Evidence': 'Evidencia', 'Impact': 'Impacto', 'Next step': 'Próximo paso',
-    'Purpose & Alignment': 'Propósito y alineación', 'Rapport': 'Vínculo', 'STT & Participation': 'Habla estudiantil y participación',
-    'Instructions & Task Setup': 'Consignas y armado de tareas', 'Scaffolding': 'Andamiaje', 'Language Input': 'Input de lengua',
-    'Monitoring & Feedback': 'Monitoreo y devolución', 'Error Correction': 'Corrección de errores', 'Questions & Interaction': 'Preguntas e interacción',
-    'Pacing & Transitions': 'Ritmo y transiciones', 'Materials & Tech': 'Materiales y tecnología', 'Personalization': 'Personalización', 'Evidence of Learning': 'Evidencia de aprendizaje',
-    'Observation summary': 'Resumen de la observación', 'Evidence I noticed': 'Evidencia que noté', 'What worked well': 'Qué funcionó bien',
-    'Priority area': 'Área prioritaria', 'Suggested next step': 'Próximo paso sugerido', 'Teacher reflection': 'Reflexión docente',
-    'PH:What would you keep, change or try next time?': '¿Qué mantendrías, cambiarías o probarías la próxima vez?', 'Save reflection': 'Guardar reflexión',
-    "Private: only you and your institution's admins can see teacher insights.": 'Privado: los insights docentes solo los ven vos y los admins de tu institución.',
     'Draft ready — edit it before sending.': 'Borrador listo: editalo antes de enviarlo.', 'Write a message first.': 'Primero escribí un mensaje.',
     'Demo: the message was not sent. In the real classroom the student sees it with their insights.': 'Demo: el mensaje no se envió. En el aula real el estudiante lo ve junto con sus insights.',
     'Reflection saved in this browser tab (demo).': 'Reflexión guardada en esta pestaña (demo).',
+    'Demo insights saved for this class.': 'Se guardaron insights de demo para esta clase.', 'Open in Insights': 'Abrir en Insights',
   });
 
   init();

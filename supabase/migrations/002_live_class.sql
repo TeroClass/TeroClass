@@ -16,6 +16,25 @@
 --   - Consentimientos: solo se agregan (append-only); revocar = revoke_consent().
 --   - Audio crudo: retention_until = 30 días; un job (service role) lo borra del storage
 --     y marca deleted_at (ver recordings_due_for_deletion()).
+--
+-- INSIGHTS (cambio 2026-10): student_insights y teacher_insights ahora viven en 001_base.sql, colgadas de la
+--   CLASE DEL CALENDARIO (class_sessions), con sus funciones y reglas de privacidad (sin acceso directo).
+--   Hoy se llenan con datos de demostración. Este archivo solo las conecta con la videollamada:
+--     · live_sessions.class_session_id → la clase del calendario que se dicta en esta llamada;
+--     · student_insights.participant_id → el participante de la llamada (FK a session_participants).
+--   El pipeline real (LiveKit + Azure Speech + IA, con service role) escribirá filas con is_demo = false en
+--   esas tablas, para la class_session_id de la llamada. Es un superconjunto seguro: se puede ejecutar
+--   (y re-ejecutar) después del 001 nuevo sin cambiar nada de lo que ya existe.
+
+-- Requiere el 001_base.sql con insights de clase (class_sessions + student_insights por inscripción).
+do $$
+begin
+  if to_regclass('public.class_sessions') is null or not exists (
+       select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'student_insights' and column_name = 'enrollment_id') then
+    raise exception 'Primero ejecutá la versión actual de 001_base.sql (insights de clase)';
+  end if;
+end $$;
 
 -- ========== TABLAS ==========
 create table if not exists public.live_sessions (
@@ -38,6 +57,9 @@ create table if not exists public.live_sessions (
 );
 create index if not exists live_sessions_teacher_idx on public.live_sessions (teacher_id);
 create index if not exists live_sessions_inst_idx on public.live_sessions (institution_id);
+-- La clase del calendario (001_base.sql) que se dicta en esta llamada: sus insights son los de esa clase.
+alter table public.live_sessions add column if not exists class_session_id uuid references public.class_sessions(id) on delete set null;
+create index if not exists live_sessions_class_idx on public.live_sessions (class_session_id);
 
 create table if not exists public.session_participants (
   id uuid primary key default gen_random_uuid(),
@@ -106,28 +128,12 @@ create table if not exists public.transcript_segments (
 );
 create index if not exists transcript_segments_session_idx on public.transcript_segments (session_id, start_ms);
 
-create table if not exists public.student_insights (
-  id uuid primary key default gen_random_uuid(),
-  session_id uuid not null references public.live_sessions(id) on delete cascade,
-  participant_id uuid not null references public.session_participants(id) on delete cascade,
-  data jsonb not null default '{}'::jsonb,        -- recap, progress, feedback, vocabulary (ver docs)
-  teacher_message text default '' check (length(teacher_message) <= 4000),
-  published_at timestamptz,                       -- el alumno lo ve solo cuando se publica
-  model text default '',
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique (session_id, participant_id)
-);
-
-create table if not exists public.teacher_insights (
-  id uuid primary key default gen_random_uuid(),
-  session_id uuid not null unique references public.live_sessions(id) on delete cascade,
-  data jsonb not null default '{}'::jsonb,        -- 13 áreas TEC: evidencia → impacto → próximo paso
-  teacher_reflection text default '' check (length(teacher_reflection) <= 8000),
-  model text default '',
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
+-- Insights de cada estudiante: la tabla está en 001_base.sql (por clase del calendario e inscripción).
+-- Acá solo se la vincula con el participante de la llamada.
+alter table public.student_insights drop constraint if exists student_insights_participant_fk;
+alter table public.student_insights add constraint student_insights_participant_fk
+  foreign key (participant_id) references public.session_participants(id) on delete set null;
+create index if not exists student_insights_participant_idx on public.student_insights (participant_id);
 
 -- ========== FUNCIONES DE AYUDA (security definer: evitan recursión entre políticas) ==========
 create or replace function public.owns_session(p_session uuid) returns boolean
@@ -166,12 +172,7 @@ grant execute on function public.in_session(uuid) to authenticated;
 drop trigger if exists live_sessions_touch on public.live_sessions;
 create trigger live_sessions_touch before update on public.live_sessions
   for each row execute function public.touch_updated_at();
-drop trigger if exists student_insights_touch on public.student_insights;
-create trigger student_insights_touch before update on public.student_insights
-  for each row execute function public.touch_updated_at();
-drop trigger if exists teacher_insights_touch on public.teacher_insights;
-create trigger teacher_insights_touch before update on public.teacher_insights
-  for each row execute function public.touch_updated_at();
+-- (student_insights / teacher_insights: sus triggers están en 001_base.sql)
 
 -- La institución de la sesión es siempre la del docente (como plannings) y la planificación
 -- vinculada tiene que ser suya.
@@ -223,8 +224,6 @@ alter table public.session_participants enable row level security;
 alter table public.consents             enable row level security;
 alter table public.recordings           enable row level security;
 alter table public.transcript_segments  enable row level security;
-alter table public.student_insights     enable row level security;
-alter table public.teacher_insights     enable row level security;
 
 -- Sesiones
 drop policy if exists ls_select on public.live_sessions;
@@ -295,26 +294,14 @@ create policy ts_select on public.transcript_segments for select
          or public.is_self_or_guardian(participant_id));
 revoke insert, update, delete on public.transcript_segments from anon, authenticated;
 
--- Insights del alumno: el docente edita el mensaje y publica; el alumno/tutor ve lo publicado.
+-- Insights: sin acceso directo (políticas de una versión anterior de este archivo, si existían, se quitan).
+-- Se leen y escriben con las funciones de 001_base.sql: get_session_insights, my_insights, my_insight,
+-- save_teacher_reflection, save_insight_message (el pipeline real escribe con service role).
 drop policy if exists si_select on public.student_insights;
-create policy si_select on public.student_insights for select
-  using (public.owns_session(session_id) or public.admin_of_session(session_id)
-         or (published_at is not null and public.is_self_or_guardian(participant_id)));
 drop policy if exists si_update on public.student_insights;
-create policy si_update on public.student_insights for update
-  using (public.owns_session(session_id)) with check (public.owns_session(session_id));
-revoke insert, update, delete on public.student_insights from anon, authenticated;
-grant update (teacher_message, published_at) on public.student_insights to authenticated;
-
--- Insights del docente: privados del docente (y admins de su institución). Solo edita su reflexión.
 drop policy if exists ti_select on public.teacher_insights;
-create policy ti_select on public.teacher_insights for select
-  using (public.owns_session(session_id) or public.admin_of_session(session_id));
 drop policy if exists ti_update on public.teacher_insights;
-create policy ti_update on public.teacher_insights for update
-  using (public.owns_session(session_id)) with check (public.owns_session(session_id));
-revoke insert, update, delete on public.teacher_insights from anon, authenticated;
-grant update (teacher_reflection) on public.teacher_insights to authenticated;
+revoke all on public.student_insights, public.teacher_insights from anon, authenticated;
 
 revoke all on public.live_sessions, public.session_participants, public.consents, public.recordings,
   public.transcript_segments, public.student_insights, public.teacher_insights from anon;

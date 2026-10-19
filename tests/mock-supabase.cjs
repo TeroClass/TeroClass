@@ -7,6 +7,8 @@
 // update_ai_prices (+ ai_price_input / ai_price_output in the platform settings).
 // Groups + students + calendar (tests/mock-students.cjs): list_groups, import_students, my_calendar, student_view,
 // claim_enrollments, calendar tokens/feed…; magic link sign-in (POST /auth/v1/otp; via:"student_link" → role student).
+// Class insights (tests/mock-insights.cjs): generate_demo_insights, list_insight_sessions, get_session_insights,
+// save_teacher_reflection, save_insight_message, my_insights, my_insight (+ insights in student_view).
 const fs = require('fs');
 const path = require('path');
 
@@ -17,7 +19,10 @@ const RAW_HTML = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
 const asset = f => fs.readFileSync(path.join(ROOT, 'public', f), 'utf8');
 const HTML = RAW_HTML
   .replace('<link rel="stylesheet" href="/live-class.css">', () => `<style>${asset('live-class.css')}</style>`)
+  .replace('<link rel="stylesheet" href="/insights-view.css">', () => `<style>${asset('insights-view.css')}</style>`)
+  .replace('<script src="/insights-view.js"></script>', () => `<script>${asset('insights-view.js')}</script>`)
   .replace('<script src="/live-class.js"></script>', () => `<script>${asset('live-class.js')}</script>`)
+  .replace('<script src="/insights-panel.js"></script>', () => `<script>${asset('insights-panel.js')}</script>`)
   .replace('<link rel="stylesheet" href="/groups-calendar.css">', () => `<style>${asset('groups-calendar.css')}</style>`)
   .replace('<script src="/csv-import.js"></script>', () => `<script>${asset('csv-import.js')}</script>`)
   .replace('<script src="/groups-calendar.js"></script>', () => `<script>${asset('groups-calendar.js')}</script>`);
@@ -28,7 +33,8 @@ const SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
 const SUPERADMIN_EMAIL = 'owner@teroclass.test';
 
 const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [],
-  class_groups: [], student_enrollments: [], group_members: [], session_series: [], class_sessions: [], session_invitees: [], calendar_tokens: [] };
+  class_groups: [], student_enrollments: [], group_members: [], session_series: [], class_sessions: [], session_invitees: [], calendar_tokens: [],
+  teacher_insights: [], student_insights: [] };
 const calls = { rpc: [], inserts: {}, otp: [] };
 // billing state (same rules as the SQL functions, simplified): accounts[rootId] = {seats, monthly_tokens, extra}; usage[rootId] = used this month
 const BILL_DEFAULTS = () => ({ settings: { pack_tokens: 2000000, pack_price: 11.99, currency: 'USD', personal_monthly_tokens: 200000, default_seats: 10, default_monthly_tokens: 2000000, ai_price_input: 2.5, ai_price_output: 10 }, accounts: {}, usage: {}, requests: [], log: [] });
@@ -50,7 +56,8 @@ function insightsData(body) {
     content: { classes, subjects: [{ name: 'Math', count: 9 * f }, { name: 'History', count: 5 * f }, { name: 'English', count: 3 * f }], languages: [{ name: 'Spanish', count: 12 * f }, { name: 'English', count: 4 * f }],
       age_bands: [{ name: 'teen', count: 8 * f }, { name: 'primary', count: 5 * f }, { name: 'adult', count: 2 * f }], levels: [{ name: 'Secondary', count: 9 * f }],
       bars: [{ key: 'gamification', avg: 42.5, count: 10 }, { key: 'projectbased', avg: 61, count: 10 }, { key: 'c_outdoor_x1', avg: 30, count: 4 }], playbook_institutions: 1, institutions: roots.length || 1 },
-    students: { total: 40 * f, linked: 25 * f, active: 18 * f, groups: 3 * f, sessions: 24 * f },
+    students: { total: 40 * f, linked: 25 * f, active: 18 * f, groups: 3 * f, sessions: 24 * f,
+      insight_sessions: db.teacher_insights.filter(t => { const s = db.class_sessions.find(x => x.id === t.session_id); return s && (!unit || descendantsOf(unit.id).concat(unit.id).includes(s.institution_id)); }).length },
     costs: { recorded_ever: true, requests: 30 * f, prompt_tokens: 1200000 * f, completion_tokens: 400000 * f, total_tokens: 1600000 * f, classes: 12 * f, price_input: bill.settings.ai_price_input, price_output: bill.settings.ai_price_output,
       usd: Math.round((1.2 * f * bill.settings.ai_price_input + 0.4 * f * bill.settings.ai_price_output) * 10000) / 10000,
       by_institution: roots.slice(0, 5).map((i, n) => ({ id: i.id, name: i.name, tokens: (5 - n) * 200000 * f, classes: (5 - n) * f, usd: (5 - n) * f })) } };
@@ -245,6 +252,7 @@ async function handleSupabase(route) {
       const pr = db.profiles.find(x => x.id === body.p_user); if (!pr) return json(400, { message: 'invalid' });
       pr.institution_id = null; pr.role = 'teacher'; return json(200, null);
     }
+    { const r = classInsights.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = students.handle(fn, body, me); if (r) return json(r.status, r.data); }
     if (fn === 'get_document_content') {
       const d = db.institution_documents.find(x => x.id === body.p_id); return d ? json(200, d.content) : json(400, { message: 'not found' });
@@ -279,5 +287,7 @@ function inviteMember(inst, email, role) {
   db.invitations = db.invitations.filter(i => !(i.email === email && i.institution_id === inst && !i.accepted_at));
   db.invitations.push({ id: uid(), email, institution_id: inst, role, created_at: new Date().toISOString() }); return 'invited';
 }
-const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0) });
-module.exports = { students, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+const classInsights = require('./mock-insights.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
+const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0),
+  insightSummaries: (eids, me) => classInsights.summaries(eids, 5, me) });
+module.exports = { students, classInsights, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

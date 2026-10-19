@@ -1635,7 +1635,7 @@ end $$;
 revoke all on function public.platform_billing_overview() from public, anon;
 grant execute on function public.platform_billing_overview() to authenticated;
 
--- ========== INSIGHTS DE LA PLATAFORMA (solo súper admin) ==========
+-- ========== MÉTRICAS DE LA PLATAFORMA (solo súper admin; antes "Insights": la función conserva el nombre platform_insights) ==========
 -- ai_events: sin acceso directo para nadie (lo escriben consume_ai_quota / finish_ai_event).
 alter table public.ai_events enable row level security;
 revoke all on public.ai_events from anon, authenticated;
@@ -1783,7 +1783,10 @@ begin
                     or exists (select 1 from public.session_invitees si where si.session_id = s.id and si.enrollment_id = e.id)))),
         'groups', (select count(*) from public.class_groups g where v_units is null or g.institution_id = any(v_units)),
         'sessions', (select count(*) from public.class_sessions s where s.status = 'scheduled' and s.starts_at >= v_since
-                       and s.starts_at <= now() and (v_units is null or s.institution_id = any(v_units))))
+                       and s.starts_at <= now() and (v_units is null or s.institution_id = any(v_units))),
+        -- clases con insights (informe del docente) en el período: solo el total
+        'insight_sessions', (select count(*) from public.teacher_insights ti join public.class_sessions s on s.id = ti.session_id
+                              where s.starts_at >= v_since and (v_units is null or s.institution_id = any(v_units))))
       from public.student_enrollments e where v_units is null or e.institution_id = any(v_units)),
     'costs', (select json_build_object(
         'recorded_ever', exists (select 1 from public.ai_request_log),
@@ -1822,7 +1825,7 @@ grant execute on function public.platform_insights(integer, uuid, boolean) to au
 --   · Un estudiante ve sus grupos, sus clases, el nombre del docente y sus propios datos. Nunca los emails
 --     de sus compañeros (solo cuántos son).
 --   · Los estudiantes no tienen unidad (profiles.institution_id null) ni ocupan asientos.
---   · Nada de esto se anota en ai_events; Insights solo recibe totales.
+--   · Nada de esto se anota en ai_events; Métricas (platform_insights) solo recibe totales.
 -- MENORES: muchos estudiantes son menores. Hoy no se graba nada, así que no hay flujo de consentimiento.
 --   TODO(consent): antes de activar la grabación, pedir el consentimiento del adulto responsable (o usar
 --   institutions.consent_managed_by_institution cuando la institución lo gestiona por su cuenta).
@@ -3090,8 +3093,8 @@ begin
                 or exists (select 1 from public.session_invitees si where si.session_id = s.id and si.enrollment_id = any(v_enr)))
            and s.ends_at > now() - interval '1 day' and s.starts_at < now() + interval '120 days'
          order by s.starts_at limit 300) x), '[]'::json),
-    -- TODO(insights): leer student_insights cuando la grabación esté activa (002_live_class.sql)
-    'insights', '[]'::json);
+    -- sus insights más recientes (los propios; el mensaje del docente solo si está publicado: ver my_insight)
+    'insights', public.tc_insight_summaries(v_enr, 5));
 end $$;
 
 -- ── CALENDARIO EXTERNO (Google Calendar, Outlook, Apple) sin proveedor de email ──
@@ -3138,11 +3141,352 @@ begin
             from public.class_sessions s left join public.class_groups g on g.id = s.group_id where s.id = p_session);
 end $$;
 
+-- ========== INSIGHTS DE CLASE (docente, suplente, admins y cada estudiante) ==========
+-- Un "insight" cuelga de una CLASE DEL CALENDARIO (class_sessions), no de la videollamada:
+--   · teacher_insights: UN informe de observación por clase (guía TEC: evidencia → qué funcionó → área
+--     prioritaria → próximo paso) + la reflexión que escribe el docente.
+--   · student_insights: UNO por estudiante de esa clase (inscripción = student_enrollments): repaso, progreso,
+--     devolución, vocabulario + el mensaje del docente (borrador y versión publicada).
+-- Hoy no hay grabación: los datos son de DEMOSTRACIÓN (is_demo = true) y se generan al terminar una clase en la
+-- demo del aula en vivo o con "Generar insights de demo" (generate_demo_insights). Cuando se active la grabación
+-- (002_live_class.sql), el servidor escribirá filas reales en estas mismas tablas: live_sessions.class_session_id
+-- vincula la llamada con la clase y student_insights.participant_id con el participante de la llamada.
+-- PRIVACIDAD (sin acceso directo a las tablas; todo por las funciones de abajo):
+--   · cada estudiante ve SOLO sus insights y el mensaje de su docente cuando está PUBLICADO (nunca el borrador,
+--     nunca el informe del docente ni su reflexión, nunca a sus compañeros);
+--   · docente / suplente: las clases de los grupos donde da clase (y sus clases sueltas);
+--   · admins: las clases de su unidad y lo que cuelga; súper admin: todo. La reflexión docente la ven el docente
+--     y los admins de esa unidad. Ningún dato guarda nombres ni emails: se leen de la inscripción al mostrar.
+do $$
+declare t text; c text; i record; n bigint;
+begin
+  -- Una versión vieja de 002_live_class.sql (nunca ejecutada en producción) creaba estas tablas colgadas de
+  -- live_sessions. Si existen con esa forma: vacías → se borran; con datos → se renombran a *_live_legacy.
+  foreach t in array array['student_insights','teacher_insights'] loop
+    c := case when t = 'student_insights' then 'enrollment_id' else 'is_demo' end;
+    if to_regclass('public.' || t) is not null and not exists (
+         select 1 from information_schema.columns where table_schema = 'public' and table_name = t and column_name = c) then
+      execute format('select count(*) from public.%I', t) into n;
+      if n = 0 then execute format('drop table public.%I cascade', t);
+      else
+        for i in select indexname from pg_indexes where schemaname = 'public' and tablename = t loop
+          execute format('alter index public.%I rename to %I', i.indexname, left(i.indexname, 50) || '_legacy');
+        end loop;
+        execute format('alter table public.%I rename to %I', t, t || '_live_legacy');
+      end if;
+    end if;
+  end loop;
+end $$;
+
+create table if not exists public.teacher_insights (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null unique references public.class_sessions(id) on delete cascade,
+  data jsonb not null default '{}'::jsonb,          -- encabezado, métricas, 13 áreas, qué funcionó, foco, próximo paso
+  is_demo boolean not null default false,
+  teacher_reflection text not null default '' check (length(teacher_reflection) <= 8000),
+  reflection_at timestamptz,
+  model text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create table if not exists public.student_insights (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.class_sessions(id) on delete cascade,
+  enrollment_id uuid not null references public.student_enrollments(id) on delete cascade,
+  participant_id uuid,                               -- 002_live_class.sql: participante de la llamada (FK allí)
+  data jsonb not null default '{}'::jsonb,           -- repaso, progreso, seguimiento, devolución, vocabulario
+  is_demo boolean not null default false,
+  teacher_message text not null default '' check (length(teacher_message) <= 4000),     -- borrador del docente
+  published_message text not null default '' check (length(published_message) <= 4000), -- lo que ve el estudiante
+  published_at timestamptz,
+  model text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint student_insights_session_enrollment unique (session_id, enrollment_id)
+);
+create index if not exists student_insights_enr_idx on public.student_insights (enrollment_id);
+alter table public.teacher_insights enable row level security;
+alter table public.student_insights enable row level security;
+revoke all on public.teacher_insights, public.student_insights from anon, authenticated;
+drop trigger if exists teacher_insights_touch on public.teacher_insights;
+create trigger teacher_insights_touch before update on public.teacher_insights for each row execute function public.touch_updated_at();
+drop trigger if exists student_insights_touch on public.student_insights;
+create trigger student_insights_touch before update on public.student_insights for each row execute function public.touch_updated_at();
+
+-- ── ayudas internas ──
+-- Estudiantes de una clase: miembros del grupo + invitados por email
+create or replace function public.tc_session_students(p_session uuid) returns table (enrollment_id uuid, name text, email text)
+language sql stable security definer set search_path = public as
+$$ select e.id, e.name, e.email from public.class_sessions s
+     join public.group_members m on m.group_id = s.group_id
+     join public.student_enrollments e on e.id = m.enrollment_id
+    where s.id = p_session
+   union
+   select e.id, e.name, e.email from public.session_invitees si
+     join public.student_enrollments e on e.id = si.enrollment_id
+    where si.session_id = p_session $$;
+-- ¿Puedo ver los insights de esta clase? Docente / suplente (o quien creó la clase suelta) y admins de su unidad.
+create or replace function public.tc_can_view_insights(p_session uuid) returns boolean
+language sql stable security definer set search_path = public as
+$$ select auth.uid() is not null and exists (
+     select 1 from public.class_sessions s
+      where s.id = p_session and (public.teaches_session(s.id) or public.is_admin_of(s.institution_id))) $$;
+-- Texto libre del docente: sin caracteres de control (se conservan los saltos de línea)
+create or replace function public.tc_clean_note(p text, n integer) returns text
+language sql immutable set search_path = public as
+$$ select left(btrim(regexp_replace(coalesce(p, ''), '[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]', '', 'g')), n) $$;
+-- Lista resumida de insights de unas inscripciones (lo que ve el propio estudiante), más nuevas primero
+create or replace function public.tc_insight_summaries(p_enr uuid[], p_limit integer) returns json
+language sql stable security definer set search_path = public as
+$$ select coalesce(json_agg(x order by x.starts_at desc, x.id), '[]'::json) from (
+     select si.id, si.session_id, coalesce(nullif(s.title, ''), g.name, '') as title, s.starts_at, s.ends_at, s.timezone,
+            g.name as group_name, public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name,
+            left(coalesce(si.data #>> '{recap,summary}', ''), 280) as summary, coalesce(si.data->>'kind', '') as kind,
+            si.published_at is not null as has_message, si.is_demo
+       from public.student_insights si
+       join public.class_sessions s on s.id = si.session_id
+       left join public.class_groups g on g.id = s.group_id
+      where si.enrollment_id = any(coalesce(p_enr, '{}'))
+      order by s.starts_at desc, si.id limit greatest(coalesce(p_limit, 50), 0)) x $$;
+revoke all on function public.tc_session_students(uuid) from public, anon, authenticated;
+revoke all on function public.tc_can_view_insights(uuid) from public, anon, authenticated;
+revoke all on function public.tc_clean_note(text, integer) from public, anon, authenticated;
+revoke all on function public.tc_insight_summaries(uuid[], integer) from public, anon, authenticated;
+
+-- ── generar insights de DEMOSTRACIÓN para una clase (de hoy o anterior, no cancelada) ──
+-- Quién: su docente / suplente (o quien creó la clase suelta) o un admin de su unidad (súper admin incluido).
+-- p_payload: el contenido de ejemplo que arma la app a partir de sus muestras (public/insights-view.js):
+--   {kind: 'language'|'discipline', lang, subject, title, recap{summary,topics[]}, teacher{…}, students[{…}, …]}
+-- Idempotente: si la clase ya tiene informe no se toca; cada estudiante recibe una fila una sola vez (los que se
+-- suman después reciben la suya en la próxima llamada). Las filas quedan marcadas is_demo = true.
+create or replace function public.generate_demo_insights(p_session uuid, p_payload jsonb) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare s public.class_sessions%rowtype; v_pool int; v_base jsonb; v_teacher boolean; v_n int := 0;
+begin
+  select * into s from public.class_sessions where id = p_session;
+  if s.id is null or not public.tc_can_view_insights(p_session) then raise exception 'No autorizado'; end if;
+  if s.status = 'cancelled' then raise exception 'Una clase cancelada no tiene insights'; end if;
+  if (s.starts_at at time zone s.timezone)::date > (now() at time zone s.timezone)::date then
+    raise exception 'Los insights de demo se generan para clases de hoy o anteriores';
+  end if;
+  if p_payload is null or jsonb_typeof(p_payload) <> 'object' or octet_length(p_payload::text) > 262144
+     or coalesce(p_payload->>'kind', '') not in ('language','discipline') or coalesce(p_payload->>'lang', '') !~ '^[a-z]{2}$'
+     or jsonb_typeof(p_payload->'teacher') is distinct from 'object' or jsonb_typeof(p_payload->'recap') is distinct from 'object'
+     or jsonb_typeof(p_payload->'students') is distinct from 'array'
+     or jsonb_array_length(p_payload->'students') not between 1 and 24
+     or exists (select 1 from jsonb_array_elements(p_payload->'students') x where jsonb_typeof(x) <> 'object') then
+    raise exception 'Datos de demo inválidos';
+  end if;
+  v_pool := jsonb_array_length(p_payload->'students');
+  v_base := jsonb_build_object('kind', p_payload->'kind', 'lang', p_payload->'lang', 'subject', coalesce(p_payload->'subject', '""'::jsonb),
+                               'title', coalesce(p_payload->'title', '""'::jsonb), 'recap', p_payload->'recap');
+  insert into public.teacher_insights (session_id, data, is_demo, model)
+  values (s.id, (p_payload->'teacher') || v_base, true, 'demo')
+  on conflict (session_id) do nothing;
+  get diagnostics v_n = row_count; v_teacher := v_n > 0;
+  insert into public.student_insights (session_id, enrollment_id, data, is_demo, model)
+  select s.id, x.enrollment_id, ((p_payload->'students')->(((x.rn - 1) % v_pool)::int)) || v_base, true, 'demo'
+    from (select st.enrollment_id, row_number() over (order by lower(coalesce(nullif(st.name, ''), st.email)), st.enrollment_id) as rn
+            from public.tc_session_students(s.id) st) x
+  on conflict (session_id, enrollment_id) do nothing;
+  get diagnostics v_n = row_count;
+  return json_build_object('session_id', s.id, 'teacher_created', v_teacher, 'students_created', v_n,
+                           'students', (select count(*) from public.student_insights where session_id = s.id));
+end $$;
+
+-- ── listas ──
+-- Clases con insights + clases recientes sin insights ("pending", para generar los de demo).
+--   p_mine = true  → docente / suplente: mis clases (Docencia → Insights)
+--   p_mine = false → admin: la unidad p_unit y todo lo que cuelga (súper admin: p_unit null = todo)
+-- Filtros: grupo, docente (solo admin), rango de fechas (fecha local de la clase), búsqueda de estudiante
+-- (nombre o email: solo de las clases que ya ve quien pregunta).
+create or replace function public.list_insight_sessions(p_unit uuid default null, p_mine boolean default true,
+  p_group uuid default null, p_teacher uuid default null, p_from date default null, p_to date default null, p_q text default null)
+returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_me uuid := auth.uid(); v_mine boolean := coalesce(p_mine, true); v_units uuid[]; v_q text; v_root uuid;
+begin
+  if v_me is null then raise exception 'No autorizado'; end if;
+  if not v_mine then
+    if p_unit is null then
+      if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+    else
+      perform public.tc_assert_admin(p_unit);
+      v_units := public.tc_unit_scope(p_unit);
+    end if;
+  end if;
+  v_root := public.billing_root(public.my_institution());
+  v_q := lower(btrim(coalesce(p_q, '')));
+  v_q := replace(replace(replace(v_q, '\', '\\'), '%', '\%'), '_', '\_');
+  return (with sc as (
+      select s.id, coalesce(nullif(s.title, ''), g.name, '') as title, s.starts_at, s.ends_at, s.timezone, s.status,
+             s.group_id, g.name as group_name, i.name as unit_name,
+             public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name,
+             case when not v_mine then 'admin' when g.id is not null and g.substitute_id = v_me then 'substitute' else 'teacher' end as role
+        from public.class_sessions s
+        join public.institutions i on i.id = s.institution_id
+        left join public.class_groups g on g.id = s.group_id
+       where (case when v_mine then (s.group_id is not null and v_me in (g.teacher_id, g.substitute_id))
+                                     or (s.group_id is null and s.teacher_id = v_me and v_root = public.billing_root(s.institution_id))
+                   else v_units is null or s.institution_id = any(v_units) end)
+         and (p_group is null or s.group_id = p_group)
+         and (p_teacher is null or (case when s.group_id is null then s.teacher_id = p_teacher else p_teacher in (g.teacher_id, g.substitute_id) end))
+         and (p_from is null or (s.starts_at at time zone s.timezone)::date >= p_from)
+         and (p_to is null or (s.starts_at at time zone s.timezone)::date <= p_to)),
+    withins as (
+      select sc.*, ti.id is not null as has_report, coalesce(ti.is_demo, false) as report_demo,
+             coalesce(ti.teacher_reflection, '') <> '' as has_reflection,
+             (select count(*) from public.student_insights si where si.session_id = sc.id)::int as students,
+             (select count(*) from public.student_insights si where si.session_id = sc.id and si.published_at is not null)::int as published,
+             exists (select 1 from public.student_insights si where si.session_id = sc.id and si.is_demo) as students_demo
+        from sc left join public.teacher_insights ti on ti.session_id = sc.id
+       where (ti.id is not null or exists (select 1 from public.student_insights si where si.session_id = sc.id))
+         and (v_q = '' or exists (select 1 from public.student_insights si join public.student_enrollments e on e.id = si.enrollment_id
+                                   where si.session_id = sc.id and (lower(e.name) like '%' || v_q || '%' or lower(e.email) like '%' || v_q || '%')))),
+    grp as (
+      select g.id, g.name, i.name as unit_name, g.teacher_id, g.substitute_id
+        from public.class_groups g join public.institutions i on i.id = g.institution_id
+       where case when v_mine then v_me in (g.teacher_id, g.substitute_id) else v_units is null or g.institution_id = any(v_units) end)
+    select json_build_object(
+      'scope', case when v_mine then 'mine' else 'unit' end,
+      'unit', (select json_build_object('id', i.id, 'name', i.name) from public.institutions i where i.id = p_unit and not v_mine),
+      'sessions', coalesce((select json_agg(json_build_object('id', w.id, 'title', w.title, 'starts_at', w.starts_at, 'ends_at', w.ends_at,
+          'timezone', w.timezone, 'status', w.status, 'group_id', w.group_id, 'group_name', w.group_name, 'unit_name', w.unit_name,
+          'teacher_name', w.teacher_name, 'role', w.role, 'has_report', w.has_report, 'has_reflection', w.has_reflection,
+          'students', w.students, 'published', w.published, 'is_demo', w.report_demo or w.students_demo) order by w.starts_at desc, w.id)
+        from (select * from withins order by starts_at desc, id limit 300) w), '[]'::json),
+      'pending', case when v_q <> '' then '[]'::json else coalesce((select json_agg(json_build_object('id', p.id, 'title', p.title,
+          'starts_at', p.starts_at, 'ends_at', p.ends_at, 'timezone', p.timezone, 'group_name', p.group_name, 'unit_name', p.unit_name,
+          'teacher_name', p.teacher_name, 'role', p.role, 'students', (select count(*) from public.tc_session_students(p.id))::int)
+          order by p.starts_at desc, p.id)
+        from (select * from sc
+               where sc.status = 'scheduled' and sc.starts_at > now() - interval '30 days'
+                 and (sc.starts_at at time zone sc.timezone)::date <= (now() at time zone sc.timezone)::date
+                 and not exists (select 1 from public.teacher_insights ti where ti.session_id = sc.id)
+               order by sc.starts_at desc, sc.id limit 8) p), '[]'::json) end,
+      'groups', coalesce((select json_agg(json_build_object('id', grp.id, 'name', grp.name, 'unit_name', grp.unit_name) order by lower(grp.name), grp.id)
+        from (select * from grp order by lower(name) limit 500) grp), '[]'::json),
+      'teachers', case when v_mine then '[]'::json else coalesce((select json_agg(json_build_object('id', t.id, 'name', t.name) order by lower(t.name), t.id)
+        from (select distinct x.id, public.tc_person_name(x.id) as name
+                from (select teacher_id as id from grp union select substitute_id from grp) x
+               where x.id is not null and not (public.is_superadmin_id(x.id) and not public.is_superadmin())) t), '[]'::json) end));
+end $$;
+
+-- Una clase: informe del docente + insights de cada estudiante (con su nombre; nunca emails).
+-- can_edit = docente / suplente (escribe la reflexión y los mensajes); los admins la ven en solo lectura.
+create or replace function public.get_session_insights(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare s public.class_sessions%rowtype; g public.class_groups%rowtype; v_teach boolean;
+begin
+  select * into s from public.class_sessions where id = p_session;
+  if s.id is null or not public.tc_can_view_insights(p_session) then raise exception 'No autorizado'; end if;
+  select * into g from public.class_groups where id = s.group_id;
+  v_teach := public.teaches_session(p_session);
+  return json_build_object(
+    'session', json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name, ''), 'starts_at', s.starts_at,
+       'ends_at', s.ends_at, 'timezone', s.timezone, 'status', s.status, 'group_id', s.group_id, 'group_name', g.name,
+       'unit_name', (select name from public.institutions where id = s.institution_id),
+       'teacher_name', public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)),
+       'duration_min', round(extract(epoch from (s.ends_at - s.starts_at)) / 60)::int,
+       'students_total', (select count(*) from public.tc_session_students(s.id))::int),
+    'can_edit', v_teach,
+    'role', case when not v_teach then 'admin' when g.id is not null and g.substitute_id = auth.uid() then 'substitute' else 'teacher' end,
+    'teacher', (select json_build_object('id', ti.id, 'data', ti.data, 'is_demo', ti.is_demo, 'reflection', ti.teacher_reflection,
+                  'reflection_at', ti.reflection_at, 'created_at', ti.created_at)
+                  from public.teacher_insights ti where ti.session_id = s.id),
+    'students', coalesce((select json_agg(json_build_object('id', si.id, 'enrollment_id', si.enrollment_id,
+                   'name', coalesce(nullif(btrim(e.name), ''), split_part(e.email, '@', 1)), 'data', si.data, 'is_demo', si.is_demo,
+                   'teacher_message', si.teacher_message, 'published_message', si.published_message, 'published_at', si.published_at)
+                   order by lower(coalesce(nullif(btrim(e.name), ''), e.email)), si.id)
+                   from public.student_insights si join public.student_enrollments e on e.id = si.enrollment_id
+                  where si.session_id = s.id), '[]'::json));
+end $$;
+
+-- Reflexión del docente (solo su docente / suplente; los admins la leen)
+create or replace function public.save_teacher_reflection(p_session uuid, p_reflection text) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare r public.teacher_insights%rowtype;
+begin
+  if p_session is null or not public.teaches_session(p_session) then raise exception 'No autorizado'; end if;
+  update public.teacher_insights set teacher_reflection = public.tc_clean_note(p_reflection, 8000), reflection_at = now()
+   where session_id = p_session returning * into r;
+  if r.id is null then raise exception 'Todavía no hay insights para esta clase'; end if;
+  return json_build_object('reflection', r.teacher_reflection, 'reflection_at', r.reflection_at);
+end $$;
+
+-- Mensaje del docente a un estudiante: guardar borrador (p_publish = false) o publicarlo (el estudiante lo ve).
+create or replace function public.save_insight_message(p_insight uuid, p_message text, p_publish boolean default false) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_sess uuid; v_msg text := public.tc_clean_note(p_message, 4000); r public.student_insights%rowtype;
+begin
+  select session_id into v_sess from public.student_insights where id = p_insight;
+  if v_sess is null or not public.teaches_session(v_sess) then raise exception 'No autorizado'; end if;
+  if coalesce(p_publish, false) and v_msg = '' then raise exception 'Escribí un mensaje antes de publicarlo'; end if;
+  update public.student_insights
+     set teacher_message = v_msg,
+         published_message = case when coalesce(p_publish, false) then v_msg else published_message end,
+         published_at = case when coalesce(p_publish, false) then now() else published_at end
+   where id = p_insight returning * into r;
+  return json_build_object('teacher_message', r.teacher_message, 'published_message', r.published_message, 'published_at', r.published_at);
+end $$;
+
+-- ESTUDIANTE: mis insights (lista) y uno completo. Súper admin ("Ver como" estudiante): p_enrollment
+-- (un grupo sin estudiante elegido = estudiante genérico: sin insights propios).
+create or replace function public.my_insights(p_group uuid default null, p_enrollment uuid default null) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_enr uuid[] := '{}';
+begin
+  if p_group is null and p_enrollment is null then
+    if auth.uid() is null then raise exception 'No autorizado'; end if;
+    v_enr := array(select id from public.student_enrollments where user_id = auth.uid());
+  else
+    if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+    if p_enrollment is not null then
+      if not exists (select 1 from public.student_enrollments where id = p_enrollment) then raise exception 'No autorizado'; end if;
+      v_enr := array[p_enrollment];
+    end if;
+  end if;
+  return public.tc_insight_summaries(v_enr, 200);
+end $$;
+
+create or replace function public.my_insight(p_id uuid, p_enrollment uuid default null) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare si public.student_insights%rowtype; s public.class_sessions%rowtype; g public.class_groups%rowtype; e public.student_enrollments%rowtype;
+begin
+  select * into si from public.student_insights where id = p_id;
+  select * into e from public.student_enrollments where id = si.enrollment_id;
+  if si.id is null or e.id is null then raise exception 'No autorizado'; end if;
+  if p_enrollment is null then
+    if auth.uid() is null or e.user_id is distinct from auth.uid() then raise exception 'No autorizado'; end if;
+  elsif not public.is_superadmin() or si.enrollment_id <> p_enrollment then raise exception 'No autorizado';
+  end if;
+  select * into s from public.class_sessions where id = si.session_id;
+  select * into g from public.class_groups where id = s.group_id;
+  return json_build_object('id', si.id, 'session_id', s.id,
+    'session', json_build_object('title', coalesce(nullif(s.title, ''), g.name, ''), 'starts_at', s.starts_at, 'ends_at', s.ends_at,
+       'timezone', s.timezone, 'group_name', g.name, 'teacher_name', public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)),
+       'duration_min', round(extract(epoch from (s.ends_at - s.starts_at)) / 60)::int),
+    'student_name', e.name, 'data', si.data, 'is_demo', si.is_demo,
+    'message', case when si.published_at is not null then si.published_message else '' end,
+    'published_at', si.published_at);
+end $$;
+
 -- Permisos de las funciones de la app
 do $$
 declare f text;
 begin
   foreach f in array array[
+    'generate_demo_insights(uuid, jsonb)',
+    'list_insight_sessions(uuid, boolean, uuid, uuid, date, date, text)', 'get_session_insights(uuid)',
+    'save_teacher_reflection(uuid, text)', 'save_insight_message(uuid, text, boolean)',
+    'my_insights(uuid, uuid)', 'my_insight(uuid, uuid)',
     'list_groups(uuid)', 'list_students(uuid)', 'list_group_members(uuid)',
     'create_group(uuid, text, uuid, uuid, text, text, text)', 'update_group(uuid, text, uuid, uuid, text, text, text)', 'delete_group(uuid)',
     'add_student(uuid, text, text, uuid)', 'group_add_student(uuid, uuid)', 'group_remove_student(uuid, uuid)',

@@ -95,9 +95,12 @@ con menos control sobre pausas y recorte de silencios.
    identificar por huella de voz.
 2. Guardar los segmentos en `transcript_segments`.
 3. Llamar al GPT-4o que ya usa TeroClass con la planificación de la clase + la transcripción, pidiendo
-   JSON con la misma forma que los datos de ejemplo de `live-class.js` (`SAMPLES.*.students[]`
-   y `SAMPLES.*.teacher`). Guardar en `student_insights` / `teacher_insights`.
-4. Cambiar la pantalla de insights para leer esas tablas en vez de `SAMPLES`.
+   JSON con la misma forma que los datos de ejemplo de `public/insights-view.js` (`SAMPLES.*.students[]`
+   y `SAMPLES.*.teacher`, o el payload de `buildDemoPayload`). Guardar (service role) en `student_insights` /
+   `teacher_insights` de **001_base.sql**, para la clase del calendario de la llamada
+   (`live_sessions.class_session_id`), con `is_demo = false` y `participant_id` del participante.
+4. Las pantallas de Insights (`public/insights-panel.js`) ya leen esas tablas (hoy con datos de demo:
+   ver README → *Class insights*). No hace falta cambiar la interfaz.
 
 ### 6. Borrado automático
 
@@ -129,7 +132,8 @@ Hoy, en modo Demo: **US$ 0**.
 - [ ] Audio original borrado a los 30 días (tarea diaria activa y probada).
 - [ ] Datos en la región (LiveKit con región fijada si el plan lo permite; Azure en Brazil South).
 - [ ] Revocar consentimiento (`revoke_consent`) detiene la grabación de esa persona.
-- [ ] Insights del docente privados (solo docente y admins de su institución); los del estudiante se ven cuando el docente los publica.
+- [ ] Insights del docente privados (solo docente y admins de su institución); cada estudiante ve solo los suyos y el mensaje del docente cuando lo publica (ya aplicado en 001_base.sql).
+- [ ] Acceso del tutor/a a los insights publicados del menor (hoy no existe: definirlo antes de grabar).
 - [ ] Contrato de encargado de tratamiento con LiveKit y Microsoft.
 
 ## Pruebas

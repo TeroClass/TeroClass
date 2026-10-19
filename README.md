@@ -25,9 +25,9 @@ AI-powered didactic planning platform for teachers.
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with CSV schedules +
-pending teachers: run it again** (it upgrades the previous version in place and keeps all data; tested from the
-Groups version, git fabb1c7, with data).
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with class insights
+(`student_insights`, `teacher_insights` and their functions): run it again** (it upgrades the previous version in place and
+keeps all data; tested from git c198c60 with data, twice). `002_live_class.sql` is still **not** needed (see *Class insights*).
 
 ### Platform owner (super admin)
 
@@ -51,15 +51,15 @@ master prompt, playbooks and learning-approach bars (`get_effective_config`).
 
 Next to the logo, the **institution switcher** picks the unit every institution screen works on: Structure,
 Dashboard, Branding, AI Settings and Plan & usage show that unit and everything below it.
-Super admin: *All institutions* (platform screens: Institutions, Insights, Platform) or any unit of the tree (searchable
+Super admin: *All institutions* (platform screens: Institutions, Metrics, Platform; and Institution → Insights) or any unit of the tree (searchable
 when there are more than 8). Admins: only their own subtree (a single unit is shown as plain text). Teachers: no switcher.
 The choice is remembered per person in the browser and checked against what they can access; *Institutions* in the
 sidebar = *All institutions*; *View* on an institution card selects it. During *View as* it is locked to the viewed unit.
 The sidebar shows a label under each icon, grouped as Teaching · Institution · Platform (icons only on phones).
 
-## Insights (super admin only)
+## Metrics (super admin only)
 
-*Insights* shows product usage for the last 7 / 30 / 90 days, for all institutions or the selected unit and what is
+*Metrics* (Spanish: *Métricas*; called "Insights" before 2026-10-18) shows product usage for the last 7 / 30 / 90 days, for all institutions or the selected unit and what is
 below it (optionally without the owner's own activity): classes generated per day, active teachers (1/7/30 days), new and
 returning users, generated vs saved classes, student handouts, top institutions; top subjects, teaching languages, age
 bands, average learning-approach bars, institutions with a playbook; AI tokens (input/output) and an estimated cost in USD
@@ -67,7 +67,53 @@ bands, average learning-approach bars, institutions with a playbook; AI tokens (
 Every AI request is recorded with its class settings (never the prompt text) in `ai_events` by `consume_ai_quota`,
 with the user's own session, so this works **without** the server key; institution and user come from the profile.
 Token counts and costs come from the server log and need `SUPABASE_SERVICE_ROLE_KEY` (the screen says so when it is
-missing). Data is read only through `platform_insights` (super admin; totals only, no names).
+missing). Data is read only through `platform_insights` (super admin; totals only, no names; the RPC kept its name), which also
+counts the classes with class insights in the period (`students.insight_sessions`).
+
+## Class insights (Insights)
+
+**Insights** = what each person can learn from a class (the analytics screen above is *Metrics*):
+- **Teacher / substitute** — Teaching → *Insights*: their classes with insights, newest first. A class opens the **teacher
+  observation report** (TEC Observation Guide: header with teacher, group/level, date, class objective, observation focus,
+  students present, class length → *Evidence I noticed* (minutes, quotes, counts, tagged with the 13 observation areas) →
+  *What worked well* (1–2) → *Priority area* (1) → *Suggested next step* (1) → *Teacher reflection*, typed and saved by the
+  teacher) and the **students** of that class: *Summary · Recap · Progress · Feedback · Vocabulary* per student, with the
+  **message from the teacher**: ✨ *Draft with assistant* proposes one, the teacher edits it, *Save draft*, *Publish to student*.
+  The student sees only the published version (a later draft doesn't change it until it is published again).
+- **Institution admin** — Institution → *Insights*: every class of the unit chosen in the switcher and below it, read-only
+  (report, reflection, students, published messages). **Super admin**: the same screen with *All institutions* or a unit.
+- **Student** — *My insights* on the dashboard (newest 5) and the full list (own insights only, newest first).
+- Filters: group, teacher (admins), date range, student search (name or email, only within what that person can see).
+- Language classes show grammar/pronunciation/CEFR; other subjects show concepts and disciplinary language instead (the sample is
+  chosen from the class title / group name: "Química", "Math", "History"… → subject sample; "English B1"… → language sample).
+
+**Data (today: demo).** Real insights will come from the recorded call (LiveKit + Azure Speech + AI), not active yet. Until then
+**demo insights** are stored for real classes and flagged `is_demo` (the screens show "Demo data — real insights activate when
+the live classroom is connected"):
+- when a teacher or substitute **ends a class** opened from the Calendar in the live-class demo (then Insights opens on it);
+- with **✨ Generate demo insights** on a class of today or before (Insights → *Recent classes without insights*, or the class
+  detail in the Calendar). One report per class and one row per enrolled student (group members + invited emails), with varied
+  sample content; repeating it is harmless (only students added later get their row).
+
+**Database (`001_base.sql`, no direct table access; security-definer functions only).** `teacher_insights` (one per calendar
+class: `class_sessions`) and `student_insights` (one per class and **enrollment**, so a student is the person the institution
+loaded; names and emails are never stored in the insight data). Functions: `generate_demo_insights` (teacher / substitute of the
+class or an admin of its unit; payload built by `public/insights-view.js`), `list_insight_sessions`, `get_session_insights`,
+`save_teacher_reflection` and `save_insight_message` (teacher / substitute only), `my_insights` / `my_insight` (the student's own;
+super admin with an enrollment for *View as*). Privacy: a student sees only their own insights and their own **published**
+message (never drafts, the teacher report, the reflection or classmates); teachers see the classes of the groups they teach or
+substitute in (and their one-off classes); admins only their subtree; the reflection is visible to the teacher and the unit's
+admins, never students.
+**Reconciliation with `002_live_class.sql`** (not run in production): insights belong to the *calendar class*, not to the call,
+so the tables moved to `001`; `002` now only links them to the call — `live_sessions.class_session_id` (the class taught in that
+call) and `student_insights.participant_id` (FK to `session_participants`) — drops its old insight policies and requires the new
+`001`. Running `002` after `001` (any number of times) changes nothing else. A database where an old `002` had created insight
+tables tied to `live_sessions` keeps them as `*_live_legacy` (empty ones are dropped).
+**Limitations (class insights).** All insights are sample data until the recorded live class is connected (same content for
+every class of a subject type, varied per student; real numbers, quotes and pronunciation audio need the recording); the
+assistant draft is a template built from the student's feedback, not an AI call; a guardian has no access to a minor's
+insights yet; access follows the group: a teacher replaced in a group stops seeing its past classes' insights and the new one
+sees them; removing a student from the unit deletes their insights; generated demo insights can't be removed from the app.
 
 ## View as (super admin only)
 
@@ -154,8 +200,8 @@ goes through security-definer functions:
 - a student sees their groups, classes, the teacher's display name, how many classmates there are, and their own data —
   never classmates' emails; student profiles are never visible to admins through `profiles`;
 - the super admin sees everything; the owner's identity stays hidden ("TeroClass team");
-- `ai_events` never gets student data (students can't generate); Insights shows only totals (loaded students, signed in,
-  with classes in the period, groups, classes held).
+- `ai_events` never gets student data (students can't generate); Metrics shows only totals (loaded students, signed in,
+  with classes in the period, groups, classes held, classes with insights).
 
 **Student sign-in: a link by email, no password.** The login screen has *I'm a student → get a link by email*
 (`supabase.auth.signInWithOtp`; also `/?student`). After the link is opened, `claim_enrollments()` links every enrollment whose
@@ -171,8 +217,8 @@ email sender allows only a few emails per hour for the whole project — fine fo
 Ignacio: configure a custom SMTP** (Authentication → Emails → SMTP Settings, e.g. with @teroclass.com) before real use.
 
 **Student dashboard** (nothing else: no generator, bars, admin screens or switcher; language toggle and error toasts stay):
-📅 *Calendar* (upcoming classes), ▶️ *Enter class* (the next/current class with a big Join button), 💡 *My insights* (an
-empty/preview state: insights need recording, which is not active yet; ready to read `student_insights`).
+📅 *Calendar* (upcoming classes), ▶️ *Enter class* (the next/current class with a big Join button), 💡 *My insights* (their newest
+insights, or an empty/preview state; *See all my insights* opens the full list — see *Class insights*).
 
 **Calendars without an email provider.** Every class has *Add to Google Calendar* and an `.ics` download. Each teacher and
 student has a personal subscription feed: `/cal/<token>.ics` (→ `api/calendar/feed.js`; also
@@ -201,17 +247,20 @@ email keeps the classes already linked.
 
 ## Tests
 
-`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Insights), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile) and `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room) run the app in a headless browser
+`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Metrics), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile), `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room) and `tests/e2e-insights.cjs` (class insights per role, demo generation, reflection, publish a message, student privacy, admin subtree, View as, mobile, Métricas) run the app in a headless browser
 against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/<file>`).
 
 `tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage, insights, students & calendar privacy, and the upgrade path from the previous `001`) on a local
-Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql` and the upgrade from git fabb1c7 with data).
+Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql`, `class_insights.sql`, the upgrades from
+git fabb1c7 and c198c60 with data, and `002_live_class.sql` + its RLS suite after the current `001`).
 CSV parser unit tests: `node --no-warnings --test tests/unit-*.test.mjs`.
 API: `node --no-warnings --test tests/api-*.test.mjs` (billing, live class, AI metadata, calendar feed + notifications).
 
 ## Live class (Aula en vivo)
 
-In-app video classroom, currently in **Demo mode** (simulated participants, sample insights, no cost).
+In-app video classroom, currently in **Demo mode** (simulated participants, sample insights, no cost). Ending a class opened from the
+Calendar (teacher / substitute) stores demo insights for that class (see *Class insights*). The insights renderers are shared:
+`public/insights-view.js` / `.css` (live-class demo + Insights panels), panels in `public/insights-panel.js`.
 To connect real video set `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in Vercel.
 See `docs/live-class.md` (activation, costs, privacy checklist). Tests: `tests/e2e-live.cjs`,
 `tests/api-live.test.mjs`, `tests/sql/002_live_class_rls.sql`.

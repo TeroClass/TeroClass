@@ -373,7 +373,7 @@ module.exports = function install(ctx) {
         const now = Date.now();
         const sessions = db.class_sessions.filter(s => (groups.includes(s.group_id) || db.session_invitees.some(i => i.session_id === s.id && eids.includes(i.enrollment_id))) && Date.parse(s.ends_at) > now - 864e5 && Date.parse(s.starts_at) < now + 120 * 864e5)
           .sort((x, y) => Date.parse(x.starts_at) - Date.parse(y.starts_at)).map(s => { const g = s.group_id && group(s.group_id); return { id: s.id, title: s.title || g?.name || '', starts_at: s.starts_at, ends_at: s.ends_at, timezone: s.timezone, status: s.status, group_name: g?.name || null, teacher_name: personName(me, g?.teacher_id || s.teacher_id) }; });
-        return ok({ me: me2, enrollments: ens.length, sessions, insights: [],
+        return ok({ me: me2, enrollments: ens.length, sessions, insights: ctx.insightSummaries ? ctx.insightSummaries(eids, me) : [],
           groups: groups.map(group).filter(Boolean).map(g => ({ id: g.id, name: g.name, unit_name: instById(g.institution_id)?.name, institution_name: instById(rootOf(g.institution_id))?.name, timezone: g.timezone, teacher_name: personName(me, g.teacher_id), substitute_name: personName(me, g.substitute_id), classmates: members(g.id).length })) });
       }
       case 'my_calendar_token': {

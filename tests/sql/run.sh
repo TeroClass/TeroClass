@@ -11,6 +11,10 @@
 # checks two upgrade paths: 001_base.sql from git da29348 (before groups/students) + data, then the current one
 # twice, then students.sql; and 001_base.sql from git fabb1c7 (groups/students, before CSV schedules) + students.sql
 # data, then the current one twice (the data must survive), then csv_schedule.sql.
+# Class insights (class_insights.sql: privacy rules + idempotent demo generation) run with the other suites and
+# again after an upgrade from git c198c60 (before class insights) with data. 002_live_class.sql must still apply
+# (twice) after the current 001 and pass its RLS suite; 001 must re-run after 002; and a database where the OLD
+# 002 (insights tied to live_sessions) had been run with data upgrades cleanly (old tables kept as *_live_legacy).
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -20,7 +24,7 @@ trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null' EXIT
 $PSQL -d $DB -f tests/sql/supabase-stub.sql >/dev/null 2>&1
 for i in 1 2; do $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; done
 fail=0
-for t in security hierarchy billing insights students csv_schedule; do
+for t in security hierarchy billing insights students csv_schedule class_insights; do
   out=$($PSQL -d $DB -f tests/sql/$t.sql 2>&1)
   echo "$out" | grep -E '\*\*FAIL\*\*' || true
   sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
@@ -73,5 +77,44 @@ if git cat-file -e fabb1c7:supabase/migrations/001_base.sql 2>/dev/null; then
       [[ "$sum" =~ \|\ +0$ ]] || fail=1
     else echo "upgrade: **FAIL** could not upgrade from fabb1c7"; fail=1; fi
   else echo "upgrade: **FAIL** could not load fabb1c7 + data"; fail=1; fi
+fi
+# 002_live_class.sql after the current 001 (twice), its RLS suite, then 001 and 002 again
+LV=${DB}_live
+$PSQL -d postgres -c "create database $LV" >/dev/null
+trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up2" >/dev/null; $PSQL -d postgres -c "drop database if exists $LV" >/dev/null' EXIT
+$PSQL -d $LV -f tests/sql/supabase-stub.sql >/dev/null 2>&1
+if $PSQL -d $LV -f supabase/migrations/001_base.sql >/dev/null 2>&1 \
+   && $PSQL -d $LV -f supabase/migrations/002_live_class.sql >/dev/null 2>&1 \
+   && $PSQL -d $LV -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
+  out=$($PSQL -d $LV -f tests/sql/002_live_class_rls.sql 2>&1 || true)
+  if echo "$out" | grep -q 'ALL LIVE-CLASS RLS TESTS PASSED' \
+     && $PSQL -d $LV -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $LV -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
+    echo "002 after current 001 (×2) + 002 RLS suite + 001/002 re-run: ok"
+  else echo "002: **FAIL** $(echo "$out" | grep -E 'FAIL|ERROR' | head -3)"; fail=1; fi
+else echo "002: **FAIL** 002_live_class.sql does not apply after the current 001"; fail=1; fi
+# Upgrade from c198c60 (before class insights) with data, and with the OLD 002 (insights tied to live_sessions) run
+if git cat-file -e c198c60:supabase/migrations/001_base.sql 2>/dev/null; then
+  UP3=${DB}_up3
+  $PSQL -d postgres -c "create database $UP3" >/dev/null
+  trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up2" >/dev/null; $PSQL -d postgres -c "drop database if exists $LV" >/dev/null; $PSQL -d postgres -c "drop database if exists $UP3" >/dev/null' EXIT
+  $PSQL -d $UP3 -f tests/sql/supabase-stub.sql >/dev/null 2>&1
+  DATA="select (select count(*) from public.class_groups)||'/'||(select count(*) from public.student_enrollments)||'/'||(select count(*) from public.group_members)||'/'||(select count(*) from public.class_sessions)||'/'||(select count(*) from public.session_series)||'/'||(select count(*) from public.profiles)||'/'||(select count(*) from public.live_sessions)"
+  if git show c198c60:supabase/migrations/001_base.sql | $PSQL -d $UP3 >/dev/null 2>&1 \
+     && $PSQL -d $UP3 -f tests/sql/students.sql >/dev/null 2>&1 && $PSQL -d $UP3 -f tests/sql/csv_schedule.sql >/dev/null 2>&1 \
+     && git show c198c60:supabase/migrations/002_live_class.sql | $PSQL -d $UP3 >/dev/null 2>&1 \
+     && git show c198c60:tests/sql/002_live_class_rls.sql | $PSQL -d $UP3 >/dev/null 2>&1; then
+    before=$($PSQL -At -d $UP3 -c "$DATA")
+    if $PSQL -d $UP3 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP3 -f supabase/migrations/001_base.sql >/dev/null 2>&1 \
+       && $PSQL -d $UP3 -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
+      after=$($PSQL -At -d $UP3 -c "$DATA")
+      legacy=$($PSQL -At -d $UP3 -c "select (select count(*) from public.student_insights_live_legacy)||'/'||(select count(*) from public.teacher_insights_live_legacy)||'/'||(select count(*) from public.student_insights)")
+      if [[ "$before" == "$after" && "$legacy" == "2/1/0" ]]; then echo "upgrade (c198c60 + data + old 002 → current 001 ×2 → 002): data kept ($after), old insights kept as *_live_legacy ($legacy)"; else echo "upgrade: **FAIL** c198c60 before=$before after=$after legacy=$legacy"; fail=1; fi
+      out=$($PSQL -d $UP3 -f tests/sql/class_insights.sql 2>&1)
+      echo "$out" | grep -E '\*\*FAIL\*\*' || true
+      sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
+      echo "upgrade (c198c60 → current ×2) + class_insights: passed | failed = $sum"
+      [[ "$sum" =~ \|\ +0$ ]] || fail=1
+    else echo "upgrade: **FAIL** could not upgrade from c198c60"; fail=1; fi
+  else echo "upgrade: **FAIL** could not load c198c60 + data"; fail=1; fi
 fi
 exit $fail

@@ -79,7 +79,7 @@ function seedTree() {
     await page.waitForSelector('#panel-superadmin.active');
     if (!(await page.isVisible('#mode-switch'))) throw new Error('no mode switch for super admin');
     if (await page.isVisible('#nav-ai') || await page.isVisible('#nav-home')) throw new Error('admin mode shows teacher nav');
-    if (!(await page.isVisible('#nav-superadmin')) || !(await page.isVisible('#nav-platform')) || !(await page.isVisible('#nav-insights'))) throw new Error('platform nav missing');
+    if (!(await page.isVisible('#nav-superadmin')) || !(await page.isVisible('#nav-platform')) || !(await page.isVisible('#nav-metrics'))) throw new Error('platform nav missing');
     if (await page.isVisible('#nav-structure')) throw new Error('institution nav visible in "All institutions"');
     if (await page.isVisible('.btn-new-class')) throw new Error('"New class" visible in admin mode');
     if (!/All institutions/.test(await page.textContent('#isw-label'))) throw new Error('switcher not on All');

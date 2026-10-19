@@ -1,5 +1,5 @@
 // Top bar institution switcher (per role, persistence, "All institutions", View as lock), sidebar with labels
-// and groups, and the super admin Insights panel (mock Supabase + mock /api/generate and /api/billing/status).
+// and groups, and the super admin Metrics panel, formerly "Insights" (mock Supabase + mock /api/generate and /api/billing/status).
 // Usage: NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-nav-insights.cjs
 const { chromium } = require('playwright');
 const M = require('./mock-supabase.cjs');
@@ -94,7 +94,7 @@ function seed({ extraRoots = 0 } = {}) {
   return { madre, centro, norte, cat, otra, owner, madm, cadm, sadm, tc };
 }
 const INST_NAV = ['#nav-structure', '#nav-admin', '#nav-branding', '#nav-master', '#nav-billing'];
-const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
+const PLATFORM_NAV = ['#nav-superadmin', '#nav-metrics', '#nav-platform'];
 
 (async () => {
   const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
@@ -106,7 +106,8 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     if ((await text(page, '#isw-label')) !== 'All institutions') throw new Error('default should be All: ' + await text(page, '#isw-label'));
     for (const id of INST_NAV) if (await visible(page, id)) throw new Error(id + ' visible in All institutions');
     for (const id of PLATFORM_NAV) if (!(await visible(page, id))) throw new Error(id + ' missing for super admin');
-    if (await visible(page, '.sib-group[data-group="inst"]')) throw new Error('empty institution group shown');
+    // All institutions: the institution group holds only Insights (class insights of every institution)
+    if (JSON.stringify(await page.$$eval('.sib-group[data-group="inst"] .sib-btn', bs => bs.filter(b => b.offsetParent).map(b => b.id))) !== '["nav-unit-insights"]') throw new Error('institution group in All: only Insights expected');
     await openSwitcher(page);
     if (await visible(page, '#isw-search')) throw new Error('search shown with few units');
     const o = await options(page);
@@ -264,10 +265,10 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     await page.waitForSelector('#isw-static.locked', { state: 'visible' });
     if (await visible(page, '#isw-btn')) throw new Error('dropdown available in View as');
     if (!/The English Coach › Sede Centro/.test(await text(page, '#isw-static'))) throw new Error('locked label: ' + await text(page, '#isw-static'));
-    if (await visible(page, '#nav-insights')) throw new Error('Insights visible in View as');
+    if (await visible(page, '#nav-metrics')) throw new Error('Metrics visible in View as');
     await page.evaluate(id => setInstSel(id), t.norte.id);
-    await page.evaluate(() => showPanel('insights'));
-    if (await visible(page, '#panel-insights')) throw new Error('Insights opened in View as');
+    await page.evaluate(() => showPanel('metrics'));
+    if (await visible(page, '#panel-metrics')) throw new Error('Metrics opened in View as');
     await page.click('#nav-admin');
     await page.waitForFunction(() => /Sede Centro/.test(document.getElementById('admin-inst-badge').textContent));
     if (await page.evaluate(k => localStorage.getItem(k), key) !== t.norte.id) throw new Error('View as changed the saved selection');
@@ -277,11 +278,11 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     if (await visible(page, '#isw-static')) throw new Error('lock not removed');
   });
 
-  await run('Insights: renders the three areas with mock data; period / scope / exclude-self filters; empty and not-recorded states', browser, async ({ page, st }) => {
+  await run('Metrics: renders the three areas with mock data; period / scope / exclude-self filters; empty and not-recorded states', browser, async ({ page, st }) => {
     const t = seed();
     await login(page, 'owner@teroclass.test');
-    await page.click('#nav-insights');
-    await page.waitForSelector('#panel-insights.active #in-usage');
+    await page.click('#nav-metrics');
+    await page.waitForSelector('#panel-metrics.active #in-usage');
     let c = calls.rpc.filter(x => x.fn === 'platform_insights').pop().body;
     if (c.p_days !== 30 || c.p_unit !== null || c.p_exclude_self !== true) throw new Error('default call: ' + JSON.stringify(c));
     if (!(await page.isDisabled('#in-scope-unit'))) throw new Error('unit scope enabled without a unit');
@@ -301,7 +302,7 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     await page.hover('#in-usage .in-col >> nth=3');
     await page.waitForFunction(() => getComputedStyle(document.querySelectorAll('#in-usage .in-col .in-tip')[3]).opacity === '1', null, { timeout: 3000 }).catch(() => { throw new Error('no tooltip on hover'); });
     await shot(page, 'insights-all');
-    if (SHOTS) { await page.evaluate(() => { document.getElementById('panel-insights').scrollTop = 99999; }); await shot(page, 'insights-costs'); await page.evaluate(() => { document.getElementById('panel-insights').scrollTop = 0; }); }
+    if (SHOTS) { await page.evaluate(() => { document.getElementById('panel-metrics').scrollTop = 99999; }); await shot(page, 'insights-costs'); await page.evaluate(() => { document.getElementById('panel-metrics').scrollTop = 0; }); }
     // period
     await page.click('[data-in-days="7"]');
     await page.waitForFunction(() => document.querySelectorAll('#in-usage .in-col').length === 7);
@@ -315,7 +316,7 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     // scope follows the switcher; "All institutions" button overrides it
     await pickUnit(page, 'Sede Centro');
     await page.waitForFunction(() => /Sede Centro/.test(document.getElementById('in-scope')?.textContent || ''));
-    if (!(await page.isVisible('#panel-insights'))) throw new Error('left Insights when picking a unit');
+    if (!(await page.isVisible('#panel-metrics'))) throw new Error('left Metrics when picking a unit');
     c = calls.rpc.filter(x => x.fn === 'platform_insights').pop().body;
     if (c.p_unit !== t.centro.id) throw new Error('unit scope: ' + JSON.stringify(c));
     if (!/Selected unit: Sede Centro/.test(await text(page, '#in-scope-unit'))) throw new Error('scope button label');
@@ -345,14 +346,16 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     if (await page.locator('#in-usage .in-col').count()) throw new Error('empty chart drawn');
   });
 
-  await run('Insights in Spanish + AI prices editable in Platform', browser, async ({ page }) => {
+  await run('Métricas in Spanish (formerly Insights) + AI prices editable in Platform', browser, async ({ page }) => {
     seed();
     await login(page, 'owner@teroclass.test', 'es');
-    if ((await text(page, '#nav-insights .sib-label')) !== 'Insights' || (await text(page, '#nav-insights .sib-label')) !== (await text(page, '#nav-insights .sib-tooltip')) || (await text(page, '#nav-admin .sib-label')) !== 'Panel') throw new Error('label/tooltip ES');
+    if ((await text(page, '#nav-metrics .sib-label')) !== 'Métricas' || (await text(page, '#nav-metrics .sib-label')) !== (await text(page, '#nav-metrics .sib-tooltip')) || (await text(page, '#nav-admin .sib-label')) !== 'Panel') throw new Error('label/tooltip ES');
+    if ((await text(page, '#nav-unit-insights .sib-label')) !== 'Insights') throw new Error('class insights label ES');
     if ((await text(page, '#isw-label')) !== 'Todas las instituciones') throw new Error('switcher ES');
-    await page.click('#nav-insights');
+    await page.click('#nav-metrics');
     await page.waitForSelector('#in-usage');
-    for (const sel of ['#panel-insights', '.icon-sidebar']) { const u = await untranslated(page, sel); if (u.length) throw new Error(sel + ' sin traducir: ' + JSON.stringify(u)); }
+    if (!/Métricas/.test(await text(page, '#panel-metrics .sa-title'))) throw new Error('panel title ES');
+    for (const sel of ['#panel-metrics', '.icon-sidebar']) { const u = await untranslated(page, sel); if (u.length) throw new Error(sel + ' sin traducir: ' + JSON.stringify(u)); }
     if (!/Uso y actividad/.test(await text(page, '#in-usage')) || !/Costos/.test(await text(page, '#in-costs'))) throw new Error('titles ES');
     await shot(page, 'insights-es');
     await openSwitcher(page);
@@ -369,17 +372,17 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     await waitToast(page, /Precios guardados/);
     const c = calls.rpc.filter(x => x.fn === 'update_ai_prices').pop().body;
     if (c.p_input !== 5 || c.p_output !== 15) throw new Error('prices payload ' + JSON.stringify(c));
-    await page.click('#nav-insights');
+    await page.click('#nav-metrics');
     await page.waitForFunction(() => /entrada USD 5\.00 · salida USD 15\.00|input USD 5\.00 · output USD 15\.00/.test(document.getElementById('in-costs')?.textContent || ''));
   });
 
-  await run('Admins and teachers never see Insights (nav, direct call, RPC denied)', browser, async ({ page }) => {
+  await run('Admins and teachers never see Metrics (nav, direct call, RPC denied)', browser, async ({ page }) => {
     seed();
     for (const email of ['madm@c.com', 'tc@c.com']) {
       await login(page, email);
-      if (await visible(page, '#nav-insights') || await visible(page, '#nav-platform') || await visible(page, '#nav-superadmin')) throw new Error('platform nav for ' + email);
-      await page.evaluate(() => showPanel('insights'));
-      if (await visible(page, '#panel-insights')) throw new Error('Insights opened for ' + email);
+      if (await visible(page, '#nav-metrics') || await visible(page, '#nav-platform') || await visible(page, '#nav-superadmin')) throw new Error('platform nav for ' + email);
+      await page.evaluate(() => showPanel('metrics'));
+      if (await visible(page, '#panel-metrics')) throw new Error('Metrics opened for ' + email);
       const r = await page.evaluate(async () => (await sb.rpc('platform_insights', { p_days: 30 })).error?.message || 'ok');
       if (!/No autorizado/.test(r)) throw new Error('RPC not denied for ' + email);
       await page.evaluate(() => handleLogout()); await page.waitForSelector('#tab-login', { state: 'visible' });
@@ -393,7 +396,7 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     const w = await page.evaluate(() => document.querySelector('.icon-sidebar').getBoundingClientRect().width);
     if (w < 80 || w > 90) throw new Error('sidebar width ' + w);
     const labels = await page.$$eval('.icon-sidebar .sib-btn', bs => bs.filter(b => b.offsetParent).map(b => b.querySelector('.sib-label').textContent));
-    if (JSON.stringify(labels) !== '["Live class","Structure","Groups","Dashboard","Branding","AI Settings","Plan & usage","Institutions","Insights","Platform"]') throw new Error('labels: ' + JSON.stringify(labels));
+    if (JSON.stringify(labels) !== '["Live class","Structure","Groups","Dashboard","Insights","Branding","AI Settings","Plan & usage","Institutions","Metrics","Platform"]') throw new Error('labels: ' + JSON.stringify(labels));
     const tips = await page.$$eval('.icon-sidebar .sib-btn', bs => bs.every(b => b.querySelector('.sib-tooltip')?.textContent === b.querySelector('.sib-label').textContent));
     if (!tips) throw new Error('tooltips missing');
     const seps = await page.$$eval('.sib-group', gs => gs.filter(g => g.offsetParent).map(g => getComputedStyle(g).borderTopWidth));
@@ -413,7 +416,7 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-insights', '#nav-platform'];
     await shot(page, 'mobile');
   });
 
-  await run('AI requests carry class metadata (subjects, language, age band, level, bars) for Insights', browser, async ({ page, st }) => {
+  await run('AI requests carry class metadata (subjects, language, age band, level, bars) for Metrics', browser, async ({ page, st }) => {
     seed();
     await login(page, 'tc@c.com');
     await page.click('#nav-ai');
