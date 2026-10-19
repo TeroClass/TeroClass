@@ -493,7 +493,7 @@
         <h3>${L.tracker}</h3>
         ${st.tracker.length ? `<div class="lc-table-wrap"><table class="lc-table">
           <thead><tr><th scope="col">Concept</th><th scope="col">Difficulty</th><th scope="col">Used</th><th scope="col">Updated</th><th scope="col">Mastery</th></tr></thead>
-          <tbody>${st.tracker.map(r => { const m = Math.max(0, Math.min(100, num(r.mastery))); return `<tr><td data-no-i18n>${E(r.concept)}</td><td><span class="lc-chip lc-diff-${E(str(r.difficulty).toLowerCase().replace(/[^a-záéíóú]/g, ''))}" data-no-i18n>${E(r.difficulty)}</span></td><td data-no-i18n>${num(r.used)}×</td><td data-no-i18n>${E(r.updated)}</td>
+          <tbody>${st.tracker.map(r => { const m = Math.max(0, Math.min(100, num(r.mastery))); return `<tr><td data-no-i18n>${E(r.concept)}</td><td><span class="lc-chip lc-diff-${E(str(r.difficulty).toLowerCase().replace(/[^a-záéíóú]/g, ''))}">${E(r.difficulty)}</span></td><td data-no-i18n>${num(r.used)}×</td><td>${E(r.updated)}</td>
             <td><div class="lc-mastery"><div class="lc-progress"><span style="width:${m}%" class="${m >= 80 ? 'good' : m >= 60 ? 'mid' : 'low'}"></span></div><b data-no-i18n>${m}%</b></div></td></tr>`; }).join('')}</tbody>
         </table></div>` : '<p class="lc-empty">—</p>'}
       </section>`;
@@ -689,6 +689,7 @@
   // ════════════════════════════════════════════════════════════════════════════════════════
   if (typeof I18N_ES === 'object' && I18N_ES) Object.assign(I18N_ES, {
     [DEMO_BANNER]: 'Datos de demostración: los insights reales se activan cuando se conecte el aula en vivo', 'Demo': 'Demo',
+    'Easy': 'Fácil', 'Medium': 'Media', 'Hard': 'Difícil', 'Today': 'Hoy', '2 classes ago': 'Hace 2 clases', 'Básico': 'Básico', 'Intermedio': 'Intermedio', 'Avanzado': 'Avanzado', 'Hoy': 'Hoy',
     'Insights': 'Insights', 'Student insights': 'Insights del estudiante', 'Teacher insights': 'Insights del docente', 'Choose a student': 'Elegí un estudiante',
     'Summary': 'Resumen', 'Overview': 'Resumen', 'Recap': 'Repaso', 'Progress': 'Progreso', 'Feedback': 'Devolución', 'Vocabulary': 'Vocabulario', 'Key terms': 'Términos clave',
     'Message to': 'Mensaje para', 'Message to the student': 'Mensaje para el estudiante', 'PH:Write a personal note for this student…': 'Escribí una nota personal para este estudiante…',
