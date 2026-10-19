@@ -1959,6 +1959,21 @@ create table if not exists public.calendar_tokens (
   created_at timestamptz not null default now()
 );
 
+-- Docente / suplente PENDIENTE: email de alguien todavía no registrado (invitado). Se asigna solo apenas se
+-- registra o acepta la invitación (trigger profiles_claim_pending_groups). Solo lo ven los admins de la unidad.
+alter table public.class_groups add column if not exists pending_teacher_email text;
+alter table public.class_groups add column if not exists pending_substitute_email text;
+alter table public.class_groups drop constraint if exists class_groups_pending_ok;
+alter table public.class_groups add constraint class_groups_pending_ok check (
+  (pending_teacher_email is null or (length(pending_teacher_email) <= 254 and teacher_id is null))
+  and (pending_substitute_email is null or (length(pending_substitute_email) <= 254 and substitute_id is null))
+  and (pending_teacher_email is null or pending_teacher_email is distinct from pending_substitute_email));
+-- Origen de la serie: 'csv' = la creó / actualiza la importación (volver a importar la reconoce y no duplica)
+alter table public.session_series add column if not exists origin text not null default 'manual';
+alter table public.session_series drop constraint if exists session_series_origin_check;
+alter table public.session_series add constraint session_series_origin_check check (origin in ('manual','csv'));
+create index if not exists session_series_group_idx on public.session_series (group_id, origin, created_at);
+
 -- Sin acceso directo para nadie desde la app: todo pasa por las funciones de abajo.
 alter table public.class_groups        enable row level security;
 alter table public.student_enrollments enable row level security;
@@ -2108,6 +2123,142 @@ drop trigger if exists profiles_groups_cleanup on public.profiles;
 create trigger profiles_groups_cleanup after update of institution_id, role on public.profiles
   for each row execute function public.profiles_groups_cleanup();
 
+-- ── docente / suplente por EMAIL (CSV o "Editar grupo"), registrado o todavía no ──
+-- Estado de un email para ser docente de un grupo de la unidad p_unit (lo pregunta un admin):
+--   registered  → docente/admin de la misma cuenta que quien pregunta administra ({id, name})
+--   invited     → sin cuenta, ya tiene una invitación pendiente en la cuenta
+--   invite      → sin cuenta: se lo invita como docente (invite_member)
+--   add         → tiene cuenta pero sin unidad: invite_member lo suma directo (ocupa un asiento)
+--   not_allowed → es de otra institución / de una unidad que no administro / no se puede invitar
+--   bad_email · none
+create or replace function public.tc_person_status(p_unit uuid, p_email text) returns jsonb
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_email text := lower(btrim(coalesce(p_email, ''))); p public.profiles%rowtype; v_root uuid := public.billing_root(p_unit);
+begin
+  if v_email = '' then return jsonb_build_object('status', 'none'); end if;
+  if not public.tc_email_ok(v_email) then return jsonb_build_object('status', 'bad_email'); end if;
+  select pr.* into p from public.profiles pr join auth.users u on u.id = pr.id where lower(btrim(u.email)) = v_email limit 1;
+  if p.id is not null then
+    if p.role = 'superadmin' then return jsonb_build_object('status', 'not_allowed'); end if;
+    if p.role in ('teacher','org_admin') and p.institution_id is not null then
+      if public.is_admin_of(p.institution_id) and public.billing_root(p.institution_id) = v_root then
+        return jsonb_build_object('status', 'registered', 'id', p.id, 'name', coalesce(p.name, ''));
+      end if;
+      return jsonb_build_object('status', 'not_allowed');
+    end if;
+    return jsonb_build_object('status', 'add');
+  end if;
+  if exists (select 1 from public.invitations i where lower(i.email) = v_email and i.accepted_at is null
+              and public.billing_root(i.institution_id) = v_root) then
+    return jsonb_build_object('status', 'invited');
+  end if;
+  return jsonb_build_object('status', 'invite');
+end $$;
+revoke all on function public.tc_person_status(uuid, text) from public, anon, authenticated;
+
+-- Asignar docente (p_kind 'teacher') o suplente ('substitute') de un grupo por email. Registrado → queda asignado.
+-- Si no: queda PENDIENTE en el grupo y se lo invita a la unidad del grupo con las reglas de invite_member
+-- (permisos + asientos). Sin asientos: queda pendiente igual (sin invitación). Devuelve
+-- 'assigned' | 'invited' | 'seats_full' | 'none'. Uso interno (quien llama ya verificó que administra el grupo).
+create or replace function public.tc_assign_person(p_group uuid, p_kind text, p_email text) returns text
+language plpgsql volatile security definer set search_path = public as
+$$
+declare g public.class_groups%rowtype; st jsonb; v_email text := lower(btrim(coalesce(p_email, ''))); v_id uuid; v_res text;
+begin
+  select * into g from public.class_groups where id = p_group;
+  if g.id is null or p_kind not in ('teacher','substitute') then raise exception 'No autorizado'; end if;
+  st := public.tc_person_status(g.institution_id, v_email);
+  if st->>'status' = 'none' then return 'none'; end if;
+  if st->>'status' in ('not_allowed','bad_email') then raise exception 'Docente no válido para este grupo'; end if;
+  if st->>'status' = 'registered' then
+    v_id := (st->>'id')::uuid;
+    if v_id = (case when p_kind = 'teacher' then g.substitute_id else g.teacher_id end) then raise exception 'El suplente tiene que ser otra persona'; end if;
+    if p_kind = 'teacher' then update public.class_groups set teacher_id = v_id, pending_teacher_email = null where id = p_group;
+    else update public.class_groups set substitute_id = v_id, pending_substitute_email = null where id = p_group; end if;
+    return 'assigned';
+  end if;
+  if v_email = (case when p_kind = 'teacher' then g.pending_substitute_email else g.pending_teacher_email end) then
+    raise exception 'El suplente tiene que ser otra persona';
+  end if;
+  if p_kind = 'teacher' then update public.class_groups set teacher_id = null, pending_teacher_email = v_email where id = p_group;
+  else update public.class_groups set substitute_id = null, pending_substitute_email = v_email where id = p_group; end if;
+  if st->>'status' = 'invited' then return 'invited'; end if;
+  begin
+    v_res := public.invite_member(g.institution_id, v_email, 'teacher');   -- 'add': el trigger lo asigna enseguida
+  exception when others then
+    if sqlerrm ilike '%asientos%' then return 'seats_full'; end if;
+    raise;
+  end;
+  return case when v_res = 'added' then 'assigned' else 'invited' end;
+end $$;
+revoke all on function public.tc_assign_person(uuid, text, text) from public, anon, authenticated;
+
+-- Apenas alguien queda como docente/admin de una unidad (registro con invitación o por /org/<slug>,
+-- invite_member a una cuenta existente, mover de unidad) toma los grupos que lo esperaban por su email
+-- (email REAL de la cuenta, auth.users) dentro de la misma cuenta.
+create or replace function public.tc_claim_pending_groups() returns trigger
+language plpgsql security definer set search_path = public as
+$$
+declare v_email text; v_root uuid;
+begin
+  if new.role not in ('teacher','org_admin') or new.institution_id is null then return new; end if;
+  if tg_op = 'UPDATE' and old.institution_id is not distinct from new.institution_id and old.role is not distinct from new.role then return new; end if;
+  select lower(btrim(u.email)) into v_email from auth.users u where u.id = new.id;
+  if coalesce(v_email, '') = '' then return new; end if;
+  v_root := public.billing_root(new.institution_id);
+  update public.class_groups g set teacher_id = new.id, pending_teacher_email = null
+   where g.pending_teacher_email = v_email and g.teacher_id is null and g.substitute_id is distinct from new.id
+     and public.billing_root(g.institution_id) = v_root;
+  update public.class_groups g set substitute_id = new.id, pending_substitute_email = null
+   where g.pending_substitute_email = v_email and g.substitute_id is null and g.teacher_id is distinct from new.id
+     and public.billing_root(g.institution_id) = v_root;
+  return new;
+end $$;
+revoke all on function public.tc_claim_pending_groups() from public, anon, authenticated;
+drop trigger if exists profiles_claim_pending_groups on public.profiles;
+create trigger profiles_claim_pending_groups after insert or update of institution_id, role on public.profiles
+  for each row execute function public.tc_claim_pending_groups();
+
+-- Aplicar un horario nuevo a una serie (misma regla que "Editar toda la serie"): las clases FUTURAS no editadas
+-- una por una se mueven, las de días que ya no van se borran y se agregan las que faltan. Las pasadas no cambian.
+-- p_start_date / p_timezone null = sin cambio. Uso interno (quien llama ya validó permisos y datos).
+create or replace function public.tc_series_apply(p_series uuid, p_title text, p_days integer[], p_start_time time,
+                                                  p_duration integer, p_start_date date, p_end_date date, p_timezone text)
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare s public.session_series%rowtype; v_tz text; v_sd date; v_today date; v_del int := 0; v_upd int := 0; v_ins int := 0;
+begin
+  select * into s from public.session_series where id = p_series;
+  if s.id is null then raise exception 'No autorizado'; end if;
+  v_tz := coalesce(nullif(btrim(p_timezone), ''), s.timezone); v_sd := coalesce(p_start_date, s.start_date);
+  v_today := (now() at time zone v_tz)::date;
+  update public.session_series set title = p_title, weekdays = p_days, start_time = p_start_time, duration_min = p_duration,
+         start_date = v_sd, end_date = p_end_date, timezone = v_tz where id = p_series;
+  delete from public.class_sessions c
+   where c.series_id = p_series and c.starts_at > now() and not c.modified
+     and (c.starts_at at time zone s.timezone)::date not in (select public.tc_series_dates(p_days, greatest(v_sd, v_today), p_end_date));
+  get diagnostics v_del = row_count;
+  update public.class_sessions c
+     set title = p_title,
+         starts_at = public.tc_local_ts((c.starts_at at time zone s.timezone)::date, p_start_time, v_tz),
+         ends_at = public.tc_local_ts((c.starts_at at time zone s.timezone)::date, p_start_time, v_tz) + make_interval(mins => p_duration),
+         timezone = v_tz, seq = c.seq + 1
+   where c.series_id = p_series and c.starts_at > now() and not c.modified;
+  get diagnostics v_upd = row_count;
+  insert into public.class_sessions (institution_id, group_id, series_id, teacher_id, title, starts_at, ends_at, timezone)
+  select g.institution_id, g.id, s.id, coalesce(g.teacher_id, auth.uid()), p_title, public.tc_local_ts(d, p_start_time, v_tz),
+         public.tc_local_ts(d, p_start_time, v_tz) + make_interval(mins => p_duration), v_tz
+    from public.tc_series_dates(p_days, greatest(v_sd, v_today), p_end_date) d
+    join public.class_groups g on g.id = s.group_id
+   where public.tc_local_ts(d, p_start_time, v_tz) > now()
+     and not exists (select 1 from public.class_sessions c where c.series_id = s.id and (c.starts_at at time zone v_tz)::date = d);
+  get diagnostics v_ins = row_count;
+  return json_build_object('updated', v_upd, 'created', v_ins, 'removed', v_del);
+end $$;
+revoke all on function public.tc_series_apply(uuid, text, integer[], time, integer, date, date, text) from public, anon, authenticated;
+
 -- ── ADMIN: grupos y estudiantes de la unidad elegida (y todo lo que cuelga de ella) ──
 create or replace function public.tc_unit_scope(p_unit uuid) returns uuid[]
 language sql stable security definer set search_path = public as
@@ -2131,9 +2282,20 @@ begin
   return coalesce((select json_agg(x order by x.unit_name, lower(x.name)) from (
     select g.id, g.name, g.institution_id, i.name as unit_name, g.timezone,
            public.tc_person_json(g.teacher_id) as teacher, public.tc_person_json(g.substitute_id) as substitute,
+           -- pendientes (invitados que todavía no se registraron): solo en esta función, solo para admins
+           case when g.pending_teacher_email is not null then json_build_object('email', g.pending_teacher_email,
+             'invited', exists (select 1 from public.invitations iv where lower(iv.email) = g.pending_teacher_email and iv.accepted_at is null
+                                  and public.billing_root(iv.institution_id) = public.billing_root(g.institution_id))) end as pending_teacher,
+           case when g.pending_substitute_email is not null then json_build_object('email', g.pending_substitute_email,
+             'invited', exists (select 1 from public.invitations iv where lower(iv.email) = g.pending_substitute_email and iv.accepted_at is null
+                                  and public.billing_root(iv.institution_id) = public.billing_root(g.institution_id))) end as pending_substitute,
            (select count(*) from public.group_members m where m.group_id = g.id)::int as students,
            (select min(s.starts_at) from public.class_sessions s
-             where s.group_id = g.id and s.status = 'scheduled' and s.ends_at > now()) as next_session
+             where s.group_id = g.id and s.status = 'scheduled' and s.ends_at > now()) as next_session,
+           (select json_build_object('weekdays', ss.weekdays, 'start_time', to_char(ss.start_time, 'HH24:MI'), 'duration_min', ss.duration_min,
+                     'start_date', ss.start_date, 'end_date', ss.end_date, 'timezone', ss.timezone, 'origin', ss.origin)
+              from public.session_series ss where ss.group_id = g.id and ss.end_date >= (now() at time zone ss.timezone)::date
+             order by (ss.origin = 'csv') desc, ss.created_at desc limit 1) as schedule
       from public.class_groups g join public.institutions i on i.id = g.institution_id
      where g.institution_id = any(public.tc_unit_scope(p_unit))) x), '[]'::json);
 end $$;
@@ -2167,17 +2329,24 @@ begin
      where m.group_id = p_group) x), '[]'::json);
 end $$;
 
+-- Crear un grupo. Docente / suplente: una cuenta (p_teacher / p_substitute) o un EMAIL (p_teacher_email /
+-- p_substitute_email) de alguien invitado o por invitar: queda pendiente y se asigna solo cuando se registra.
+drop function if exists public.create_group(uuid, text, uuid, uuid, text);
 create or replace function public.create_group(p_unit uuid, p_name text, p_teacher uuid default null,
-                                               p_substitute uuid default null, p_timezone text default 'America/Montevideo')
+                                               p_substitute uuid default null, p_timezone text default 'America/Montevideo',
+                                               p_teacher_email text default null, p_substitute_email text default null)
 returns uuid
 language plpgsql volatile security definer set search_path = public as
 $$
 declare v_name text := public.tc_clean_text(p_name, 120); v_tz text := coalesce(nullif(btrim(p_timezone), ''), 'America/Montevideo'); v_id uuid;
+        v_te text := case when p_teacher is null then lower(btrim(coalesce(p_teacher_email, ''))) else '' end;
+        v_se text := case when p_substitute is null then lower(btrim(coalesce(p_substitute_email, ''))) else '' end;
 begin
   perform public.tc_assert_admin(p_unit);
   if v_name = '' then raise exception 'Nombre del grupo requerido'; end if;
   if not public.tc_tz_ok(v_tz) then raise exception 'Zona horaria inválida'; end if;
   if p_substitute is not null and p_substitute = p_teacher then raise exception 'El suplente tiene que ser otra persona'; end if;
+  if v_te <> '' and v_te = v_se then raise exception 'El suplente tiene que ser otra persona'; end if;
   perform public.tc_assert_teacher(p_unit, p_teacher);
   perform public.tc_assert_teacher(p_unit, p_substitute);
   if exists (select 1 from public.class_groups where institution_id = p_unit and lower(btrim(name)) = lower(v_name)) then
@@ -2185,27 +2354,40 @@ begin
   end if;
   insert into public.class_groups (institution_id, name, teacher_id, substitute_id, timezone, created_by)
   values (p_unit, v_name, p_teacher, p_substitute, v_tz, auth.uid()) returning id into v_id;
+  if v_te <> '' then perform public.tc_assign_person(v_id, 'teacher', v_te); end if;
+  if v_se <> '' then perform public.tc_assign_person(v_id, 'substitute', v_se); end if;
   return v_id;
 end $$;
 
--- Cambiar nombre, docente, suplente o zona horaria (se mandan todos los valores; null = sin docente / sin suplente)
-create or replace function public.update_group(p_group uuid, p_name text, p_teacher uuid, p_substitute uuid, p_timezone text)
+-- Cambiar nombre, docente, suplente o zona horaria (se mandan todos los valores; null = sin docente / sin suplente).
+-- Un email en p_teacher_email / p_substitute_email = docente pendiente (si ya era el pendiente, no se reinvita).
+drop function if exists public.update_group(uuid, text, uuid, uuid, text);
+create or replace function public.update_group(p_group uuid, p_name text, p_teacher uuid, p_substitute uuid, p_timezone text,
+                                               p_teacher_email text default null, p_substitute_email text default null)
 returns uuid
 language plpgsql volatile security definer set search_path = public as
 $$
 declare g public.class_groups%rowtype; v_name text := public.tc_clean_text(p_name, 120); v_tz text := btrim(coalesce(p_timezone, ''));
+        v_te text := case when p_teacher is null then lower(btrim(coalesce(p_teacher_email, ''))) else '' end;
+        v_se text := case when p_substitute is null then lower(btrim(coalesce(p_substitute_email, ''))) else '' end;
 begin
   select * into g from public.class_groups where id = p_group;
   if g.id is null or not public.is_admin_of(g.institution_id) then raise exception 'No autorizado'; end if;
   if v_name = '' then raise exception 'Nombre del grupo requerido'; end if;
   if not public.tc_tz_ok(v_tz) then raise exception 'Zona horaria inválida'; end if;
   if p_substitute is not null and p_substitute = p_teacher then raise exception 'El suplente tiene que ser otra persona'; end if;
+  if v_te <> '' and v_te = v_se then raise exception 'El suplente tiene que ser otra persona'; end if;
   if p_teacher is distinct from g.teacher_id then perform public.tc_assert_teacher(g.institution_id, p_teacher); end if;
   if p_substitute is distinct from g.substitute_id then perform public.tc_assert_teacher(g.institution_id, p_substitute); end if;
   if exists (select 1 from public.class_groups where institution_id = g.institution_id and id <> g.id and lower(btrim(name)) = lower(v_name)) then
     raise exception 'Ya existe un grupo con ese nombre en esta unidad';
   end if;
-  update public.class_groups set name = v_name, teacher_id = p_teacher, substitute_id = p_substitute, timezone = v_tz where id = p_group;
+  update public.class_groups set name = v_name, teacher_id = p_teacher, substitute_id = p_substitute, timezone = v_tz,
+         pending_teacher_email = case when v_te <> '' and v_te = g.pending_teacher_email then v_te end,
+         pending_substitute_email = case when v_se <> '' and v_se = g.pending_substitute_email then v_se end
+   where id = p_group;
+  if v_te <> '' and v_te is distinct from g.pending_teacher_email then perform public.tc_assign_person(p_group, 'teacher', v_te); end if;
+  if v_se <> '' and v_se is distinct from g.pending_substitute_email then perform public.tc_assign_person(p_group, 'substitute', v_se); end if;
   return p_group;
 end $$;
 
@@ -2304,73 +2486,163 @@ begin
   return 'removed';
 end $$;
 
--- Importar estudiantes desde un CSV ya leído en el navegador: p_rows = [{line,email,name,group,teacher_email,unit}].
--- p_commit = false → solo valida (vista previa); true → carga las filas válidas. Idempotente: volver a
--- importar el mismo archivo no duplica nada. Máximo 2000 filas.
--- Estado por fila: ok (se carga) · exists (ya estaba) · new_group (se crea el grupo) · error (code).
--- Códigos: missing_email, bad_email, duplicate, unknown_unit, ambiguous_unit, unknown_teacher, unknown_group,
---          bad_group; aviso: teacher_ignored (el grupo ya tiene otro docente).
+-- Importar desde un CSV ya leído en el navegador (public/csv-import.js normaliza cada fila):
+--   p_rows = [{line, email, name, group, unit, teacher_email, substitute_email,
+--              weekdays:[1..7], start_time:"HH:MM", duration_min, start_date:"YYYY-MM-DD", end_date, timezone, errors:[...]}]
+-- p_commit = false → solo valida (vista previa); true → carga. Idempotente: volver a importar el mismo archivo no
+-- duplica grupos, inscripciones ni clases. Máximo 2000 filas.
+-- Docente, suplente, horario y zona horaria son del GRUPO: las filas de un grupo pueden repetirlos o dejarlos vacíos;
+-- si dos filas del mismo grupo dicen cosas distintas, la segunda es un error ('conflict', field).
+-- Una fila con grupo + horario/docente y sin email define un grupo sin estudiantes todavía ('group_only').
+-- Estado por fila: ok · exists (ya estaba) · new_group (se crea el grupo) · group_only · error (code).
+-- Códigos: missing_email, bad_email, duplicate, unknown_unit, ambiguous_unit, unknown_teacher, unknown_substitute,
+--          unknown_group, bad_group, missing_group, conflict, same_person, bad_schedule y los del navegador
+--          (ambiguous_day, bad_days, bad_time, bad_end_time, bad_duration, time_conflict, bad_date, bad_end_date,
+--          date_mdy, end_before_start, range_too_long, bad_tz, bad_teacher_email, bad_substitute_email);
+--          aviso: teacher_ignored (el grupo ya tiene otro docente: se mantiene).
+-- Por grupo (groups[]): docente/suplente (registered · invite · invited · add · current · pending · kept, seats_full),
+--   horario (schedule_status: none · new · unchanged · changed · error), clases que se crean (solo FUTURAS),
+--   estudiantes. Al cargar, en este orden: grupos → docente y suplente (registrado: asignado; si no: pendiente +
+--   invitación a la unidad del grupo, reglas de invite_member) → inscripciones → serie semanal (origin 'csv') con sus
+--   clases. Horario cambiado: solo se mueven las clases futuras no editadas una por una (tc_series_apply); las pasadas
+--   nunca se tocan.
 create or replace function public.import_students(p_unit uuid, p_rows jsonb, p_create_groups boolean default false, p_commit boolean default false)
 returns json
 language plpgsql volatile security definer set search_path = public as
 $$
 declare
-  v_scope uuid[]; v_root uuid; r jsonb; i int := 0;
-  v_line int; v_email text; v_name text; v_gname text; v_temail text; v_unitq text;
-  v_unit uuid; v_unit_name text; v_n int; v_teacher uuid; v_group uuid; v_gteacher uuid; v_enr uuid;
-  v_status text; v_code text; v_warn text; v_key text;
-  v_seen text[] := '{}'; v_newg jsonb := '{}'::jsonb; v_out jsonb := '[]'::jsonb;
-  c_ok int := 0; c_exists int := 0; c_err int := 0; c_newrows int := 0;
+  v_scope uuid[]; v_root uuid; r jsonb; i int := 0; k text; w jsonb;
+  v_line int; v_email text; v_name text; v_gname text; v_temail text; v_semail text; v_unitq text;
+  v_unit uuid; v_unit_name text; v_n int; v_group uuid; v_gteacher uuid; v_enr uuid;
+  v_status text; v_code text; v_field text; v_warn text; v_key text; v_gkey text;
+  v_vals jsonb; v_def jsonb; v_g jsonb; v_tst jsonb; v_sst jsonb; v_t jsonb; v_s jsonb; v_sched jsonb; v_prev jsonb;
+  v_days integer[]; v_time time; v_dur int; v_sd date; v_ed date; v_tz text; v_today date;
+  v_sstatus text; v_serr text; v_missing text[]; v_classes int; v_past int; v_other int; v_res text; v_sid uuid;
+  v_cg public.class_groups%rowtype; v_ser public.session_series%rowtype;
+  v_seen text[] := '{}'; v_groups jsonb := '{}'::jsonb; v_people jsonb := '{}'::jsonb; v_work jsonb := '[]'::jsonb;
+  v_out jsonb := '[]'::jsonb; v_glist jsonb := '[]'::jsonb; v_gids jsonb := '{}'::jsonb; v_newp text[] := '{}'; v_avail int;
+  c_ok int := 0; c_exists int := 0; c_err int := 0; c_newrows int := 0; c_grows int := 0; c_classes int := 0; c_changes int := 0;
+  c_codes constant text[] := array['ambiguous_day','bad_days','bad_time','bad_end_time','bad_duration','time_conflict','bad_date',
+    'bad_end_date','date_mdy','end_before_start','range_too_long','bad_tz','bad_teacher_email','bad_substitute_email','same_person'];
 begin
   perform public.tc_assert_admin(p_unit);
   if p_rows is null or jsonb_typeof(p_rows) <> 'array' then raise exception 'Archivo inválido'; end if;
   if jsonb_array_length(p_rows) > 2000 then raise exception 'Demasiadas filas (máximo 2000)'; end if;
   v_scope := public.tc_unit_scope(p_unit); v_root := public.billing_root(p_unit);
+
+  -- ── 1) cada fila ──
   for r in select * from jsonb_array_elements(p_rows) loop
     i := i + 1;
+    if jsonb_typeof(r) <> 'object' then raise exception 'Archivo inválido'; end if;
     v_line := case when jsonb_typeof(r->'line') = 'number' then (r->>'line')::int else i + 1 end;
     v_email := btrim(coalesce(r->>'email', ''));
     v_name := public.tc_clean_text(r->>'name', 120);
     v_gname := public.tc_clean_text(r->>'group', 200);
     v_temail := lower(btrim(coalesce(r->>'teacher_email', '')));
+    v_semail := lower(btrim(coalesce(r->>'substitute_email', '')));
     v_unitq := btrim(coalesce(r->>'unit', ''));
-    v_status := 'ok'; v_code := null; v_warn := null; v_unit := null; v_unit_name := null; v_group := null; v_teacher := null; v_gteacher := null;
+    v_status := 'ok'; v_code := null; v_field := null; v_warn := null; v_unit := null; v_unit_name := null;
+    v_group := null; v_gteacher := null; v_gkey := null; v_g := null; v_tst := null; v_sst := null;
+    -- valores del grupo (el navegador ya los normalizó; acá se vuelven a validar)
+    v_vals := '{}'::jsonb;
+    begin
+      if jsonb_typeof(r->'weekdays') = 'array' and jsonb_array_length(r->'weekdays') > 0 then
+        v_days := public.tc_weekdays(array(select (x #>> '{}')::int from jsonb_array_elements(r->'weekdays') x));
+        v_vals := v_vals || jsonb_build_object('weekdays', to_jsonb(v_days));
+      end if;
+      if coalesce(r->>'start_time', '') <> '' then
+        if (r->>'start_time') !~ '^\d{2}:\d{2}$' then raise exception 'hora'; end if;
+        v_vals := v_vals || jsonb_build_object('start_time', to_char((r->>'start_time')::time, 'HH24:MI'));
+      end if;
+      if coalesce(r->>'duration_min', '') <> '' then
+        v_dur := (r->>'duration_min')::int; perform public.tc_check_duration(v_dur);
+        v_vals := v_vals || jsonb_build_object('duration_min', v_dur);
+      end if;
+      if coalesce(r->>'start_date', '') <> '' then
+        if (r->>'start_date') !~ '^\d{4}-\d{2}-\d{2}$' then raise exception 'fecha'; end if;
+        v_vals := v_vals || jsonb_build_object('start_date', (r->>'start_date')::date::text);
+      end if;
+      if coalesce(r->>'end_date', '') <> '' then
+        if (r->>'end_date') !~ '^\d{4}-\d{2}-\d{2}$' then raise exception 'fecha'; end if;
+        v_vals := v_vals || jsonb_build_object('end_date', (r->>'end_date')::date::text);
+      end if;
+      if coalesce(r->>'timezone', '') <> '' then
+        if not public.tc_tz_ok(btrim(r->>'timezone')) then raise exception 'zona'; end if;
+        v_vals := v_vals || jsonb_build_object('timezone', btrim(r->>'timezone'));
+      end if;
+    exception when others then v_status := 'error'; v_code := 'bad_schedule'; v_vals := '{}'::jsonb;
+    end;
+    if v_temail <> '' then v_vals := v_vals || jsonb_build_object('teacher_email', v_temail); end if;
+    if v_semail <> '' then v_vals := v_vals || jsonb_build_object('substitute_email', v_semail); end if;
     -- unidad (por slug o nombre, dentro de la unidad elegida y lo que cuelga)
     if v_unitq = '' then v_unit := p_unit;
     else
       select count(*), min(id::text)::uuid into v_n, v_unit from public.institutions
        where id = any(v_scope) and (slug = lower(v_unitq) or lower(btrim(name)) = lower(v_unitq));
-      if v_n = 0 then v_status := 'error'; v_code := 'unknown_unit'; v_unit := null;
-      elsif v_n > 1 then v_status := 'error'; v_code := 'ambiguous_unit'; v_unit := null; end if;
-    end if;
-    if v_unit is not null then select name into v_unit_name from public.institutions where id = v_unit; end if;
-    if v_status = 'ok' then
-      if v_email = '' then v_status := 'error'; v_code := 'missing_email';
-      elsif not public.tc_email_ok(v_email) then v_status := 'error'; v_code := 'bad_email';
-      elsif length(v_gname) > 120 then v_status := 'error'; v_code := 'bad_group';
+      if v_n <> 1 then
+        if v_status = 'ok' then v_status := 'error'; v_code := case when v_n = 0 then 'unknown_unit' else 'ambiguous_unit' end; end if;
+        v_unit := null;
       end if;
     end if;
+    if v_unit is not null then select name into v_unit_name from public.institutions where id = v_unit; end if;
+    -- problemas de formato que encontró el navegador (días ambiguos, fechas inválidas, …)
+    if v_status = 'ok' and jsonb_typeof(r->'errors') = 'array' and jsonb_array_length(r->'errors') > 0 then
+      select x into v_code from jsonb_array_elements_text(r->'errors') x where x = any(c_codes) limit 1;
+      v_status := 'error'; v_code := coalesce(v_code, 'bad_schedule');
+    end if;
+    if v_status = 'ok' then
+      if v_email = '' then
+        if v_gname <> '' and v_vals <> '{}'::jsonb then v_status := 'group_only';
+        else v_status := 'error'; v_code := 'missing_email'; end if;
+      elsif not public.tc_email_ok(v_email) then v_status := 'error'; v_code := 'bad_email';
+      end if;
+    end if;
+    if v_status <> 'error' and length(v_gname) > 120 then v_status := 'error'; v_code := 'bad_group'; end if;
+    if v_status <> 'error' and v_gname = '' and (v_vals - 'teacher_email') <> '{}'::jsonb then v_status := 'error'; v_code := 'missing_group'; end if;
     if v_status = 'ok' then
       v_key := lower(v_email) || '|' || v_unit::text || '|' || lower(v_gname);
       if v_key = any(v_seen) then v_status := 'error'; v_code := 'duplicate'; else v_seen := v_seen || v_key; end if;
     end if;
-    if v_status = 'ok' and v_temail <> '' then
-      select p.id into v_teacher from public.profiles p join auth.users u on u.id = p.id
-       where lower(btrim(u.email)) = v_temail and p.role in ('teacher','org_admin') and p.institution_id is not null
-         and public.is_admin_of(p.institution_id) and public.billing_root(p.institution_id) = v_root
-       limit 1;
-      if v_teacher is null then v_status := 'error'; v_code := 'unknown_teacher'; end if;
+    -- docente / suplente del grupo
+    if v_status <> 'error' and v_gname <> '' and v_temail <> '' then
+      v_tst := v_people->v_temail;
+      if v_tst is null then v_tst := public.tc_person_status(v_unit, v_temail); v_people := v_people || jsonb_build_object(v_temail, v_tst); end if;
+      if v_tst->>'status' in ('not_allowed','bad_email') then v_status := 'error'; v_code := 'unknown_teacher'; end if;
     end if;
-    if v_status = 'ok' and v_gname <> '' then
-      select id, teacher_id into v_group, v_gteacher from public.class_groups
-       where institution_id = v_unit and lower(btrim(name)) = lower(v_gname);
-      if v_group is null then
-        if not p_commit or p_create_groups then
-          v_status := 'new_group';
-          v_newg := v_newg || jsonb_build_object(v_unit::text || '|' || lower(v_gname), jsonb_build_object('unit', v_unit_name, 'name', v_gname));
+    if v_status <> 'error' and v_gname <> '' and v_semail <> '' then
+      v_sst := v_people->v_semail;
+      if v_sst is null then v_sst := public.tc_person_status(v_unit, v_semail); v_people := v_people || jsonb_build_object(v_semail, v_sst); end if;
+      if v_sst->>'status' in ('not_allowed','bad_email') then v_status := 'error'; v_code := 'unknown_substitute'; end if;
+    end if;
+    -- el grupo: valores que no coinciden con los de otra fila del mismo grupo → error en esta fila
+    if v_status <> 'error' and v_gname <> '' then
+      v_gkey := v_unit::text || '|' || lower(v_gname);
+      v_g := v_groups->v_gkey;
+      if v_g is null then
+        select * into v_cg from public.class_groups where institution_id = v_unit and lower(btrim(name)) = lower(v_gname);
+        v_g := jsonb_build_object('key', v_gkey, 'unit_id', v_unit, 'unit', v_unit_name, 'name', coalesce(v_cg.name, v_gname), 'group_id', v_cg.id,
+                                  'def', '{}'::jsonb, 'students', 0, 'students_new', 0, 'first_line', v_line);
+      end if;
+      v_def := v_g->'def';
+      for k in select jsonb_object_keys(v_vals) loop
+        if v_def ? k and (v_def->k) <> (v_vals->k) then v_status := 'error'; v_code := 'conflict'; v_field := k; exit; end if;
+      end loop;
+      if v_status <> 'error' then
+        v_def := v_def || v_vals;
+        if coalesce(v_def->>'teacher_email', '') <> '' and v_def->>'teacher_email' = v_def->>'substitute_email' then
+          v_status := 'error'; v_code := 'same_person';
+        end if;
+      end if;
+      if v_status <> 'error' and (v_g->>'group_id') is null then
+        if not p_commit or p_create_groups then if v_status = 'ok' then v_status := 'new_group'; end if;
         else v_status := 'error'; v_code := 'unknown_group'; end if;
-      elsif v_teacher is not null and v_gteacher is not null and v_gteacher <> v_teacher then
-        v_warn := 'teacher_ignored';
+      end if;
+      if v_status <> 'error' then
+        v_group := (v_g->>'group_id')::uuid;
+        if v_group is not null and v_temail <> '' then
+          select teacher_id into v_gteacher from public.class_groups where id = v_group;
+          if v_gteacher is not null and (v_tst->>'id') is distinct from v_gteacher::text then v_warn := 'teacher_ignored'; end if;
+        end if;
       end if;
     end if;
     if v_status in ('ok','new_group') then
@@ -2379,29 +2651,154 @@ begin
         v_status := 'exists';
       end if;
     end if;
-    if p_commit and v_status in ('ok','new_group','exists') then
-      if v_gname <> '' and v_group is null then   -- crear el grupo (una sola vez aunque aparezca en muchas filas)
-        select id, teacher_id into v_group, v_gteacher from public.class_groups where institution_id = v_unit and lower(btrim(name)) = lower(v_gname);
-        if v_group is null then
-          insert into public.class_groups (institution_id, name, teacher_id, timezone, created_by)
-          values (v_unit, v_gname, v_teacher, 'America/Montevideo', auth.uid()) returning id, teacher_id into v_group, v_gteacher;
-        end if;
-      end if;
-      if v_group is not null and v_gteacher is null and v_teacher is not null then
-        update public.class_groups set teacher_id = v_teacher where id = v_group and teacher_id is null;
-      end if;
-      v_enr := public.tc_ensure_enrollment(v_unit, v_email, v_name, 'csv');
-      if v_group is not null then
-        insert into public.group_members (group_id, enrollment_id) values (v_group, v_enr) on conflict do nothing;
-      end if;
+    if v_g is not null and v_status <> 'error' then
+      v_g := jsonb_set(v_g, '{def}', v_def);
+      if v_status in ('ok','new_group','exists') then v_g := jsonb_set(v_g, '{students}', to_jsonb((v_g->>'students')::int + 1)); end if;
+      if v_status in ('ok','new_group') then v_g := jsonb_set(v_g, '{students_new}', to_jsonb((v_g->>'students_new')::int + 1)); end if;
+      v_groups := v_groups || jsonb_build_object(v_gkey, v_g);
     end if;
     if v_status = 'error' then c_err := c_err + 1; elsif v_status = 'exists' then c_exists := c_exists + 1;
+    elsif v_status = 'group_only' then c_grows := c_grows + 1;
     else c_ok := c_ok + 1; if v_status = 'new_group' then c_newrows := c_newrows + 1; end if; end if;
+    if v_status in ('ok','new_group','exists') then
+      v_work := v_work || jsonb_build_array(jsonb_build_object('email', v_email, 'name', v_name, 'unit_id', v_unit, 'gkey', v_gkey));
+    end if;
     v_out := v_out || jsonb_build_array(jsonb_build_object('line', v_line, 'email', left(v_email, 254), 'name', v_name,
-               'group', v_gname, 'unit', v_unit_name, 'status', v_status, 'code', v_code, 'warning', v_warn));
+               'group', v_gname, 'unit', v_unit_name, 'status', v_status, 'code', v_code, 'field', v_field, 'warning', v_warn));
   end loop;
-  return json_build_object('total', i, 'ok', c_ok, 'exists', c_exists, 'errors', c_err, 'new_group_rows', c_newrows,
-    'new_groups', coalesce((select jsonb_agg(v order by v->>'unit', v->>'name') from jsonb_each(v_newg) x(k, v)), '[]'::jsonb),
+
+  -- ── 2) cada grupo: docente, suplente, horario, clases ──
+  v_avail := greatest(public.billing_seats(v_root) - public.seats_used(v_root), 0);
+  for v_g in select value from jsonb_each(v_groups) order by (value->>'first_line')::int loop
+    v_def := v_g->'def';
+    select * into v_cg from public.class_groups where id = (v_g->>'group_id')::uuid;
+    v_tz := coalesce(v_def->>'timezone', v_cg.timezone, 'America/Montevideo');
+    v_today := (now() at time zone v_tz)::date;
+    -- docente / suplente (seats_full: personas nuevas que no entran en los asientos libres)
+    v_t := null; v_s := null;
+    foreach k in array array['teacher','substitute'] loop
+      v_res := v_def->>(k || '_email');
+      if v_res is not null then
+        w := (v_people->v_res) || jsonb_build_object('email', v_res);
+        if (case when k = 'teacher' then v_cg.teacher_id else v_cg.substitute_id end) is not null then
+          w := w || jsonb_build_object('status', case when (w->>'id') = (case when k = 'teacher' then v_cg.teacher_id else v_cg.substitute_id end)::text then 'registered' else 'kept' end,
+                                       'current', public.tc_person_name(case when k = 'teacher' then v_cg.teacher_id else v_cg.substitute_id end));
+        elsif w->>'status' = 'registered' then w := w || jsonb_build_object('assign', true);
+        elsif w->>'status' in ('invite','add') then
+          if not (v_res = any(v_newp)) then v_newp := v_newp || v_res; end if;
+          if array_position(v_newp, v_res) > v_avail then w := w || jsonb_build_object('seats_full', true); end if;
+        end if;
+      elsif (case when k = 'teacher' then v_cg.teacher_id else v_cg.substitute_id end) is not null then
+        w := jsonb_build_object('status', 'current', 'name', public.tc_person_name(case when k = 'teacher' then v_cg.teacher_id else v_cg.substitute_id end));
+      elsif (case when k = 'teacher' then v_cg.pending_teacher_email else v_cg.pending_substitute_email end) is not null then
+        w := jsonb_build_object('status', 'pending', 'email', case when k = 'teacher' then v_cg.pending_teacher_email else v_cg.pending_substitute_email end);
+      else w := null; end if;
+      if k = 'teacher' then v_t := w; else v_s := w; end if;
+    end loop;
+    -- horario
+    v_sched := null; v_prev := null; v_sstatus := 'none'; v_serr := null; v_missing := '{}'; v_classes := 0; v_past := 0; v_other := 0;
+    v_ser := null;
+    if v_cg.id is not null then
+      select * into v_ser from public.session_series where group_id = v_cg.id and origin = 'csv' order by created_at desc limit 1;
+    end if;
+    if v_def ?| array['weekdays','start_time','duration_min','start_date','end_date'] then
+      v_missing := array(select m from unnest(array['weekdays','start_time','duration_min','end_date']) m where not v_def ? m);
+      if cardinality(v_missing) > 0 then v_sstatus := 'error'; v_serr := 'schedule_incomplete';
+      else
+        v_days := array(select (x #>> '{}')::int from jsonb_array_elements(v_def->'weekdays') x);
+        v_time := (v_def->>'start_time')::time; v_dur := (v_def->>'duration_min')::int;
+        v_sd := coalesce((v_def->>'start_date')::date, v_ser.start_date, v_today); v_ed := (v_def->>'end_date')::date;
+        if v_ed < v_sd then v_sstatus := 'error'; v_serr := 'end_before_start';
+        elsif v_ed > v_sd + 366 then v_sstatus := 'error'; v_serr := 'range_too_long';
+        else
+          select count(*) into v_classes from public.tc_series_dates(v_days, greatest(v_sd, v_today), v_ed) d where public.tc_local_ts(d, v_time, v_tz) > now();
+          select count(*) into v_past from public.tc_series_dates(v_days, v_sd, least(v_ed, v_today)) d where public.tc_local_ts(d, v_time, v_tz) <= now();
+          v_sched := jsonb_build_object('weekdays', to_jsonb(v_days), 'start_time', to_char(v_time, 'HH24:MI'), 'duration_min', v_dur,
+                                        'start_date', v_sd, 'end_date', v_ed, 'timezone', v_tz);
+          if v_ser.id is null then v_sstatus := 'new';
+          elsif v_ser.weekdays = v_days and v_ser.start_time = v_time and v_ser.duration_min = v_dur and v_ser.start_date = v_sd
+                and v_ser.end_date = v_ed and v_ser.timezone = v_tz then v_sstatus := 'unchanged';
+          else
+            v_sstatus := 'changed';
+            v_prev := jsonb_build_object('weekdays', to_jsonb(v_ser.weekdays), 'start_time', to_char(v_ser.start_time, 'HH24:MI'), 'duration_min', v_ser.duration_min,
+                                         'start_date', v_ser.start_date, 'end_date', v_ser.end_date, 'timezone', v_ser.timezone);
+          end if;
+          if v_classes = 0 and v_sstatus <> 'unchanged' then v_sstatus := 'error'; v_serr := 'no_dates'; v_sched := null; end if;
+          if v_cg.id is not null then
+            select count(*) into v_other from public.class_sessions c
+             where c.group_id = v_cg.id and c.status = 'scheduled' and c.starts_at > now() and c.series_id is distinct from v_ser.id;
+          end if;
+        end if;
+      end if;
+    end if;
+    if v_sstatus in ('new','changed') then c_classes := c_classes + v_classes; end if;
+    if v_sstatus = 'changed' then c_changes := c_changes + 1; end if;
+    v_glist := v_glist || jsonb_build_array(jsonb_build_object('key', v_g->'key', 'name', v_g->'name', 'unit', v_g->'unit', 'unit_id', v_g->'unit_id',
+      'group_id', v_g->'group_id', 'exists', v_cg.id is not null, 'teacher', v_t, 'substitute', v_s, 'timezone', v_tz,
+      'schedule', v_sched, 'schedule_status', v_sstatus, 'schedule_error', v_serr, 'missing', to_jsonb(v_missing), 'previous', v_prev,
+      'series_id', v_ser.id, 'classes', v_classes, 'past_skipped', v_past, 'other_classes', v_other,
+      'students', v_g->'students', 'students_new', v_g->'students_new'));
+  end loop;
+
+  -- ── 3) cargar: grupos → docente y suplente → inscripciones → series con sus clases ──
+  if p_commit then
+    for v_g in select value from jsonb_array_elements(v_glist) loop
+      v_group := (v_g->>'group_id')::uuid;
+      if v_group is null then
+        select id into v_group from public.class_groups where institution_id = (v_g->>'unit_id')::uuid and lower(btrim(name)) = lower(v_g->>'name');
+        if v_group is null then
+          insert into public.class_groups (institution_id, name, timezone, created_by)
+          values ((v_g->>'unit_id')::uuid, v_g->>'name', v_g->>'timezone', auth.uid()) returning id into v_group;
+        end if;
+      else
+        update public.class_groups set timezone = v_g->>'timezone' where id = v_group and timezone is distinct from v_g->>'timezone';
+      end if;
+      v_gids := v_gids || jsonb_build_object(v_g->>'key', v_group);
+      foreach k in array array['teacher','substitute'] loop
+        w := v_g->k;
+        if w is not null and coalesce(w->>'email', '') <> '' and w->>'status' in ('registered','invite','invited','add') then
+          select * into v_cg from public.class_groups where id = v_group;
+          if (case when k = 'teacher' then v_cg.teacher_id else v_cg.substitute_id end) is null then
+            begin
+              perform public.tc_assign_person(v_group, k, w->>'email');
+            exception when others then null;   -- p. ej. la misma persona ya es el suplente: se mantiene como estaba
+            end;
+          end if;
+        end if;
+      end loop;
+    end loop;
+    for w in select value from jsonb_array_elements(v_work) loop
+      v_enr := public.tc_ensure_enrollment((w->>'unit_id')::uuid, w->>'email', w->>'name', 'csv');
+      if coalesce(w->>'gkey', '') <> '' and v_gids ? (w->>'gkey') then
+        insert into public.group_members (group_id, enrollment_id) values ((v_gids->>(w->>'gkey'))::uuid, v_enr) on conflict do nothing;
+      end if;
+    end loop;
+    for v_g in select value from jsonb_array_elements(v_glist) loop
+      if v_g->>'schedule_status' not in ('new','changed') then continue; end if;
+      v_group := (v_gids->>(v_g->>'key'))::uuid; v_sched := v_g->'schedule';
+      v_days := array(select (x #>> '{}')::int from jsonb_array_elements(v_sched->'weekdays') x);
+      v_time := (v_sched->>'start_time')::time; v_dur := (v_sched->>'duration_min')::int;
+      v_sd := (v_sched->>'start_date')::date; v_ed := (v_sched->>'end_date')::date; v_tz := v_sched->>'timezone';
+      if v_g->>'schedule_status' = 'changed' then
+        select * into v_ser from public.session_series where id = (v_g->>'series_id')::uuid;
+        perform public.tc_series_apply(v_ser.id, v_ser.title, v_days, v_time, v_dur, v_sd, v_ed, v_tz);
+      else
+        insert into public.session_series (group_id, title, weekdays, start_time, duration_min, start_date, end_date, timezone, created_by, origin)
+        values (v_group, '', v_days, v_time, v_dur, v_sd, v_ed, v_tz, auth.uid(), 'csv') returning id into v_sid;
+        v_today := (now() at time zone v_tz)::date;
+        insert into public.class_sessions (institution_id, group_id, series_id, teacher_id, title, starts_at, ends_at, timezone)
+        select g.institution_id, g.id, v_sid, coalesce(g.teacher_id, auth.uid()), '', public.tc_local_ts(d, v_time, v_tz),
+               public.tc_local_ts(d, v_time, v_tz) + make_interval(mins => v_dur), v_tz
+          from public.tc_series_dates(v_days, greatest(v_sd, v_today), v_ed) d join public.class_groups g on g.id = v_group
+         where public.tc_local_ts(d, v_time, v_tz) > now();
+      end if;
+    end loop;
+  end if;
+
+  return json_build_object('total', i, 'ok', c_ok, 'exists', c_exists, 'errors', c_err, 'new_group_rows', c_newrows, 'group_rows', c_grows,
+    'new_groups', coalesce((select jsonb_agg(jsonb_build_object('unit', g->'unit', 'name', g->'name') order by g->>'unit', g->>'name')
+                              from jsonb_array_elements(v_glist) g where not (g->>'exists')::boolean), '[]'::jsonb),
+    'groups', v_glist, 'classes', c_classes, 'schedule_changes', c_changes, 'seats_available', v_avail,
     'committed', coalesce(p_commit, false), 'rows', v_out);
 end $$;
 
@@ -2454,8 +2851,7 @@ create or replace function public.update_series(p_series uuid, p_title text, p_w
 returns json
 language plpgsql volatile security definer set search_path = public as
 $$
-declare s public.session_series%rowtype; v_days integer[]; v_today date; v_title text := public.tc_clean_text(p_title, 200);
-        v_del int := 0; v_upd int := 0; v_ins int := 0;
+declare s public.session_series%rowtype; v_days integer[]; v_title text := public.tc_clean_text(p_title, 200);
 begin
   select * into s from public.session_series where id = p_series;
   if s.id is null or not public.teaches_group(s.group_id) then raise exception 'No autorizado'; end if;
@@ -2464,29 +2860,7 @@ begin
   if p_start_time is null or p_end_date is null then raise exception 'Faltan datos de la serie'; end if;
   if p_end_date < s.start_date then raise exception 'La fecha de fin es anterior a la de inicio'; end if;
   if p_end_date > s.start_date + 366 then raise exception 'Una serie puede durar como máximo un año'; end if;
-  v_today := (now() at time zone s.timezone)::date;
-  update public.session_series set title = v_title, weekdays = v_days, start_time = p_start_time,
-         duration_min = p_duration, end_date = p_end_date where id = p_series;
-  delete from public.class_sessions c
-   where c.series_id = p_series and c.starts_at > now() and not c.modified
-     and (c.starts_at at time zone s.timezone)::date not in (select public.tc_series_dates(v_days, greatest(s.start_date, v_today), p_end_date));
-  get diagnostics v_del = row_count;
-  update public.class_sessions c
-     set title = v_title,
-         starts_at = public.tc_local_ts((c.starts_at at time zone s.timezone)::date, p_start_time, s.timezone),
-         ends_at = public.tc_local_ts((c.starts_at at time zone s.timezone)::date, p_start_time, s.timezone) + make_interval(mins => p_duration),
-         seq = c.seq + 1
-   where c.series_id = p_series and c.starts_at > now() and not c.modified;
-  get diagnostics v_upd = row_count;
-  insert into public.class_sessions (institution_id, group_id, series_id, teacher_id, title, starts_at, ends_at, timezone)
-  select g.institution_id, g.id, s.id, auth.uid(), v_title, public.tc_local_ts(d, p_start_time, s.timezone),
-         public.tc_local_ts(d, p_start_time, s.timezone) + make_interval(mins => p_duration), s.timezone
-    from public.tc_series_dates(v_days, greatest(s.start_date, v_today), p_end_date) d
-    join public.class_groups g on g.id = s.group_id
-   where public.tc_local_ts(d, p_start_time, s.timezone) > now()
-     and not exists (select 1 from public.class_sessions c where c.series_id = s.id and (c.starts_at at time zone s.timezone)::date = d);
-  get diagnostics v_ins = row_count;
-  return json_build_object('updated', v_upd, 'created', v_ins, 'removed', v_del);
+  return public.tc_series_apply(p_series, v_title, v_days, p_start_time, p_duration, null, p_end_date, null);
 end $$;
 
 -- Cancelar toda la serie desde ahora (las clases quedan como canceladas: el feed lo avisa a los calendarios)
@@ -2770,7 +3144,7 @@ declare f text;
 begin
   foreach f in array array[
     'list_groups(uuid)', 'list_students(uuid)', 'list_group_members(uuid)',
-    'create_group(uuid, text, uuid, uuid, text)', 'update_group(uuid, text, uuid, uuid, text)', 'delete_group(uuid)',
+    'create_group(uuid, text, uuid, uuid, text, text, text)', 'update_group(uuid, text, uuid, uuid, text, text, text)', 'delete_group(uuid)',
     'add_student(uuid, text, text, uuid)', 'group_add_student(uuid, uuid)', 'group_remove_student(uuid, uuid)',
     'move_student(uuid, uuid, uuid)', 'remove_student(uuid)', 'import_students(uuid, jsonb, boolean, boolean)',
     'my_groups()', 'create_series(uuid, text, integer[], time, integer, date, date)',

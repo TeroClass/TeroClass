@@ -6,9 +6,11 @@
 # security.sql (base guarantees), hierarchy.sql (3-level permissions) and billing.sql
 # (plan & usage: seats, monthly AI tokens, token packs), insights.sql (AI request metadata + super admin
 # platform insights) and students.sql (groups, students, calendar: privacy rules, claim by verified email,
-# calendar feed, CSV import); finally re-runs 001_base.sql on the populated
-# database (superadmins must be kept, owner references hidden) and checks the upgrade path:
-# 001_base.sql from git da29348 (before groups/students) + data, then the current one twice, then students.sql.
+# calendar feed, CSV import) and csv_schedule.sql (CSV with schedules, pending teachers, auto-assign, privacy);
+# finally re-runs 001_base.sql on the populated database (superadmins must be kept, owner references hidden) and
+# checks two upgrade paths: 001_base.sql from git da29348 (before groups/students) + data, then the current one
+# twice, then students.sql; and 001_base.sql from git fabb1c7 (groups/students, before CSV schedules) + students.sql
+# data, then the current one twice (the data must survive), then csv_schedule.sql.
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -18,7 +20,7 @@ trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null' EXIT
 $PSQL -d $DB -f tests/sql/supabase-stub.sql >/dev/null 2>&1
 for i in 1 2; do $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; done
 fail=0
-for t in security hierarchy billing insights students; do
+for t in security hierarchy billing insights students csv_schedule; do
   out=$($PSQL -d $DB -f tests/sql/$t.sql 2>&1)
   echo "$out" | grep -E '\*\*FAIL\*\*' || true
   sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
@@ -49,5 +51,27 @@ if git cat-file -e da29348:supabase/migrations/001_base.sql 2>/dev/null; then
     echo "upgrade (da29348 → current ×2) + students: passed | failed = $sum"
     [[ "$sum" =~ \|\ +0$ ]] || fail=1
   else echo "upgrade: **FAIL** could not upgrade from da29348"; fail=1; fi
+fi
+# Upgrade path from the version before CSV schedules (fabb1c7) with groups, students and classes in it
+if git cat-file -e fabb1c7:supabase/migrations/001_base.sql 2>/dev/null; then
+  UP2=${DB}_up2
+  $PSQL -d postgres -c "create database $UP2" >/dev/null
+  trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up" >/dev/null; $PSQL -d postgres -c "drop database if exists $UP2" >/dev/null' EXIT
+  $PSQL -d $UP2 -f tests/sql/supabase-stub.sql >/dev/null 2>&1
+  DATA="select (select count(*) from public.class_groups)||'/'||(select count(*) from public.student_enrollments)||'/'||(select count(*) from public.group_members)||'/'||(select count(*) from public.class_sessions)||'/'||(select count(*) from public.session_series)||'/'||(select count(*) from public.profiles)"
+  if git show fabb1c7:supabase/migrations/001_base.sql | $PSQL -d $UP2 >/dev/null 2>&1 \
+     && $PSQL -d $UP2 -f tests/sql/students.sql >/dev/null 2>&1; then
+    before=$($PSQL -At -d $UP2 -c "$DATA")
+    if $PSQL -d $UP2 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP2 -f supabase/migrations/001_base.sql >/dev/null 2>&1; then
+      after=$($PSQL -At -d $UP2 -c "$DATA")
+      origin=$($PSQL -At -d $UP2 -c "select count(*) from public.session_series where origin <> 'manual'")
+      if [[ "$before" == "$after" && "$origin" == "0" && "$before" != "0/0/0/0/0/0" ]]; then echo "upgrade (fabb1c7 + data → current ×2): data kept ($after), old series = manual"; else echo "upgrade: **FAIL** fabb1c7 data before=$before after=$after csv-series=$origin"; fail=1; fi
+      out=$($PSQL -d $UP2 -f tests/sql/csv_schedule.sql 2>&1)
+      echo "$out" | grep -E '\*\*FAIL\*\*' || true
+      sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
+      echo "upgrade (fabb1c7 → current ×2) + csv_schedule: passed | failed = $sum"
+      [[ "$sum" =~ \|\ +0$ ]] || fail=1
+    else echo "upgrade: **FAIL** could not upgrade from fabb1c7"; fail=1; fi
+  else echo "upgrade: **FAIL** could not load fabb1c7 + data"; fail=1; fi
 fi
 exit $fail

@@ -228,6 +228,71 @@ body.student-mode .btn-invite,body.student-mode .btn-new-class,body.student-mode
 .gs-empty-ico.tero svg{width:84px;height:84px;flex:0 0 84px}
 .gs-empty-mail{font-size:13px;font-weight:600;color:var(--ink-soft);margin-bottom:16px;word-break:break-all}
 
+/* ── enter the room (teacher always) · today / next class card ── */
+.gc-join.compact{font-size:11.5px;padding:5px 10px;border-radius:8px}
+.gc-join.staff{background:var(--brand-primary)}
+.gc-join-wrap{display:inline-flex;flex-direction:column;align-items:flex-start;gap:3px}
+.gc-join-note{font-size:11px;color:var(--ink-muted);line-height:1.35}
+.gs-next-act .gc-join-wrap{align-items:flex-end}
+.gc-ag-act{display:inline-flex;margin-left:auto;flex:0 0 auto}
+.gc-ag-act:empty{display:none}
+.gc-ag-item .gc-chip + .gc-ag-act{margin-left:8px}
+.gc-ag-item:focus-visible{outline:2px solid var(--brand-primary);outline-offset:2px}
+.gc-next-slot:empty{display:none}
+.gc-nextcard{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:16px;align-items:center;background:var(--white);border:1px solid var(--border);border-left:4px solid var(--brand-primary);border-radius:14px;padding:12px 16px;margin:0 0 14px}
+.gc-nextcard.open{box-shadow:0 6px 18px rgba(124,92,191,.16)}
+.gc-nc-when{display:flex;flex-direction:column;gap:1px;min-width:120px}
+.gc-nc-label{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--purple)}
+.gc-nc-day{font-size:12.5px;font-weight:600;color:var(--ink-soft)}
+.gc-nc-time{font-size:15px;font-weight:800;color:var(--ink);white-space:nowrap}
+.gc-nc-info{min-width:0}
+.gc-nc-title{all:unset;cursor:pointer;font-size:16px;font-weight:700;color:var(--ink);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.gc-nc-title:hover{text-decoration:underline}
+.gc-nc-title:focus-visible{outline:2px solid var(--brand-primary);outline-offset:2px;border-radius:4px}
+.gc-nc-act{display:flex;justify-content:flex-end}
+.gc-nc-act .gc-join-wrap{align-items:flex-end;text-align:right}
+/* ── groups: pending teacher, schedule ── */
+.gc-pending b{font-weight:700}
+.gc-gsched{font-size:12.5px;color:var(--ink-soft);margin-top:4px}
+.gc-newmail{margin-top:6px}
+.gc-hint-block{margin:-4px 0 14px}
+.gc-pending .gc-muted{white-space:nowrap}
+/* ── CSV import: help, funnel, groups ── */
+.gc-imp-help{border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin:10px 0;background:var(--bg);font-size:12.5px;color:var(--ink-soft)}
+.gc-imp-help summary{cursor:pointer;font-weight:700;color:var(--ink)}
+.gc-imp-help ul{margin:6px 0 4px;padding-left:18px;display:flex;flex-direction:column;gap:3px;line-height:1.45}
+.gc-funnel{display:flex;align-items:stretch;gap:8px;flex-wrap:wrap;margin:6px 0 12px}
+.gc-fstep{display:flex;flex-direction:column;justify-content:center;align-items:center;min-width:86px;padding:10px 12px;border-radius:12px;background:var(--purple-light);text-align:center}
+.gc-fstep b{font-size:22px;font-weight:800;color:var(--purple);line-height:1.1}
+.gc-fstep span{font-size:11px;font-weight:600;color:var(--ink-soft)}
+.gc-fstep.wide{flex:1 1 220px;align-items:flex-start;text-align:left;background:var(--bg);border:1px solid var(--border)}
+.gc-fhead{font-size:10.5px!important;text-transform:uppercase;letter-spacing:.5px;color:var(--purple)!important;font-weight:700!important}
+.gc-fper{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:2px;font-size:12.5px;color:var(--ink)}
+.gc-fper b{font-size:12.5px;color:var(--ink);font-weight:700}
+.gc-farrow{align-self:center;color:var(--ink-muted);font-size:18px;font-weight:700}
+.gc-imp-groups{display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto;padding-right:2px}
+.gc-imp-g{border:1px solid var(--border);border-left:3px solid var(--brand-primary);border-radius:10px;padding:9px 12px;background:var(--white);font-size:12.5px}
+.gc-imp-g.skipped{opacity:.55;border-left-color:#ccc}
+.gc-imp-ghead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+.gc-imp-gname{font-size:14px}
+.gc-imp-gnums{margin-left:auto;color:var(--ink-soft);white-space:nowrap}
+.gc-imp-gnums b{color:var(--ink)}
+.gc-imp-gline{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;line-height:1.6}
+.gc-imp-k{min-width:78px;color:var(--ink-muted);font-weight:600}
+.gc-imp-when{font-weight:700;color:var(--ink)}
+.gc-imp-g .gc-hint{margin-top:2px}
+@media (max-width:720px){
+  .gc-nextcard{grid-template-columns:1fr;gap:8px}
+  .gc-nc-when{flex-direction:row;align-items:baseline;gap:8px;flex-wrap:wrap}
+  .gc-nc-act{justify-content:stretch}
+  .gc-nc-act .gc-join,.gc-nc-act .gc-join-wrap{width:100%;align-items:stretch;text-align:center}
+  .gc-nc-act .gc-join{justify-content:center}
+  .gc-ag-act{order:3;margin-left:0}
+  .gc-farrow{display:none}
+  .gc-fstep{flex:1 1 30%}
+  .gc-imp-gnums{margin-left:0}
+}
+
 /* ── responsive ── */
 @media (max-width:900px){
   .gs-grid{grid-template-columns:1fr}

@@ -602,7 +602,7 @@ Cierre y ticket de salida (5 min)
     planning: null,        // {id,title,content,params}
     sampleKey: 'language',
     sessionTitle: '',
-    sessionId: null,       // calendar session (groups-calendar.js): everyone in it joins the same room
+    sessionId: null, sessionRole: null, // calendar session (groups-calendar.js): everyone in it joins the same room
     lobby: null,
     room: null,
     insights: { tab: 'student', student: 0, sub: 'overview', role: 'teacher' },
@@ -734,7 +734,7 @@ Cierre y ticket de salida (5 min)
   function newLobby() {
     const isStaff = !!currentUser && ['teacher', 'org_admin', 'superadmin'].includes(String(currentUser.role || 'teacher'));
     return {
-      name: (currentUser && currentUser.name) || '', role: isStaff ? 'teacher' : 'student',
+      name: (currentUser && currentUser.name) || '', role: S.sessionRole || (isStaff ? 'teacher' : 'student'),
       camId: '', micId: '', stream: null, mediaError: '', mic: true, cam: true, level: 0,
       devices: { cams: [], mics: [] },
       consent: { recording: false, ai_analysis: false, storage: false },
@@ -1637,6 +1637,8 @@ Cierre y ticket de salida (5 min)
     if (S.room) { toast('A live class is already in progress.', 'err'); openLiveClass(); return; }
     const p = sess && sess.planning ? sess.planning : null;
     S.planning = p; S.sessionId = (sess && sess.id) || null;
+    // role in THIS class (calendar row): a teacher enrolled in someone else's group joins as a student
+    S.sessionRole = sess && (sess.role === 'teacher' || sess.role === 'student') ? sess.role : null;
     S.sampleKey = pickSampleKey(p || { title: (sess && sess.title) || '', params: {} });
     S.sessionTitle = (sess && sess.title) || 'Live class';
     if (typeof showPanel === 'function') showPanel('live');
@@ -1646,7 +1648,7 @@ Cierre y ticket de salida (5 min)
   function openFromDoc() {
     if (S.room) { toast('A live class is already in progress.', 'err'); openLiveClass(); return; }
     const p = planningFromDoc(); if (!p) return;
-    S.sessionId = null;
+    S.sessionId = null; S.sessionRole = null;
     S.planning = p; S.sampleKey = pickSampleKey(p);
     S.sessionTitle = p.title || (p.content.split('\n')[0] || '').trim() || 'Live class';
     if (typeof showPanel === 'function') showPanel('live');

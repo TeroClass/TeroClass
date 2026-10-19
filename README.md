@@ -7,7 +7,7 @@ AI-powered didactic planning platform for teachers.
 - Vanilla HTML/CSS/JS frontend (`public/index.html`)
 - Supabase: accounts, institutions, class plans, logos (`supabase/migrations/001_base.sql`)
 - Vercel serverless API (`api/generate.js`) that calls Azure OpenAI (gpt-4o). The Azure key lives only on the server.
-- Groups, students and calendar: `public/groups-calendar.js` / `.css`, `api/calendar/feed.js` (calendar subscription),
+- Groups, students and calendar: `public/groups-calendar.js` / `.css`, `public/csv-import.js` (CSV parser, also unit-tested in node), `api/calendar/feed.js` (calendar subscription),
   `api/notify/session.js` (email invitations, optional), `api/_lib/ics.js`.
 
 ## Environment variables (Vercel → Settings → Environment Variables)
@@ -25,8 +25,9 @@ AI-powered didactic planning platform for teachers.
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed with Groups + Students +
-Calendar: run it again** (it upgrades the previous version in place and keeps all data).
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with CSV schedules +
+pending teachers: run it again** (it upgrades the previous version in place and keeps all data; tested from the
+Groups version, git fabb1c7, with data).
 
 ### Platform owner (super admin)
 
@@ -102,10 +103,34 @@ belong to a unit (`profiles.institution_id` stays empty). Their link to an insti
 
 **Institution admins** (Institution → *Groups*, for the unit chosen in the switcher and everything below it): create /
 edit / delete groups, assign or change the teacher and substitute, add students one by one (email + name, optional group),
-**import a CSV** (columns `email, name, group`, optional `teacher_email` and `unit` (name or slug); any order — the header
-decides; comma or semicolon; up to 2,000 rows; a downloadable template). Before importing, a preview validates every row
-(bad email, repeated in the file, unknown teacher/unit, ambiguous unit, unknown group → "create the new groups" option).
-Importing the same file again creates no duplicates. Move a student to another group, remove from a group or from the unit.
+**import a CSV** (below). Move a student to another group, remove from a group or from the unit.
+The teacher or substitute can be someone **not registered yet**: in *Edit group* pick an invited email (or *Invite someone
+by email…*); they get an invitation as teacher of that unit (same permission and seat rules as *Invite*), the group shows
+*Pending: email (invited)*, and they are assigned automatically as soon as they register or accept the invitation
+(trigger `profiles_claim_pending_groups`; also when an existing account is added to the unit). Pending emails are only
+returned to admins of that institution (`list_groups`).
+
+**CSV import (groups, students and their schedule).** One row per student; `public/csv-import.js` reads the file in the
+browser (no build) and the database re-validates everything (`import_students`).
+- Columns (any order, Spanish or English, case and accents ignored): `email`, `name/nombre`, `group/grupo`, `unit/unidad`
+  (name or slug), `teacher_email/docente`, `substitute_email/suplente`, `days/días`, `start_time/hora/hora_inicio`,
+  `end_time/hora_fin` **or** `duration/duración` (minutes), `start_date/desde/inicio`, `end_date/hasta/fin`,
+  `timezone/zona`. Comma, semicolon or tab; up to 2,000 rows; downloadable template (Spanish headers in Spanish UI).
+- Days: "Lun;Mié", "L,Mi", "lunes y miércoles", "Mon/Wed", "LMi", "lun a vie" ("Mi" = Wednesday, "Ma" = Tuesday;
+  "M" or "T" alone are ambiguous → row error). Times: 07:00, 7:00, 7am, 19:30, 19h30, "07:00-08:00". Dates: DD/MM/YYYY
+  (day first, as in Uruguay), YYYY-MM-DD, DD/MM (this year); "04/25/2027" (month/day) and invalid dates are errors.
+- Teacher, substitute, schedule and time zone belong to the **group**: repeat them or fill them on one row only (also a
+  row with a group and no email defines a group without students). Different values for the same group → row error.
+- Preview per group (rows → groups → classes per teacher): unit, teacher/substitute (registered, will be invited, already
+  invited, has an account, no free seats), schedule in words ("Lun y Mié 07:00–08:00, del 3/3 al 30/11"), number of classes
+  that will be created, students, per-row errors and warnings.
+- Commit, in this order: groups → teacher and substitute (registered: assigned; otherwise pending + invitation) →
+  enrollments → a weekly series (`session_series.origin = 'csv'`) with its classes (up to one year). **Only future classes
+  are created** (dates already passed are skipped and counted in the preview).
+- Re-importing the same file creates nothing new. If a group's schedule changed, the preview says *Schedule changes*
+  (before → now) and the commit moves only **future classes that were not edited one by one** (same rule as editing a
+  series, `tc_series_apply`); past classes are never touched or deleted. A group that already has another teacher keeps
+  them (warning in the preview).
 A read-only *Calendar* tab lists the unit's classes for the next 4 weeks.
 
 **Teachers and substitutes** (Teaching → *Calendar*): week view and agenda (the agenda is the default on phones).
@@ -114,8 +139,11 @@ group's time zone; every class is stored as a row) or **one class**, for a group
 email. An email that is not yet a student of the institution is loaded by that teacher into their unit (same privacy rules).
 Edit or cancel **one class** (a class edited on its own keeps its changes when the series is edited) or the **whole series**
 (from today on). Everything is stored in UTC (`timestamptz`) and shown in the viewer's local time, with the time zone
-labelled. **Join** opens the existing live-class demo for that session (same room for its teacher and students); it is
-enabled from 10 minutes before the start until the end, and shows "Starts in …" before that.
+labelled. **Enter room / Join** opens the existing live-class demo for that session id (same room for its teacher and
+students). The **teacher and substitute can always enter** a class that is not cancelled (to prepare or test) from the
+*Today's / Next class* card at the top of the Calendar, the week-view event detail and the agenda list; outside class time
+it says "Students can join from 10 min before". **Students** can join from 10 minutes before the start until the end;
+before that the button is disabled and says "Opens at HH:MM" (in their time zone).
 
 **Privacy (enforced in the database, not only in the screens).** The new tables have no direct access at all; everything
 goes through security-definer functions:
@@ -162,18 +190,23 @@ and offers *Copy invitation link*.
 themselves. **TODO before activating recording:** ask the parent/guardian's consent (the live-class lobby already has the
 UI) or rely on that flag, and document it in the privacy policy.
 
-**Limitations.** Editing a whole series moves only future classes that weren't edited one by one; changing a group's time
+**Limitations.** A CSV import creates only future classes (past dates in the file are skipped); a CSV never replaces a
+group's current teacher (only fills an empty or pending one); one imported schedule per group (one start time for all its
+days); a schedule without an end date is reported as incomplete; a pending teacher is assigned by the email they register
+with (with "Confirm email" ON, see the header of `001_base.sql`); with no free seats the pending email is kept but no
+invitation is sent. Editing a whole series moves only future classes that weren't edited one by one; changing a group's time
 zone doesn't move classes already scheduled; a one-off class's invitees are set when it is created; the live class is still
 the demo (real video needs LiveKit and a session-aware token: `api/class/token.js`); a student who changes their account
 email keeps the classes already linked.
 
 ## Tests
 
-`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Insights) and `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile) run the app in a headless browser
+`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Insights), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile) and `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room) run the app in a headless browser
 against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/<file>`).
 
 `tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage, insights, students & calendar privacy, and the upgrade path from the previous `001`) on a local
-Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh`.
+Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql` and the upgrade from git fabb1c7 with data).
+CSV parser unit tests: `node --no-warnings --test tests/unit-*.test.mjs`.
 API: `node --no-warnings --test tests/api-*.test.mjs` (billing, live class, AI metadata, calendar feed + notifications).
 
 ## Live class (Aula en vivo)

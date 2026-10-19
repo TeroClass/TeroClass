@@ -19,6 +19,7 @@ const HTML = RAW_HTML
   .replace('<link rel="stylesheet" href="/live-class.css">', () => `<style>${asset('live-class.css')}</style>`)
   .replace('<script src="/live-class.js"></script>', () => `<script>${asset('live-class.js')}</script>`)
   .replace('<link rel="stylesheet" href="/groups-calendar.css">', () => `<style>${asset('groups-calendar.css')}</style>`)
+  .replace('<script src="/csv-import.js"></script>', () => `<script>${asset('csv-import.js')}</script>`)
   .replace('<script src="/groups-calendar.js"></script>', () => `<script>${asset('groups-calendar.js')}</script>`);
 const SB_JS = fs.readFileSync(process.env.SB_JS || '/tmp/package/dist/umd/supabase.js', 'utf8');
 const SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
@@ -70,6 +71,7 @@ function newUser(email, meta) {
   db.profiles.push({ id, email, created_at: new Date().toISOString(), name: meta.name || '', role: email.toLowerCase() === SUPERADMIN_EMAIL ? 'superadmin' : (invUse ? invUse.role : student ? 'student' : 'teacher'),
     institution_id: invUse ? invUse.institution_id : (bySlug ? bySlug.id : null) });
   if (invUse) invUse.accepted_at = new Date().toISOString();
+  students.applyPending(db.profiles[db.profiles.length - 1]); // groups waiting for this email (pending teacher / substitute)
   return db.users[id];
 }
 function seedInstitution(extra = {}) {
@@ -233,8 +235,7 @@ async function handleSupabase(route) {
       const pr = db.profiles.find(x => x.email === body.p_email); const root = rootOf(body.p_inst);
       const counted = pr && ['teacher', 'org_admin'].includes(pr.role) && pr.institution_id && rootOf(pr.institution_id) === root;
       if (!counted && !seatFree(root)) return json(400, { code: 'P0001', message: `No quedan asientos disponibles en el plan de la institución (${seatsUsed(root)} de ${account(root).seats} en uso)` });
-      if (pr) { pr.institution_id = body.p_inst; pr.role = body.p_role; return json(200, 'added'); }
-      db.invitations.push({ email: body.p_email, institution_id: body.p_inst, role: body.p_role }); return json(200, 'invited');
+      const r = inviteMember(body.p_inst, body.p_email, body.p_role); return json(200, r);
     }
     if (fn === 'set_member_role') {
       const pr = db.profiles.find(x => x.id === body.p_user); if (!pr || !['teacher', 'org_admin'].includes(body.p_role)) return json(400, { message: 'invalid' });
@@ -269,5 +270,14 @@ async function handleSupabase(route) {
   }
   return json(404, { message: 'unmocked ' + m + ' ' + p });
 }
-const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
+// invite_member core (permission checked by the caller): existing account → added; otherwise an invitation
+function inviteMember(inst, email, role) {
+  email = String(email).toLowerCase(); const pr = db.profiles.find(x => x.email.toLowerCase() === email); const root = rootOf(inst);
+  const counted = pr && ['teacher', 'org_admin'].includes(pr.role) && pr.institution_id && rootOf(pr.institution_id) === root;
+  if (!counted && !seatFree(root)) { const e = new Error(`No quedan asientos disponibles en el plan de la institución (${seatsUsed(root)} de ${account(root).seats} en uso)`); e.seats = true; throw e; }
+  if (pr) { pr.institution_id = inst; pr.role = role; students.applyPending(pr); return 'added'; }
+  db.invitations = db.invitations.filter(i => !(i.email === email && i.institution_id === inst && !i.accepted_at));
+  db.invitations.push({ id: uid(), email, institution_id: inst, role, created_at: new Date().toISOString() }); return 'invited';
+}
+const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0) });
 module.exports = { students, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

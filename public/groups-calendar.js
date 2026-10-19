@@ -23,7 +23,6 @@
   const $ = id => document.getElementById(id);
   const MIN = 60000;
   const JOIN_EARLY = 10 * MIN;
-  const MAX_IMPORT = 2000;
   const EMAIL_RE = /^[^\s@<>"',;()]{1,64}@[^\s@<>"',;()]{1,190}\.[A-Za-z]{2,24}$/;
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const LOCAL_TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { return 'UTC'; } })();
@@ -87,16 +86,28 @@
     const m = Math.max(1, Math.ceil(ms / MIN));
     if (m < 60) return `Starts in ${m} min`;
     const h = Math.floor(m / 60);
-    if (h < 24) return `Starts in ${h} h ${m % 60} min`;
+    if (h < 24) return m % 60 ? `Starts in ${h} h ${m % 60} min` : `Starts in ${h} h`;
     const d = Math.round(h / 24);
     return d === 1 ? 'Starts in 1 day' : `Starts in ${d} days`;
   }
-  function joinButtonHtml(s, { big = false } = {}) {
+  // Teacher / substitute / whoever created a one-off class: can ALWAYS open the room of a class that is not
+  // cancelled (to prepare or test). Students (and admins looking at the unit): only inside the join window.
+  const isStaffRow = s => !!s && (s.role === 'teacher' || s.role === 'substitute');
+  // "Opens at 06:50" (today) or "Opens Mon 20 Oct at 06:50"
+  function opensAt(s) {
+    const at = new Date(Date.parse(s.starts_at) - JOIN_EARLY);
+    return sameDay(at, new Date()) ? `Opens at ${fTime(at)}` : `Opens ${fDay(at)} at ${fTime(at)}`;
+  }
+  function joinButtonHtml(s, { big = false, compact = false } = {}) {
     const j = joinState(s);
-    const cls = big ? 'gc-join big' : 'gc-join';
-    if (j.k === 'open') return `<button type="button" class="${cls}" data-gc="join" data-id="${esc(s.id)}">▶ <span>${j.live ? 'Join class' : 'Join class'}</span></button>`;
-    if (j.k === 'soon') return `<button type="button" class="${cls}" disabled aria-disabled="true">${esc(startsIn(j.ms))}</button>`;
+    const cls = 'gc-join' + (big ? ' big' : '') + (compact ? ' compact' : '');
     if (j.k === 'cancelled') return `<span class="gc-chip cancelled">Cancelled</span>`;
+    if (isStaffRow(s)) {
+      const btn = `<button type="button" class="${cls} staff" data-gc="join" data-id="${esc(s.id)}">▶ <span>Enter room</span></button>`;
+      return compact || j.k === 'open' ? btn : `<span class="gc-join-wrap">${btn}<span class="gc-join-note">Students can join from 10 min before</span></span>`;
+    }
+    if (j.k === 'open') return `<button type="button" class="${cls}" data-gc="join" data-id="${esc(s.id)}">▶ <span>Join class</span></button>`;
+    if (j.k === 'soon') return `<button type="button" class="${cls}" disabled aria-disabled="true" data-opens="1"><span data-no-i18n>${esc(tr(opensAt(s)))}</span></button>`;
     return `<span class="gc-chip">Ended</span>`;
   }
 
@@ -272,7 +283,7 @@
         <div class="gs-next-when"><div class="gs-next-day">${dayHtml(next.starts_at)}</div><div class="gs-next-time">${rangeHtml(next)}</div>${j.k === 'open' && j.live ? '<span class="gc-chip live">● Live now</span>' : ''}</div>
         <div class="gs-next-info"><div class="gs-next-title" data-no-i18n>${esc(sTitle(next))}</div>
           <div class="gc-meta">${next.group_name ? `<span data-no-i18n>${esc(next.group_name)}</span>` : ''}${next.teacher_name ? ` <span class="gs-dot">·</span> <span>Teacher:</span> <span data-no-i18n>${esc(next.teacher_name)}</span>` : ''}</div></div>
-        <div class="gs-next-act">${joinButtonHtml(next, { big: true })}${j.k === 'soon' ? '<div class="gc-hint">The button turns on 10 minutes before the class.</div>' : ''}</div>
+        <div class="gs-next-act">${joinButtonHtml(next, { big: true })}${j.k === 'soon' ? `<div class="gc-hint"><span>${esc(startsIn(j.ms))}</span> · <span>The button turns on 10 minutes before the class.</span></div>` : ''}</div>
       </div>`;
     } else enter = '<div class="gs-none">No upcoming classes. When your teacher schedules one, it will appear here.</div>';
     // 📅 Calendar (agenda)
@@ -284,7 +295,7 @@
       return `<div class="gs-item${s.status === 'cancelled' ? ' cancelled' : ''}" data-sid="${esc(s.id)}">
         <div class="gs-item-time">${rangeHtml(s)}</div>
         <div class="gs-item-main"><div class="gs-item-title" data-no-i18n>${esc(sTitle(s))}</div><div class="gc-meta">${s.group_name ? `<span data-no-i18n>${esc(s.group_name)}</span>` : ''}${s.teacher_name ? ` <span class="gs-dot">·</span> <span data-no-i18n>${esc(s.teacher_name)}</span>` : ''}</div></div>
-        <div class="gs-item-act">${s.status === 'cancelled' ? '<span class="gc-chip cancelled">Cancelled</span>' : `${j.k === 'open' && s !== next ? joinButtonHtml(s) : ''}<a class="gc-icon-btn" href="${esc(googleUrl(s))}" target="_blank" rel="noopener" title="${esc(tr('Add to Google Calendar'))}" aria-label="${esc(tr('Add to Google Calendar'))}">G+</a><button type="button" class="gc-icon-btn" data-gc="ics" data-id="${esc(s.id)}" title="${esc(tr('Download .ics (Outlook, Apple)'))}" aria-label="${esc(tr('Download .ics (Outlook, Apple)'))}">⬇</button>`}</div>
+        <div class="gs-item-act">${s.status === 'cancelled' ? '<span class="gc-chip cancelled">Cancelled</span>' : `${j.k === 'open' ? joinButtonHtml(s, { compact: true }) : ''}<a class="gc-icon-btn" href="${esc(googleUrl(s))}" target="_blank" rel="noopener" title="${esc(tr('Add to Google Calendar'))}" aria-label="${esc(tr('Add to Google Calendar'))}">G+</a><button type="button" class="gc-icon-btn" data-gc="ics" data-id="${esc(s.id)}" title="${esc(tr('Download .ics (Outlook, Apple)'))}" aria-label="${esc(tr('Download .ics (Outlook, Apple)'))}">⬇</button>`}</div>
       </div>`;
     }).join('')}</div>`).join('') + (up.length > shown.length ? `<div class="gc-hint"><span>And more:</span> <b>${up.length - shown.length}</b></div>` : '')
       : '<div class="gs-none">No classes scheduled yet.</div>';
@@ -320,7 +331,7 @@
   // ════════════════════════════════════════════════════════════════════════════════════════════
   // CALENDAR (teachers / substitutes; read-only in View as)
   // ════════════════════════════════════════════════════════════════════════════════════════════
-  const CAL = { view: null, anchor: startOfWeek(new Date()), rows: [], seq: 0, loaded: false, groups: null };
+  const CAL = { view: null, anchor: startOfWeek(new Date()), rows: [], seq: 0, loaded: false, groups: null, next: null, nextSeq: 0, timer: null };
   const calRange = () => CAL.view === 'week' ? [CAL.anchor, addDays(CAL.anchor, 7)] : [CAL.anchor, addDays(CAL.anchor, 56)];
 
   function renderCalendar() {
@@ -333,6 +344,7 @@
           <p class="gc-sub"><span>Your classes and your groups' classes.</span> <span class="gc-tz">🕒 <span>Your time zone:</span> <b data-no-i18n>${esc(tzLabel())}</b></span></p></div>
         <div class="gc-head-actions">${ro ? '' : '<button type="button" class="tree-btn" data-gc="subscribe">🔗 Subscribe</button>'}<button type="button" class="btn-create-inst" data-gc="new-session">+ Schedule class</button></div>
       </header>
+      <div id="gc-next-card" class="gc-next-slot"></div>
       <div class="gc-toolbar">
         <div class="in-seg" role="group" aria-label="${esc(tr('Calendar view'))}"><button type="button" data-gc="view" data-v="week" class="${CAL.view === 'week' ? 'active' : ''}" aria-pressed="${CAL.view === 'week'}">Week</button><button type="button" data-gc="view" data-v="agenda" class="${CAL.view === 'agenda' ? 'active' : ''}" aria-pressed="${CAL.view === 'agenda'}">Agenda</button></div>
         <div class="gc-nav"><button type="button" class="tree-btn" data-gc="prev" aria-label="${esc(tr('Previous'))}">‹</button><button type="button" class="tree-btn" data-gc="today">Today</button><button type="button" class="tree-btn" data-gc="next" aria-label="${esc(tr('Next'))}">›</button></div>
@@ -341,6 +353,28 @@
       <div id="gc-cal-body" class="gc-cal-body"><div class="in-loading">Loading…</div></div>
     </div>`;
     loadCalendar();
+    clearInterval(CAL.timer);
+    CAL.timer = setInterval(() => { if (!isActive('calendar')) { clearInterval(CAL.timer); CAL.timer = null; return; } renderNext(); }, 30000);
+  }
+  // Today's / next class: a visible "Enter room" (teacher, substitute) or the join window (as a student)
+  async function loadNext() {
+    const seq = ++CAL.nextSeq; const now = new Date();
+    const { data, error } = await calSource(new Date(now.getTime() - 12 * 60 * MIN), addDays(now, 60));
+    if (seq !== CAL.nextSeq) return;
+    CAL.next = error ? null : (upcoming(data || []).find(r => r.status !== 'cancelled') || null);
+    renderNext();
+  }
+  function renderNext() {
+    const box = $('gc-next-card'); if (!box) return;
+    const s = CAL.next;
+    if (!s || Date.parse(s.ends_at) <= Date.now()) { box.innerHTML = ''; return; }
+    const j = joinState(s); const today = sameDay(new Date(s.starts_at), new Date());
+    box.innerHTML = `<section class="gc-nextcard${j.k === 'open' ? ' open' : ''}" aria-label="${esc(tr(today ? "Today's class" : 'Next class'))}">
+      <div class="gc-nc-when"><span class="gc-nc-label">${today ? "Today's class" : 'Next class'}</span><span class="gc-nc-day">${dayHtml(s.starts_at)}</span> <span class="gc-nc-time">${rangeHtml(s)}</span>${j.k === 'open' && j.live ? ' <span class="gc-chip live">● Live now</span>' : ''}</div>
+      <div class="gc-nc-info"><button type="button" class="gc-nc-title" data-gc="open" data-id="${esc(s.id)}" data-no-i18n>${esc(sTitle(s))}</button>
+        <div class="gc-meta">${s.group_name ? `<span data-no-i18n>${esc(s.group_name)}</span> <span class="gs-dot">·</span> ` : ''}<span>👥</span> <b>${Number(s.people) || 0}</b> ${roleChip(s)}</div></div>
+      <div class="gc-nc-act">${joinButtonHtml(s)}</div>
+    </section>`;
   }
   async function calSource(from, to) {
     if (inViewAs()) { // the owner's own session: show the viewed unit's classes (for a teacher: their groups)
@@ -367,6 +401,7 @@
     if (error) { errToast(error); CAL.rows = []; } else CAL.rows = Array.isArray(data) ? data : [];
     CAL.loaded = true;
     renderCalBody();
+    loadNext();
     handleDeepLink();
   }
   function renderCalBody() {
@@ -419,14 +454,15 @@
     const byDay = [];
     list.forEach(s => { const k = ymd(new Date(s.starts_at)); let g = byDay.find(x => x.k === k); if (!g) { g = { k, d: s.starts_at, items: [] }; byDay.push(g); } g.items.push(s); });
     const today = new Date();
+    const act = s => { if (s.status === 'cancelled') return ''; if (isStaffRow(s)) return joinButtonHtml(s, { compact: true }); return s.role === 'student' && joinState(s).k === 'open' ? joinButtonHtml(s, { compact: true }) : ''; };
     return `<div class="gc-agenda">${byDay.map(g => `<div class="gc-ag-day${sameDay(new Date(g.d), today) ? ' today' : ''}"><div class="gc-ag-date">${dayHtml(g.d)}</div><div class="gc-ag-items">${g.items.map(s => `
-      <button type="button" class="gc-ag-item${s.status === 'cancelled' ? ' cancelled' : ''}" data-gc="open" data-id="${esc(s.id)}">
+      <div class="gc-ag-item${s.status === 'cancelled' ? ' cancelled' : ''}" role="button" tabindex="0" data-gc="open" data-id="${esc(s.id)}">
         <span class="gc-ag-time">${rangeHtml(s)}</span>
         <span class="gc-ag-main"><span class="gc-ag-title" data-no-i18n>${esc(sTitle(s))}</span><span class="gc-meta">${s.group_name ? `<span data-no-i18n>${esc(s.group_name)}</span> <span class="gs-dot">·</span> ` : ''}<span>👥</span> <b>${Number(s.people) || 0}</b>${s.unit_name && s.role === 'admin' ? ` <span class="gs-dot">·</span> <span data-no-i18n>${esc(s.unit_name)}</span>` : ''}</span></span>
-        ${roleChip(s)}
-      </button>`).join('')}</div></div>`).join('')}</div>`;
+        ${roleChip(s)}<span class="gc-ag-act">${act(s)}</span>
+      </div>`).join('')}</div></div>`).join('')}</div>`;
   }
-  const findRow = id => CAL.rows.find(r => r.id === id) || GR.cal.find(r => r.id === id) || (ST.data?.sessions || []).find(r => r.id === id) || null;
+  const findRow = id => CAL.rows.find(r => r.id === id) || (CAL.next && CAL.next.id === id ? CAL.next : null) || GR.cal.find(r => r.id === id) || (ST.data?.sessions || []).find(r => r.id === id) || null;
 
   // ── session detail ──
   async function openSessionDetail(id) {
@@ -439,7 +475,7 @@
         ${otherTz ? `<div class="gc-hint"><span>Group time:</span> <span data-no-i18n>${esc(timeInTz(s.starts_at, s.timezone))} (${esc(String(s.timezone).replace(/_/g, ' '))})</span></div>` : ''}</div>
       <div class="gc-chips">${s.group_name ? `<span class="gc-chip"><span>Group:</span> <b data-no-i18n>${esc(s.group_name)}</b></span>` : '<span class="gc-chip">Without a group</span>'}
         ${s.series_id ? '<span class="gc-chip">🔁 <span>Weekly</span></span>' : ''}${roleChip(s)}${s.teacher_name && s.role !== 'teacher' ? `<span class="gc-chip"><span>Teacher:</span> <b data-no-i18n>${esc(s.teacher_name)}</b></span>` : ''}</div>
-      <div class="gc-join-row">${joinButtonHtml(s)}<span class="gc-hint">The class opens 10 minutes before it starts.</span></div>
+      <div class="gc-join-row">${joinButtonHtml(s)}${isStaffRow(s) || s.status === 'cancelled' ? '' : '<span class="gc-hint">The class opens 10 minutes before it starts.</span>'}</div>
       <div class="gc-sec-title">Add to calendar</div>
       <div class="gc-btn-row"><a class="tree-btn" href="${esc(googleUrl(s))}" target="_blank" rel="noopener">Google Calendar</a><button type="button" class="tree-btn" data-gc="ics" data-id="${esc(s.id)}">⬇ <span>.ics (Outlook, Apple)</span></button></div>
       ${staff ? `<div class="gc-sec-title"><span>Students</span> <span class="gc-count">(<b>${Number(s.people) || 0}</b>)</span></div><div id="gc-people" class="gc-people"><div class="in-loading">Loading…</div></div>` : ''}
@@ -681,10 +717,10 @@
   // ── join → live class demo ──
   function join(id) {
     const s = findRow(id); if (!s) return;
-    const j = joinState(s);
-    if (j.k !== 'open') { showToast(j.k === 'soon' ? startsIn(j.ms) : 'This class is not available.', 'err'); return; }
+    const j = joinState(s); const staff = isStaffRow(s);
+    if (j.k === 'cancelled' || (!staff && j.k !== 'open')) { showToast(j.k === 'soon' ? opensAt(s) : 'This class is not available.', 'err'); return; }
     closeGc();
-    if (window.LiveClass?.openSession) window.LiveClass.openSession({ id: s.id, title: sTitle(s) });
+    if (window.LiveClass?.openSession) window.LiveClass.openSession({ id: s.id, title: sTitle(s), role: staff ? 'teacher' : 'student' });
     else showToast('The live class is not available.', 'err');
   }
 
@@ -751,6 +787,10 @@
     body.innerHTML = `<div class="gc-glist">${other.map(g => groupCardHtml(g)).join('')}</div>`;
   }
   const personHtml = p => p ? `<b data-no-i18n>${esc(p.name || p.email || '—')}</b>` : '<span class="gc-warn">Not assigned</span>';
+  // invited, not registered yet: assigned by itself when they sign up (only admins get this email)
+  const pendingHtml = p => `<span class="gc-pending"><span>Pending:</span> <b data-no-i18n>${esc(p.email)}</b> <span class="gc-muted">${p.invited ? '<span>(invited)</span>' : '<span>(not invited yet: no free seats)</span>'}</span></span>`;
+  const IMP = () => window.TCImport;
+  const humanSched = sch => (IMP() && sch ? IMP().humanSchedule(sch, uiLang === 'es' ? 'es' : 'en') : '');
   function groupCardHtml(g) {
     const open = !!GR.open[g.id]; const mem = GR.members[g.id];
     const moveOpts = GR.groups.filter(x => x.id !== g.id).map(x => `<option value="${esc(x.id)}" data-no-i18n>${esc(x.name)}${x.institution_id !== g.institution_id ? ' · ' + esc(x.unit_name) : ''}</option>`).join('');
@@ -766,7 +806,8 @@
           <div class="gc-gname" data-no-i18n>${esc(g.name)}</div>
           <div class="gc-meta">${g.institution_id !== GR.unit ? `<span class="lvl-badge lvl-3" data-no-i18n>${esc(g.unit_name)}</span> ` : ''}<span>🕒</span> <span data-no-i18n>${esc(String(g.timezone).replace(/_/g, ' '))}</span>
             <span class="gs-dot">·</span> ${g.next_session ? `<span>Next class:</span> <span data-no-i18n>${esc(fDay(g.next_session))} ${esc(fTime(g.next_session))}</span>` : '<span>No classes scheduled</span>'}</div>
-          <div class="gc-gpeople"><span>Teacher:</span> ${personHtml(g.teacher)} <span class="gs-dot">·</span> <span>Substitute:</span> ${g.substitute ? personHtml(g.substitute) : '<span class="gc-muted">None</span>'}</div>
+          <div class="gc-gpeople"><span>Teacher:</span> ${g.teacher ? personHtml(g.teacher) : g.pending_teacher ? pendingHtml(g.pending_teacher) : personHtml(null)} <span class="gs-dot">·</span> <span>Substitute:</span> ${g.substitute ? personHtml(g.substitute) : g.pending_substitute ? pendingHtml(g.pending_substitute) : '<span class="gc-muted">None</span>'}</div>
+          ${g.schedule ? `<div class="gc-gsched"><span aria-hidden="true">🔁</span> <span data-no-i18n>${esc(humanSched(g.schedule))}</span>${g.schedule.timezone && g.schedule.timezone !== LOCAL_TZ ? ` <span class="gc-muted" data-no-i18n>(${esc(String(g.schedule.timezone).replace(/_/g, ' '))})</span>` : ''}</div>` : ''}
         </div>
         <div class="gc-gstat"><b>${Number(g.students) || 0}</b><span>students</span></div>
       </div>
@@ -810,16 +851,25 @@
     const unit = GR.unit; const units = (typeof hierSubtreeIds === 'function' ? hierSubtreeIds(unit) : [unit]).filter(u => orgsCache[u]);
     GR.teachers = null; // always fresh: someone may have just registered
     const teachers = await loadTeachers(unit);
-    // invited but not registered yet: they can't be assigned until they sign up
+    // invited but not registered yet: can be chosen now; assigned by itself when they sign up
     let pending = [];
     try {
       const root = (typeof hierPath === 'function' ? hierPath(unit)[0]?.id : null) || unit;
       const ids = Object.keys(orgsCache || {}).filter(x => ((typeof hierPath === 'function' ? hierPath(x)[0]?.id : null) || x) === root);
-      if (ids.length) { const r = await sb.from('invitations').select('email').in('institution_id', ids).is('accepted_at', null); pending = (r.data || []).map(x => x.email); }
+      if (ids.length) { const r = await sb.from('invitations').select('email,role').in('institution_id', ids).is('accepted_at', null); pending = (r.data || []).map(x => String(x.email || '').toLowerCase()).filter(Boolean); }
     } catch (e) { pending = []; }
-    const pendingHint = pending.length ? `<div class="gc-hint">${esc(tr('Invited, waiting for them to register:'))} <span data-no-i18n>${pending.slice(0, 5).map(esc).join(', ')}${pending.length > 5 ? '…' : ''}</span>. ${esc(tr('They will appear here once they sign up with the institution link.'))}</div>` : '';
-    const tOpts = (sel, none) => `<option value="">${esc(tr(none))}</option>` + teachers.map(t => `<option value="${esc(t.id)}"${t.id === sel ? ' selected' : ''} data-no-i18n>${esc(t.name || t.email)}${t.name ? ' · ' + esc(t.email) : ''}</option>`).join('')
-      + (sel && !teachers.some(t => t.id === sel) ? `<option value="${esc(sel)}" selected data-no-i18n>${esc((g?.teacher?.id === sel ? g.teacher : g?.substitute)?.name || '—')}</option>` : '');
+    const known = new Set(teachers.map(t => String(t.email || '').toLowerCase()));
+    pending = [...new Set(pending)].filter(e => !known.has(e)).sort();
+    const pendingHint = '';
+    // value: a profile id · "email:<address>" (invited, pending) · "__new" (invite someone by email)
+    const tOpts = (sel, selPending, none) => {
+      const pend = [...new Set([...(selPending ? [selPending] : []), ...pending])];
+      return `<option value="">${esc(tr(none))}</option>`
+        + (teachers.length ? `<optgroup label="${esc(tr('Registered'))}">` + teachers.map(t => `<option value="${esc(t.id)}"${t.id === sel ? ' selected' : ''} data-no-i18n>${esc(t.name || t.email)}${t.name ? ' · ' + esc(t.email) : ''}</option>`).join('') + '</optgroup>' : '')
+        + (sel && !teachers.some(t => t.id === sel) ? `<option value="${esc(sel)}" selected data-no-i18n>${esc((g?.teacher?.id === sel ? g.teacher : g?.substitute)?.name || '—')}</option>` : '')
+        + (pend.length ? `<optgroup label="${esc(tr('Invited (not registered yet)'))}">` + pend.map(e => `<option value="email:${esc(e)}"${e === selPending ? ' selected' : ''} data-no-i18n>${esc(e)} ${esc(tr('(invited)'))}</option>`).join('') + '</optgroup>' : '')
+        + `<option value="__new">${esc(tr('Invite someone by email…'))}</option>`;
+    };
     const tz = g?.timezone || 'America/Montevideo';
     const tzs = [...new Set([tz, ...TZ_LIST, LOCAL_TZ])];
     modal(`<div class="modal-title" id="gc-modal-title">${g ? 'Edit group' : 'New group'}</div>
@@ -828,26 +878,38 @@
         <div class="modal-field"><label class="modal-label" for="gc-g-name">Group name</label><input id="gc-g-name" class="modal-input" maxlength="120" required value="${esc(g?.name || '')}" placeholder="${esc(tr('e.g. English B1 – Tue/Thu'))}" data-autofocus></div>
         ${g ? '' : `<div class="modal-field"><label class="modal-label" for="gc-g-unit">Unit</label><select id="gc-g-unit" class="modal-input">${units.map(u => `<option value="${esc(u)}" data-no-i18n${u === unit ? ' selected' : ''}>${esc(hierPathLabel(u) || unitName(u))}</option>`).join('')}</select></div>`}
         <div class="gc-form-row">
-          <div class="modal-field"><label class="modal-label" for="gc-g-teacher">Teacher</label><select id="gc-g-teacher" class="modal-input">${tOpts(g?.teacher?.id || '', 'Not assigned yet')}</select></div>
-          <div class="modal-field"><label class="modal-label" for="gc-g-sub">Substitute (optional)</label><select id="gc-g-sub" class="modal-input">${tOpts(g?.substitute?.id || '', 'No substitute')}</select></div>
+          <div class="modal-field"><label class="modal-label" for="gc-g-teacher">Teacher</label><select id="gc-g-teacher" class="modal-input" data-newfor="gc-g-teacher-new">${tOpts(g?.teacher?.id || '', g?.pending_teacher?.email || '', 'Not assigned yet')}</select>
+            <input id="gc-g-teacher-new" type="email" class="modal-input gc-newmail" placeholder="${esc(tr('teacher@school.edu'))}" hidden></div>
+          <div class="modal-field"><label class="modal-label" for="gc-g-sub">Substitute (optional)</label><select id="gc-g-sub" class="modal-input" data-newfor="gc-g-sub-new">${tOpts(g?.substitute?.id || '', g?.pending_substitute?.email || '', 'No substitute')}</select>
+            <input id="gc-g-sub-new" type="email" class="modal-input gc-newmail" placeholder="${esc(tr('teacher@school.edu'))}" hidden></div>
         </div>
+        <div class="gc-hint gc-hint-block">Someone who is not registered yet gets an invitation as teacher of this unit and stays as "Pending" until they sign up.</div>
         <div class="modal-field"><label class="modal-label" for="gc-g-tz">Time zone</label><select id="gc-g-tz" class="modal-input">${tzs.map(z => `<option value="${esc(z)}"${z === tz ? ' selected' : ''} data-no-i18n>${esc(tzLabel(z))}</option>`).join('')}</select></div>
-        ${teachers.length ? '' : '<div class="gc-hint">No teachers in this institution yet: invite them first (👤+ Invite).</div>'}${pendingHint}
+        ${teachers.length || pending.length ? '' : '<div class="gc-hint">No teachers registered yet: choose "Invite someone by email…".</div>'}${pendingHint}
         <div class="modal-actions"><button type="button" class="btn-modal-cancel" data-gc="close">Cancel</button><button type="submit" class="btn-modal-save">${g ? 'Save' : 'Create group'}</button></div>
       </form>`);
   }
   async function submitGroup(form) {
     if (blocked()) return;
     const id = form.dataset.id || null; const btn = form.querySelector('[type=submit]');
-    const name = $('gc-g-name').value.trim(); const teacher = $('gc-g-teacher').value || null; const sub = $('gc-g-sub').value || null; const tz = $('gc-g-tz').value;
+    const name = $('gc-g-name').value.trim(); const tz = $('gc-g-tz').value;
+    const pick = (selId, newId) => { // → {id} | {email} | {} | {bad}
+      const v = $(selId).value || '';
+      if (!v) return {};
+      if (v === '__new') { const e = ($(newId).value || '').trim().toLowerCase(); return EMAIL_RE.test(e) ? { email: e } : { bad: e || '—' }; }
+      if (v.startsWith('email:')) return { email: v.slice(6) };
+      return { id: v };
+    };
+    const t = pick('gc-g-teacher', 'gc-g-teacher-new'); const sb2 = pick('gc-g-sub', 'gc-g-sub-new');
     if (!name) { showToast('The group needs a name.', 'err'); return; }
-    if (teacher && sub && teacher === sub) { showToast('The substitute must be a different person.', 'err'); return; }
+    if (t.bad || sb2.bad) { showToast(`Invalid email: ${t.bad || sb2.bad}`, 'err'); return; }
+    if ((t.id && t.id === sb2.id) || (t.email && t.email === sb2.email)) { showToast('The substitute must be a different person.', 'err'); return; }
+    const args = { p_name: name, p_teacher: t.id || null, p_substitute: sb2.id || null, p_timezone: tz, p_teacher_email: t.email || null, p_substitute_email: sb2.email || null };
     busy(btn, true);
-    const { error } = id ? await rpc('update_group', { p_group: id, p_name: name, p_teacher: teacher, p_substitute: sub, p_timezone: tz })
-      : await rpc('create_group', { p_unit: $('gc-g-unit').value, p_name: name, p_teacher: teacher, p_substitute: sub, p_timezone: tz });
+    const { error } = id ? await rpc('update_group', { p_group: id, ...args }) : await rpc('create_group', { p_unit: $('gc-g-unit').value, ...args });
     busy(btn, false);
     if (error) { errToast(error); return; }
-    closeGc(); showToast(id ? 'Group saved ✓' : 'Group created ✓', 'ok'); loadGroups();
+    closeGc(); showToast(t.email || sb2.email ? 'Group saved ✓ The invited person is assigned when they register.' : (id ? 'Group saved ✓' : 'Group created ✓'), 'ok', 5000); loadGroups();
   }
   function addStudentForm(groupId) {
     if (blocked()) return;
@@ -908,108 +970,146 @@
     delete GR.open[id]; showToast('Group deleted', 'ok'); loadGroups();
   }
 
-  // ── CSV import ──
-  const TEMPLATE = '\ufeffemail,name,group,teacher_email,unit\nana.perez@example.com,Ana Pérez,English B1 – Tue/Thu,teacher@school.edu,\nbruno.diaz@example.com,Bruno Díaz,English B1 – Tue/Thu,,\ncarla.ruiz@example.com,Carla Ruiz,Math 2,,\n';
-  const HEADER_ALIASES = {
-    email: ['email', 'e-mail', 'mail', 'correo', 'correoelectronico', 'emailalumno', 'emailestudiante', 'studentemail'],
-    name: ['name', 'nombre', 'fullname', 'nombrecompleto', 'student', 'alumno', 'alumna', 'estudiante', 'studentname', 'nombreyapellido'],
-    group: ['group', 'grupo', 'clase', 'class', 'course', 'curso', 'groupname'],
-    teacher_email: ['teacheremail', 'teacher', 'docente', 'docenteemail', 'emaildocente', 'correodocente', 'profesor', 'profesora', 'profesoremail', 'emailprofesor'],
-    unit: ['unit', 'unidad', 'slug', 'sede', 'catedra', 'area', 'unitslug'],
-  };
-  const normHeader = h => String(h || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[\s_\-.()]/g, '');
-  function parseCsv(text) {
-    text = String(text || '').replace(/^\ufeff/, '');
-    const first = (text.split(/\r?\n/).find(l => l.trim()) || '');
-    const count = ch => { let n = 0; let q = false; for (const c of first) { if (c === '"') q = !q; else if (!q && c === ch) n++; } return n; };
-    const delim = [',', ';', '\t'].sort((a, b) => count(b) - count(a))[0];
-    const rows = []; let row = []; let cur = ''; let q = false;
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      if (q) { if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
-      else if (c === '"') q = true;
-      else if (c === delim) { row.push(cur); cur = ''; }
-      else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(cur); rows.push(row); row = []; cur = ''; }
-      else cur += c;
-    }
-    if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
-    return rows;
-  }
-  // → {rows:[{line,email,name,group,teacher_email,unit}], error}
-  function csvToRows(text) {
-    const all = parseCsv(text);
-    const head = all.findIndex(r => r.some(c => c.trim()));
-    if (head < 0) return { error: 'The file has no rows.' };
-    const cols = {};
-    all[head].forEach((h, i) => { const n = normHeader(h); for (const [k, al] of Object.entries(HEADER_ALIASES)) if (al.includes(n) && cols[k] == null) cols[k] = i; });
-    if (cols.email == null) return { error: 'The file needs an "email" column (header in the first row).' };
-    const rows = [];
-    for (let i = head + 1; i < all.length; i++) {
-      const r = all[i]; if (!r.some(c => c.trim())) continue;
-      const g = k => (cols[k] == null ? '' : String(r[cols[k]] ?? '').trim());
-      rows.push({ line: i + 1, email: g('email'), name: g('name'), group: g('group'), teacher_email: g('teacher_email'), unit: g('unit') });
-    }
-    if (!rows.length) return { error: 'The file has no rows.' };
-    if (rows.length > MAX_IMPORT) return { error: 'Too many rows: the limit is 2,000.' };
-    return { rows, cols: Object.keys(cols) };
-  }
+  // ── CSV import (parser: public/csv-import.js → window.TCImport) ──
+  const csvToRows = (text, opts) => IMP().csvToRows(text, opts);
+  const parseCsv = text => IMP().parseCsv(text);
   function importDialog() {
     if (blocked()) return;
     GR.imp = null;
-    modal(`<div class="modal-title" id="gc-modal-title">Import students (CSV)</div>
-      <div class="modal-sub"><span>Columns:</span> <b data-no-i18n>email, name, group</b> <span>— optional</span> <b data-no-i18n>teacher_email, unit</b> <span>(name or slug). The order doesn't matter: we read the header. Up to 2,000 rows. Importing the same file again doesn't duplicate anyone.</span></div>
+    modal(`<div class="modal-title" id="gc-modal-title">Import groups and students (CSV)</div>
+      <div class="modal-sub"><span>One row per student. The group's schedule, teacher and substitute can go on any row of the group (or on a row without a student). We create the groups, enroll the students and put the classes in each teacher's calendar.</span></div>
       <div class="gc-import-drop">
         <label class="tree-btn primary gc-file"><input type="file" id="gc-imp-file" accept=".csv,text/csv,text/plain" hidden>📄 <span>Choose a CSV file</span></label>
         <span class="gc-imp-file-name" id="gc-imp-file-name" data-no-i18n></span>
         <button type="button" class="tree-btn" data-gc="template">⬇ <span>Download the template</span></button>
       </div>
-      <div class="modal-field"><label class="modal-label" for="gc-imp-text">…or paste the rows here</label><textarea id="gc-imp-text" class="modal-input gc-imp-text" rows="6" placeholder="email,name,group&#10;ana@example.com,Ana Pérez,English B1 – Tue/Thu" data-no-i18n></textarea></div>
+      <details class="gc-imp-help" open><summary>Accepted columns</summary>
+        <ul>
+          <li><b data-no-i18n>email</b> · <b data-no-i18n>nombre / name</b> · <b data-no-i18n>grupo / group</b> — <span>the student (email can be empty on a row that only defines a group)</span></li>
+          <li><b data-no-i18n>docente / teacher_email</b> · <b data-no-i18n>suplente / substitute</b> — <span>if they are not registered yet, we invite them and assign them when they sign up</span></li>
+          <li><b data-no-i18n>días / days</b> — <span>e.g. "Lun;Mié", "L,Mi", "lunes y miércoles", "Mon/Wed", "LMi" ("Mi" = Wednesday, "Ma" = Tuesday)</span></li>
+          <li><b data-no-i18n>hora_inicio / start_time</b> · <b data-no-i18n>hora_fin / end_time</b> <span>or</span> <b data-no-i18n>duración / duration</b> — <span>e.g. 07:00, 7am, 19:30; minutes</span></li>
+          <li><b data-no-i18n>desde / start_date</b> · <b data-no-i18n>hasta / end_date</b> — <span>day/month/year (3/3/2027) or 2027-03-03; up to one year</span></li>
+          <li><b data-no-i18n>zona / timezone</b> · <b data-no-i18n>unidad / unit</b> — <span>optional (default: the group's time zone, America/Montevideo)</span></li>
+        </ul>
+        <div class="gc-hint">Headers in Spanish or English, any order; capitals and accents don't matter. Up to 2,000 rows. Importing the same file again doesn't duplicate anything.</div>
+      </details>
+      <div class="modal-field"><label class="modal-label" for="gc-imp-text">…or paste the rows here</label><textarea id="gc-imp-text" class="modal-input gc-imp-text" rows="6" placeholder="email,nombre,grupo,docente,dias,hora_inicio,hora_fin,desde,hasta&#10;ana@example.com,Ana Pérez,INEFOP A1.1,docente@escuela.edu.uy,Lun;Mié,07:00,08:00,3/3/2027,30/11/2027" data-no-i18n></textarea></div>
       <div class="gc-hint">Excel: File → Save as → CSV UTF-8. Comma or semicolon both work.</div>
       <div class="modal-actions"><button type="button" class="btn-modal-cancel" data-gc="close">Cancel</button><button type="button" class="btn-modal-save" data-gc="imp-check">Check file →</button></div>`, { wide: true });
   }
   const IMP_CODES = { missing_email: 'Missing email', bad_email: 'Invalid email', duplicate: 'Repeated in the file', unknown_unit: 'Unknown unit',
-    ambiguous_unit: 'More than one unit with that name: use its slug', unknown_teacher: 'Teacher not found in your institution', unknown_group: 'Unknown group', bad_group: 'Group name too long' };
+    ambiguous_unit: 'More than one unit with that name: use its slug', unknown_teacher: 'Teacher not found in your institution', unknown_group: 'Unknown group', bad_group: 'Group name too long',
+    unknown_substitute: 'Substitute not found in your institution', missing_group: 'Schedule or substitute without a group', same_person: 'Teacher and substitute are the same person',
+    bad_schedule: 'Invalid schedule', ambiguous_day: 'Ambiguous day: "M" can be Tuesday or Wednesday (use Ma / Mi)', bad_days: 'Unknown days', bad_time: 'Invalid start time',
+    bad_end_time: 'Invalid end time', bad_duration: 'Invalid duration (5 to 720 minutes)', time_conflict: 'End time and duration don\'t match', bad_date: 'Invalid start date',
+    bad_end_date: 'Invalid end date', date_mdy: 'Looks like month/day: write day/month (e.g. 25/04/2027)', end_before_start: 'The end date is before the start date',
+    range_too_long: 'More than one year', bad_tz: 'Unknown time zone', bad_teacher_email: 'Invalid teacher email', bad_substitute_email: 'Invalid substitute email' };
+  const FIELD_LABEL = { teacher_email: 'teacher', substitute_email: 'substitute', weekdays: 'days', start_time: 'start time', duration_min: 'duration / end time',
+    start_date: 'start date', end_date: 'end date', timezone: 'time zone' };
   async function importCheck(btn) {
     const text = $('gc-imp-text')?.value || '';
+    if (!IMP()) { showToast('Error', 'err'); return; }
     const parsed = csvToRows(text);
     if (parsed.error) { showToast(parsed.error, 'err'); return; }
     busy(btn, true);
-    const { data, error } = await rpc('import_students', { p_unit: GR.unit, p_rows: parsed.rows, p_create_groups: true, p_commit: false });
+    const { data, error } = await rpc('import_students', { p_unit: GR.unit, p_rows: IMP().toRpcRows(parsed.rows), p_create_groups: true, p_commit: false });
     busy(btn, false);
     if (error) { errToast(error); return; }
-    GR.imp = { rows: parsed.rows, preview: data, create: true, text };
+    GR.imp = { rows: parsed.rows, ignored: parsed.ignored || [], preview: data, create: true, text };
     renderImportPreview();
   }
+  function personChip(p, kind) {
+    if (!p) return kind === 'teacher' ? '<span class="gc-warn">Not assigned</span>' : '<span class="gc-muted">None</span>';
+    const who = p.email ? `<b data-no-i18n>${esc(p.name || p.email)}</b>${p.name && p.email ? ` <span class="gc-muted" data-no-i18n>${esc(p.email)}</span>` : ''}` : `<b data-no-i18n>${esc(p.name || '—')}</b>`;
+    const st = {
+      registered: '<span class="gc-chip ok">Registered ✓</span>', current: '<span class="gc-chip">Already assigned</span>',
+      invite: '<span class="gc-chip warn">Not registered: will be invited</span>', invited: '<span class="gc-chip warn">Invited, not registered yet</span>',
+      add: '<span class="gc-chip new">Has an account: will be added as teacher</span>', pending: '<span class="gc-chip warn">Pending (invited)</span>',
+      kept: `<span class="gc-chip warn">The group already has another teacher (kept)</span> <span class="gc-muted" data-no-i18n>${esc(p.current || '')}</span>`,
+    }[p.status] || '';
+    return `${who} ${st}${p.seats_full ? ' <span class="gc-chip err">No free seats: stays pending, not invited</span>' : ''}`;
+  }
+  function scheduleHtml(g) {
+    const tzNote = g.timezone && g.timezone !== LOCAL_TZ ? ` <span class="gc-muted" data-no-i18n>(${esc(String(g.timezone).replace(/_/g, ' '))})</span>` : '';
+    const sched = g.schedule ? `<span class="gc-imp-when" data-no-i18n>${esc(humanSched(g.schedule))}</span>${tzNote}` : '';
+    switch (g.schedule_status) {
+      case 'new': return `${sched} <span class="gc-chip new">New schedule</span>`;
+      case 'unchanged': return `${sched} <span class="gc-chip">Same schedule: nothing changes</span>`;
+      case 'changed': return `<span class="gc-chip warn">Schedule changes</span> <span class="gc-muted"><span>Before:</span> <s data-no-i18n>${esc(humanSched(g.previous))}</s></span> → ${sched}
+        <div class="gc-hint">Only future classes that weren't edited one by one move. Past classes never change.</div>`;
+      case 'error': {
+        const msg = g.schedule_error === 'schedule_incomplete' ? `<span>Incomplete schedule, missing:</span> <b>${(g.missing || []).map(m => `<span>${esc(tr(FIELD_LABEL[m] || m))}</span>`).join(', ')}</b>`
+          : `<span>${esc(tr({ end_before_start: 'The end date is before the start date', range_too_long: 'More than one year', no_dates: 'No future class in that range' }[g.schedule_error] || 'Invalid schedule'))}</span>`;
+        return `<span class="gc-chip err">No classes</span> ${msg}`;
+      }
+      default: return '<span class="gc-muted">No schedule in the file</span>';
+    }
+  }
   function renderImportPreview() {
-    const p = GR.imp.preview || {}; const newG = p.new_groups || [];
-    const willAdd = (GR.imp.create ? (p.ok || 0) : (p.ok || 0) - (p.new_group_rows || 0));
-    const stChip = r => r.status === 'error' ? `<span class="gc-chip err">${esc(tr(IMP_CODES[r.code] || 'Error'))}</span>`
+    const p = GR.imp.preview || {}; const newG = p.new_groups || []; const groups = p.groups || [];
+    const create = GR.imp.create;
+    const willAdd = (create ? (p.ok || 0) : (p.ok || 0) - (p.new_group_rows || 0));
+    const live = groups.filter(g => g.exists || create);
+    const classes = live.reduce((n, g) => n + (['new', 'changed'].includes(g.schedule_status) ? Number(g.classes) || 0 : 0), 0);
+    const work = willAdd > 0 || live.some(g => (!g.exists) || ['new', 'changed'].includes(g.schedule_status)
+      || ['invite', 'add'].includes(g.teacher?.status) || ['invite', 'add'].includes(g.substitute?.status) || g.teacher?.assign || g.substitute?.assign);
+    // classes per teacher (the end of the funnel)
+    const per = {};
+    live.forEach(g => { const t = g.teacher; const key = t ? (t.email || t.name || '?') : ''; const label = t ? (t.name || t.email || '—') : '';
+      const n = ['new', 'changed', 'unchanged'].includes(g.schedule_status) ? Number(g.classes) || 0 : 0;
+      per[key] = per[key] || { label, pending: t && ['invite', 'invited', 'pending', 'add'].includes(t.status), classes: 0, groups: 0 }; per[key].classes += n; per[key].groups++; });
+    const n = (k, one, many) => `<b>${k}</b> <span>${k === 1 ? one : many}</span>`;
+    const perHtml = Object.entries(per).map(([k, v]) => `<li>${k ? `<b data-no-i18n>${esc(v.label)}</b>${v.pending ? ' <span class="gc-chip warn">Pending</span>' : ''}` : '<span class="gc-warn">Not assigned</span>'}: ${n(v.classes, 'class', 'classes')} · ${n(v.groups, 'group', 'groups')}</li>`).join('');
+    const stChip = r => r.status === 'error' ? `<span class="gc-chip err">${r.code === 'conflict' ? `<span>${esc(tr('Conflicts with another row of the same group:'))}</span> <span>${esc(tr(FIELD_LABEL[r.field] || r.field || ''))}</span>` : esc(tr(IMP_CODES[r.code] || 'Error'))}</span>`
       : r.status === 'exists' ? '<span class="gc-chip">Already loaded</span>'
-      : r.status === 'new_group' ? (GR.imp.create ? '<span class="gc-chip new">Group to create</span>' : '<span class="gc-chip err">Skipped: unknown group</span>')
+      : r.status === 'group_only' ? '<span class="gc-chip new">Group details (no student)</span>'
+      : r.status === 'new_group' ? (create ? '<span class="gc-chip new">Group to create</span>' : '<span class="gc-chip err">Skipped: unknown group</span>')
       : '<span class="gc-chip ok">Will be added</span>';
+    const clientWarn = line => { const r = GR.imp.rows.find(x => x.line === line); return r?.warnings?.includes('date_no_year') ? ' <span class="gc-chip warn">Date without year: this year</span>' : ''; };
     modal(`<div class="modal-title" id="gc-modal-title">Check before importing</div>
+      <div class="gc-funnel" aria-label="${esc(tr('Summary'))}">
+        <div class="gc-fstep"><b>${p.total || 0}</b><span>rows</span></div><span class="gc-farrow" aria-hidden="true">→</span>
+        <div class="gc-fstep"><b>${live.length}</b><span>groups</span></div><span class="gc-farrow" aria-hidden="true">→</span>
+        <div class="gc-fstep"><b>${classes}</b><span>classes to create</span></div><span class="gc-farrow" aria-hidden="true">→</span>
+        <div class="gc-fstep wide"><span class="gc-fhead">Classes per teacher</span><ul class="gc-fper">${perHtml || '<li class="gc-muted">—</li>'}</ul></div>
+      </div>
       <div class="gc-imp-sum">
         <div class="metric-card"><div class="metric-label">Rows</div><div class="metric-value">${p.total || 0}</div></div>
         <div class="metric-card ok"><div class="metric-label">To add</div><div class="metric-value">${Math.max(willAdd, 0)}</div></div>
         <div class="metric-card"><div class="metric-label">Already loaded</div><div class="metric-value">${p.exists || 0}</div></div>
         <div class="metric-card${p.errors ? ' err' : ''}"><div class="metric-label">With errors</div><div class="metric-value">${p.errors || 0}</div></div>
       </div>
-      ${newG.length ? `<label class="switch-row gc-imp-newg"><input type="checkbox" id="gc-imp-create"${GR.imp.create ? ' checked' : ''}> <span>Create the new groups:</span> <b data-no-i18n>${esc(newG.map(g => g.name + (g.unit && g.unit !== unitName(GR.unit) ? ' (' + g.unit + ')' : '')).join(', '))}</b></label>` : ''}
+      ${newG.length ? `<label class="switch-row gc-imp-newg"><input type="checkbox" id="gc-imp-create"${create ? ' checked' : ''}> <span>Create the new groups:</span> <b data-no-i18n>${esc(newG.map(g => g.name + (g.unit && g.unit !== unitName(GR.unit) ? ' (' + g.unit + ')' : '')).join(', '))}</b></label>` : ''}
+      ${GR.imp.ignored.length ? `<div class="gc-hint"><span>Columns we don't use (ignored):</span> <span data-no-i18n>${esc(GR.imp.ignored.join(', '))}</span></div>` : ''}
+      ${groups.length ? `<div class="gc-sec-title">Groups</div><div class="gc-imp-groups">${groups.map(g => `
+        <div class="gc-imp-g${g.exists || create ? '' : ' skipped'}" data-key="${esc(g.key)}">
+          <div class="gc-imp-ghead"><b class="gc-imp-gname" data-no-i18n>${esc(g.name)}</b>${g.unit && g.unit !== unitName(GR.unit) ? ` <span class="lvl-badge lvl-3" data-no-i18n>${esc(g.unit)}</span>` : ''}
+            ${g.exists ? '<span class="gc-chip">Existing group</span>' : (create ? '<span class="gc-chip new">New group</span>' : '<span class="gc-chip err">Skipped: unknown group</span>')}
+            <span class="gc-imp-gnums">${(c => `<b class="gc-imp-classes">${c}</b> <span>${c === 1 ? 'class' : 'classes'}</span>`)(['new', 'changed', 'unchanged'].includes(g.schedule_status) ? Number(g.classes) || 0 : 0)} · ${(c => `<b class="gc-imp-students">${c}</b> <span>${c === 1 ? 'student' : 'students'}</span>`)(Number(g.students) || 0)}</span></div>
+          <div class="gc-imp-gline"><span class="gc-imp-k">Teacher:</span> ${personChip(g.teacher, 'teacher')}</div>
+          <div class="gc-imp-gline"><span class="gc-imp-k">Substitute:</span> ${personChip(g.substitute, 'substitute')}</div>
+          <div class="gc-imp-gline gc-imp-sched"><span class="gc-imp-k">Schedule:</span> ${scheduleHtml(g)}</div>
+          ${Number(g.past_skipped) > 0 && ['new', 'changed'].includes(g.schedule_status) ? `<div class="gc-hint"><b>${Number(g.past_skipped)}</b> <span>dates already passed are skipped: only future classes are created.</span></div>` : ''}
+          ${Number(g.other_classes) > 0 ? `<div class="gc-hint"><span>This group already has other scheduled classes:</span> <b>${Number(g.other_classes)}</b></div>` : ''}
+        </div>`).join('')}</div>` : ''}
       ${p.errors ? '<div class="gc-hint">Rows with errors are skipped. Fix them in the file and import it again whenever you want.</div>' : ''}
+      <div class="gc-sec-title">Rows</div>
       <div class="gc-imp-table"><table class="teachers-table"><thead><tr><th>Line</th><th>Email</th><th>Name</th><th>Group</th><th>Status</th></tr></thead><tbody>
         ${(p.rows || []).map(r => `<tr class="${r.status === 'error' ? 'err' : ''}"><td>${Number(r.line) || ''}</td><td data-no-i18n class="gc-mail">${esc(r.email || '—')}</td><td data-no-i18n>${esc(r.name || '')}</td><td data-no-i18n>${esc(r.group || '')}${r.unit && r.unit !== unitName(GR.unit) ? ` <span class="gc-muted">${r.group ? '· ' : ''}${esc(r.unit)}</span>` : ''}</td>
-          <td>${stChip(r)}${r.warning === 'teacher_ignored' ? ' <span class="gc-chip warn">The group already has another teacher (kept)</span>' : ''}</td></tr>`).join('')}
+          <td>${stChip(r)}${r.warning === 'teacher_ignored' ? ' <span class="gc-chip warn">The group already has another teacher (kept)</span>' : ''}${clientWarn(r.line)}</td></tr>`).join('')}
       </tbody></table></div>
-      <div class="modal-actions"><button type="button" class="btn-modal-cancel" data-gc="import">← Back</button><button type="button" class="btn-modal-save" data-gc="imp-commit"${willAdd > 0 ? '' : ' disabled'}><span>Import</span> <b>${Math.max(willAdd, 0)}</b></button></div>`, { wide: true });
+      <div class="modal-actions"><button type="button" class="btn-modal-cancel" data-gc="import">← Back</button><button type="button" class="btn-modal-save" data-gc="imp-commit"${work ? '' : ' disabled'}><span>Import</span> <b>${Math.max(willAdd, 0)}</b></button></div>`, { wide: true });
   }
   async function importCommit(btn) {
     if (blocked() || !GR.imp) return;
     busy(btn, true);
-    const { data, error } = await rpc('import_students', { p_unit: GR.unit, p_rows: GR.imp.rows, p_create_groups: !!GR.imp.create, p_commit: true });
+    const { data, error } = await rpc('import_students', { p_unit: GR.unit, p_rows: IMP().toRpcRows(GR.imp.rows), p_create_groups: !!GR.imp.create, p_commit: true });
     busy(btn, false);
     if (error) { errToast(error); return; }
     closeGc(); GR.imp = null;
-    showToast(`Imported ✓ ${data?.ok || 0} added, ${data?.exists || 0} already there, ${data?.errors || 0} skipped`, 'ok', 6000);
+    const base = `Imported ✓ ${data?.ok || 0} added, ${data?.exists || 0} already there, ${data?.errors || 0} skipped`;
+    showToast(Number(data?.classes) > 0 ? `${base} · ${data.classes} classes scheduled` : base, 'ok', 7000);
     loadGroups();
   }
 
@@ -1124,7 +1224,7 @@
       case 'g-members': GR.open[id] = !GR.open[id]; renderGroupsBody(); if (GR.open[id]) loadMembers(id).then(renderGroupsBody); break;
       case 'add-student': addStudentForm(el.dataset.g || null); break;
       case 'm-move': case 'm-remove': case 's-add': case 's-remove': memberAction(a, el); break;
-      case 'template': download('teroclass-students-template.csv', TEMPLATE, 'text/csv;charset=utf-8'); break;
+      case 'template': download(uiLang === 'es' ? 'teroclass-plantilla-grupos.csv' : 'teroclass-groups-template.csv', IMP().templateCsv(uiLang === 'es' ? 'es' : 'en'), 'text/csv;charset=utf-8'); break;
       case 'import': if (GR.imp && el.closest('#gc-modal-box')) { const keep = GR.imp; importDialog(); const t = $('gc-imp-text'); if (t) t.value = keep.text || ''; } else importDialog(); break;
       case 'imp-check': importCheck(el); break;
       case 'imp-commit': importCommit(el); break;
@@ -1150,14 +1250,19 @@
       r.readAsText(file, 'utf-8');
     }
     if (e.target?.id === 'gc-imp-create' && GR.imp) { GR.imp.create = e.target.checked; renderImportPreview(); }
+    if (e.target?.dataset?.newfor) { const inp = $(e.target.dataset.newfor); if (inp) { inp.hidden = e.target.value !== '__new'; if (!inp.hidden) inp.focus(); } }
   });
   document.addEventListener('input', e => {
     if (e.target?.id === 'gc-st-search') { GR.q = e.target.value; const body = $('gc-groups-body'); if (body) body.innerHTML = studentsHtml(); }
   });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('modal-gc')?.classList.contains('active')) closeGc(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && $('modal-gc')?.classList.contains('active')) closeGc();
+    // agenda rows are div[role=button] (they contain an "Enter room" button): Enter / Space open them
+    if ((e.key === 'Enter' || e.key === ' ') && e.target?.matches?.('div[role="button"][data-gc]')) { e.preventDefault(); e.target.click(); }
+  });
 
   window.GC = { onEnter, afterEnter, render, onLang, enterStudentMode, leaveStudentMode, isStudentMode, backFromLive,
-    vaLoadStudentPick, vaLoadStudents, vaStartStudent, _test: { csvToRows, parseCsv, joinState, startsIn, sessionIcs, googleUrl, CAL, GR, ST } };
+    vaLoadStudentPick, vaLoadStudents, vaStartStudent, _test: { csvToRows, parseCsv, joinState, startsIn, opensAt, isStaffRow, sessionIcs, googleUrl, CAL, GR, ST } };
   window.handleStudentLink = handleStudentLink;
 
   // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -1182,10 +1287,12 @@
   );
   if (typeof I18N_RULES_ES !== 'undefined') I18N_RULES_ES.push(
     [/^Starts in (\d+) min$/, 'Empieza en $1 min'], [/^Starts in (\d+) h (\d+) min$/, 'Empieza en $1 h $2 min'],
-    [/^Starts in 1 day$/, 'Empieza en 1 día'], [/^Starts in (\d+) days$/, 'Empieza en $1 días'],
+    [/^Starts in 1 day$/, 'Empieza en 1 día'], [/^Starts in (\d+) h$/, 'Empieza en $1 h'], [/^Starts in (\d+) days$/, 'Empieza en $1 días'],
     [/^(\d+) classes scheduled ✓$/, '$1 clases programadas ✓'], [/^Emails sent to (\d+) students ✓$/, 'Emails enviados a $1 estudiantes ✓'],
     [/^Invalid email: (.+)$/, 'Email inválido: $1'],
-    [/^Imported ✓ (\d+) added, (\d+) already there, (\d+) skipped$/, 'Importado ✓ $1 agregados, $2 ya estaban, $3 salteados']
+    [/^Imported ✓ (\d+) added, (\d+) already there, (\d+) skipped$/, 'Importado ✓ $1 agregados, $2 ya estaban, $3 salteados'],
+    [/^Imported ✓ (\d+) added, (\d+) already there, (\d+) skipped · (\d+) classes scheduled$/, 'Importado ✓ $1 agregados, $2 ya estaban, $3 salteados · $4 clases programadas'],
+    [/^Opens at (.+)$/, 'Abre a las $1'], [/^Opens (.+) at (.+)$/, 'Abre el $1 a las $2']
   );
   if (typeof I18N_ES === 'object' && I18N_ES) Object.assign(I18N_ES, {
     // login (students)
@@ -1304,6 +1411,46 @@
     'Too many guests (up to 200).': 'Demasiados invitados (máximo 200).', 'To schedule a class without a group you need to belong to an institution.': 'Para programar una clase sin grupo necesitás pertenecer a una institución.',
     'Invalid date range.': 'Rango de fechas inválido.', 'Students do not belong to a unit: they are loaded into groups.': 'Los estudiantes no pertenecen a una unidad: se cargan en los grupos.',
     'First delete the groups, students and classes of this unit.': 'Primero borrá los grupos, estudiantes y clases de esta unidad.',
+    // enter the room (teacher always; students 10 min before)
+    'Enter room': 'Entrar a la sala', 'Students can join from 10 min before': 'Los estudiantes pueden entrar desde 10 min antes',
+    "Today's class": 'Clase de hoy', 'Next class': 'Próxima clase',
+    // pending teachers
+    'class': 'clase', 'group': 'grupo', 'student': 'estudiante', 'Pending:': 'Pendiente:', '(invited)': '(invitado/a)', '(not invited yet: no free seats)': '(sin invitar todavía: no hay asientos libres)',
+    'Invited people who have not registered yet can be chosen now: they are assigned by themselves when they sign up.': 'Podés elegir a personas invitadas que todavía no se registraron: quedan asignadas solas cuando se registran.',
+    'Registered': 'Registrados', 'Invited (not registered yet)': 'Invitados (todavía sin registrarse)', 'Invite someone by email…': 'Invitar a alguien por email…',
+    'teacher@school.edu': 'docente@escuela.edu.uy', 'PH:teacher@school.edu': 'docente@escuela.edu.uy',
+    'Someone who is not registered yet gets an invitation as teacher of this unit and stays as "Pending" until they sign up.': 'Si la persona todavía no está registrada, le llega una invitación como docente de esta unidad y queda "Pendiente" hasta que se registre.',
+    'No teachers registered yet: choose "Invite someone by email…".': 'Todavía no hay docentes registrados: elegí "Invitar a alguien por email…".',
+    'Group saved ✓ The invited person is assigned when they register.': 'Grupo guardado ✓ La persona invitada queda asignada cuando se registre.',
+    // CSV import with schedules
+    'Import groups and students (CSV)': 'Importar grupos y estudiantes (CSV)',
+    "One row per student. The group's schedule, teacher and substitute can go on any row of the group (or on a row without a student). We create the groups, enroll the students and put the classes in each teacher's calendar.": 'Una fila por estudiante. El horario, el docente y el suplente del grupo pueden ir en cualquier fila del grupo (o en una fila sin estudiante). Creamos los grupos, inscribimos a los estudiantes y ponemos las clases en el calendario de cada docente.',
+    'Accepted columns': 'Columnas aceptadas',
+    'the student (email can be empty on a row that only defines a group)': 'el estudiante (el email puede quedar vacío en una fila que solo define un grupo)',
+    'if they are not registered yet, we invite them and assign them when they sign up': 'si todavía no están registrados, los invitamos y quedan asignados cuando se registran',
+    'e.g. "Lun;Mié", "L,Mi", "lunes y miércoles", "Mon/Wed", "LMi" ("Mi" = Wednesday, "Ma" = Tuesday)': 'ej. "Lun;Mié", "L,Mi", "lunes y miércoles", "Mon/Wed", "LMi" ("Mi" = miércoles, "Ma" = martes)',
+    'or': 'o', 'e.g. 07:00, 7am, 19:30; minutes': 'ej. 07:00, 7am, 19:30; en minutos',
+    'day/month/year (3/3/2027) or 2027-03-03; up to one year': 'día/mes/año (3/3/2027) o 2027-03-03; hasta un año',
+    "optional (default: the group's time zone, America/Montevideo)": 'opcionales (por defecto: la zona horaria del grupo, America/Montevideo)',
+    "Headers in Spanish or English, any order; capitals and accents don't matter. Up to 2,000 rows. Importing the same file again doesn't duplicate anything.": 'Encabezados en español o inglés, en cualquier orden; no importan mayúsculas ni tildes. Hasta 2.000 filas. Importar el mismo archivo otra vez no duplica nada.',
+    'The file needs an "email" or a "group" column (header in the first row).': 'El archivo necesita una columna "email" o "grupo" (encabezado en la primera fila).',
+    'Substitute not found in your institution': 'No encontramos ese suplente en tu institución', 'Schedule or substitute without a group': 'Horario o suplente sin grupo',
+    'Teacher and substitute are the same person': 'Docente y suplente son la misma persona', 'Invalid schedule': 'Horario inválido',
+    'Ambiguous day: "M" can be Tuesday or Wednesday (use Ma / Mi)': 'Día ambiguo: "M" puede ser martes o miércoles (usá Ma / Mi)', 'Unknown days': 'Días desconocidos',
+    'Invalid start time': 'Hora de inicio inválida', 'Invalid end time': 'Hora de fin inválida', "End time and duration don't match": 'La hora de fin y la duración no coinciden',
+    'Invalid start date': 'Fecha de inicio inválida', 'Invalid end date': 'Fecha de fin inválida', 'Looks like month/day: write day/month (e.g. 25/04/2027)': 'Parece mes/día: escribí día/mes (ej. 25/04/2027)',
+    'More than one year': 'Más de un año', 'Unknown time zone': 'Zona horaria desconocida', 'Invalid teacher email': 'Email del docente inválido', 'Invalid substitute email': 'Email del suplente inválido',
+    'teacher': 'docente', 'substitute': 'suplente', 'days': 'días', 'start time': 'hora de inicio', 'duration / end time': 'duración / hora de fin', 'start date': 'fecha de inicio', 'end date': 'fecha de fin', 'time zone': 'zona horaria',
+    'Registered ✓': 'Registrado ✓', 'Already assigned': 'Ya asignado', 'Not registered: will be invited': 'Sin registrarse: lo invitamos', 'Invited, not registered yet': 'Invitado, todavía sin registrarse',
+    'Has an account: will be added as teacher': 'Ya tiene cuenta: se suma como docente', 'Pending (invited)': 'Pendiente (invitado)', 'No free seats: stays pending, not invited': 'Sin asientos libres: queda pendiente, sin invitar',
+    'New schedule': 'Horario nuevo', 'Same schedule: nothing changes': 'Mismo horario: no cambia nada', 'Schedule changes': 'Cambia el horario', 'Before:': 'Antes:',
+    "Only future classes that weren't edited one by one move. Past classes never change.": 'Solo se mueven las clases futuras que no editaste una por una. Las pasadas no cambian nunca.',
+    'Incomplete schedule, missing:': 'Horario incompleto, falta:', 'No future class in that range': 'No hay clases futuras en ese rango', 'No classes': 'Sin clases', 'No schedule in the file': 'Sin horario en el archivo',
+    'Summary': 'Resumen', 'rows': 'filas', 'groups': 'grupos', 'classes to create': 'clases a crear', 'Classes per teacher': 'Clases por docente', 'classes': 'clases', 'Pending': 'Pendiente',
+    'Conflicts with another row of the same group:': 'No coincide con otra fila del mismo grupo:', 'Group details (no student)': 'Datos del grupo (sin estudiante)',
+    'Date without year: this year': 'Fecha sin año: este año', "Columns we don't use (ignored):": 'Columnas que no usamos (se ignoran):', 'Existing group': 'Grupo existente',
+    'Schedule:': 'Horario:', 'dates already passed are skipped: only future classes are created.': 'fechas que ya pasaron se saltean: solo se crean clases futuras.',
+    'This group already has other scheduled classes:': 'Este grupo ya tiene otras clases programadas:',
     // insights / platform
     'Students (accounts)': 'Estudiantes (cuentas)', 'Loaded students': 'Estudiantes cargados', 'Signed in with their link': 'Entraron con su link',
     'Had classes in the period': 'Tuvieron clases en el período', 'Groups · classes held': 'Grupos · clases dadas', 'Totals only: no names or emails.': 'Solo totales: sin nombres ni emails.',

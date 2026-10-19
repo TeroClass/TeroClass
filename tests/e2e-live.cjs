@@ -35,6 +35,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     if (u.pathname === '/api/class/token') { net.token++; return r.fulfill({ status: 501, contentType: 'application/json', body: JSON.stringify({ configured: false }) }); }
     if (u.pathname === '/live-class.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'live-class.js')) });
     if (u.pathname === '/live-class.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(path.join(PUB, 'live-class.css')) });
+    if (u.pathname === '/csv-import.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'csv-import.js')) });
     if (u.pathname === '/groups-calendar.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'groups-calendar.js')) });
     if (u.pathname === '/groups-calendar.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(path.join(PUB, 'groups-calendar.css')) });
     if (u.pathname.startsWith('/api/')) return r.fulfill({ status: 404, body: '{}' });
@@ -450,6 +451,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
       if (u.pathname === '/api/class/token') { seen.token = { auth: r.request().headers().authorization, body: JSON.parse(r.request().postData()) }; return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ configured: true, url: 'ws://127.0.0.1:9', token: 'a.b.c', identity: 'x', room: seen.token.body.room, recorded: false }) }); }
       if (u.pathname === '/live-class.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'live-class.js')) });
       if (u.pathname === '/live-class.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(path.join(PUB, 'live-class.css')) });
+      if (u.pathname === '/csv-import.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'csv-import.js')) });
       if (u.pathname === '/groups-calendar.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'groups-calendar.js')) });
       if (u.pathname === '/groups-calendar.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(path.join(PUB, 'groups-calendar.css')) });
       return r.fulfill({ contentType: 'text/html', body: RAW_HTML });

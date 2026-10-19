@@ -187,7 +187,8 @@ async function magicLink(page, email) {
     // template download
     const [dl] = await Promise.all([page.waitForEvent('download'), page.click('.gc-head [data-gc="template"]')]);
     const txt = require('fs').readFileSync(await dl.path(), 'utf8');
-    if (!/^﻿?email,name,group,teacher_email,unit\n/.test(txt)) throw new Error('template: ' + txt.slice(0, 60));
+    if (!/^﻿?email,name,group,teacher_email,unit,substitute_email,days,start_time,end_time,start_date,end_date,timezone\n/.test(txt)) throw new Error('template: ' + txt.slice(0, 120));
+    if (!/INEFOP A1\.1 LMi 7:00/.test(txt) || txt.trim().split('\n').length < 4) throw new Error('template rows: ' + txt);
     // students tab: search, move / remove (two clicks)
     await page.click('[data-gc="gtab"][data-t="students"]');
     await page.waitForSelector('.gc-stable');
@@ -231,8 +232,10 @@ async function magicLink(page, email) {
     const ppl = await page.textContent('#gc-people');
     if (!/Ana.Perez@mail.com/.test(ppl) || !/carla@mail.com/.test(ppl)) throw new Error('teacher should see students: ' + ppl);
     await shot(page, 'x-teacher-detail');
-    if (await page.isEnabled('#gc-modal-box .gc-join')) throw new Error('join enabled a week before');
-    if (!/Starts in/.test(await page.textContent('#gc-modal-box .gc-join'))) throw new Error('no "starts in"');
+    // the teacher can always open the room (to prepare); students only from 10 minutes before
+    if (!(await page.isEnabled('#gc-modal-box .gc-join'))) throw new Error('teacher cannot enter the room a week before');
+    if (!/Enter room/.test(await page.textContent('#gc-modal-box .gc-join'))) throw new Error('no "Enter room"');
+    if (!/Students can join from 10 min before/.test(await page.textContent('#gc-modal-box .gc-join-row'))) throw new Error('no note for students');
     const g = await page.getAttribute('#gc-modal-box a[href*="calendar.google.com"]', 'href');
     if (!/action=TEMPLATE/.test(g) || !/dates=\d{8}T\d{6}Z\/\d{8}T\d{6}Z/.test(g)) throw new Error('google link: ' + g);
     const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#gc-modal-box [data-gc="ics"]')]);

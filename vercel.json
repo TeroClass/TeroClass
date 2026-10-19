@@ -22,6 +22,10 @@
       "destination": "/api/calendar/feed?token=$1"
     },
     {
+      "source": "/csv-import.js",
+      "destination": "/public/csv-import.js"
+    },
+    {
       "source": "/groups-calendar.js",
       "destination": "/public/groups-calendar.js"
     },
