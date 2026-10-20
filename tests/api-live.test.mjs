@@ -14,13 +14,14 @@ const USER = { id: '1a2b3c4d-5e6f-4a1b-9c8d-000000000001', email: 'profe@tec.com
 const ENV = { LIVEKIT_URL: 'wss://teroclass-br.livekit.cloud', LIVEKIT_API_KEY: 'APIdemoKey123', LIVEKIT_API_SECRET: 'super-secret-value-for-tests-0123456789' };
 
 function setEnv(on) { for (const [k, v] of Object.entries(ENV)) { if (on) process.env[k] = v; else delete process.env[k]; } }
-function mockFetch({ user = USER, role = 'teacher' } = {}) {
+function mockFetch({ user = USER, role = 'teacher', liveRole = null, liveFail = false } = {}) {
   const calls = [];
   globalThis.fetch = async (url, opts) => {
     calls.push({ url: String(url), opts });
     const auth = opts?.headers?.Authorization || '';
     const ok = user && auth === 'Bearer good-token';
     if (String(url).endsWith('/auth/v1/user')) return new Response(JSON.stringify(ok ? user : { msg: 'bad jwt' }), { status: ok ? 200 : 401 });
+    if (String(url).endsWith('/rest/v1/rpc/live_room_role')) return liveFail ? new Response('{}', { status: 500 }) : new Response(JSON.stringify(ok ? liveRole : null), { status: ok ? 200 : 401 });
     if (String(url).includes('/rest/v1/profiles')) return new Response(JSON.stringify(ok ? [{ role, institution_id: null }] : []), { status: 200 });
     return new Response('{}', { status: 404 });
   };
@@ -164,4 +165,23 @@ test('webhook handler: 501 unconfigured, 200 valid (raw stream), 401 invalid', a
     r = res(); await webhookMod.default({ method: 'POST', readableEnded: true, body: EVENT, headers: { authorization: signedWebhook(EVENT) } }, r);
     assert.equal(r.statusCode, 200);
   } finally { console.log = log; console.warn = warn; setEnv(false); }
+});
+
+test('token: calendar class rooms are authorized by the database (teacher hosts, students join, others denied)', async () => {
+  const sid = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  assert.equal(tokenMod.sessionIdFromRoom('sess-' + sid.replace(/-/g, '')), sid);
+  assert.equal(tokenMod.sessionIdFromRoom('sess-xyz'), null);
+  const body = role => ({ ...goodBody, role, room: 'sess-' + sid.replace(/-/g, '') });
+  const call = async b => { const r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: b }, r); return r; };
+  setEnv(true);
+  let calls = mockFetch({ liveRole: 'teacher' });
+  let r = await call(body('teacher'));
+  assert.equal(r.statusCode, 200); assert.equal(b64d(r.body.token.split('.')[1]).video.roomAdmin, true);
+  assert.ok(calls.some(c => c.url.endsWith('/rpc/live_room_role') && JSON.parse(c.opts.body).p_session === sid));
+  mockFetch({ liveRole: 'student' });
+  r = await call(body('student')); assert.equal(r.statusCode, 200); assert.equal(b64d(r.body.token.split('.')[1]).video.roomAdmin, undefined);
+  r = await call(body('teacher')); assert.equal(r.statusCode, 403);
+  for (const lr of [null, 'admin']) { mockFetch({ liveRole: lr }); r = await call(body('student')); assert.equal(r.statusCode, 403); assert.equal(r.body.code, 'not_member'); }
+  mockFetch({ liveFail: true }); r = await call(body('student')); assert.equal(r.statusCode, 503);
+  setEnv(false);
 });

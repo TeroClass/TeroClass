@@ -359,6 +359,20 @@ select public.remove_student(qc.enr('ca-st3@x.com'));
 reset role;
 select qc.eq('A: removed student''s attendance deleted with the enrollment', $$select count(*)::text from public.session_attendance a join public.student_enrollments e on e.id = a.enrollment_id where lower(e.email) = 'ca-st3@x.com'$$, '0');
 
+-- live_room_role (LiveKit token check): only the caller's own role
+set role authenticated; select qc.as_user(qc.uid('ca-t1@x.com')::text);
+select qc.eq('L: teacher → teacher', $$select coalesce(public.live_room_role(qc.sess('CA now')), 'null')$$, 'teacher');
+select qc.as_user(qc.uid('ca-sub@x.com')::text);
+select qc.eq('L: substitute → teacher', $$select coalesce(public.live_room_role(qc.sess('CA now')), 'null')$$, 'teacher');
+select qc.as_user(qc.uid('ca-st1@x.com')::text);
+select qc.eq('L: enrolled student → student', $$select coalesce(public.live_room_role(qc.sess('CA now')), 'null')$$, 'student');
+select qc.as_user(qc.uid('ca-oadm@x.com')::text);
+select qc.eq('L: other institution admin → null', $$select coalesce(public.live_room_role(qc.sess('CA now')), 'null')$$, 'null');
+select qc.eq('L: unknown session → null', $$select coalesce(public.live_room_role(gen_random_uuid()), 'null')$$, 'null');
+set role anon; select qc.as_user('');
+select qc.fails('L: anon cannot call live_room_role', $$select public.live_room_role(gen_random_uuid())$$, 'permission denied');
+reset role;
+
 \echo '================ CLASS DOC + ATTENDANCE RESULTS ================'
 select n, case when ok then 'PASS' else '**FAIL**' end as res, label, detail from qc.results order by n;
 select count(*) filter (where ok) as passed, count(*) filter (where not ok) as failed from qc.results;

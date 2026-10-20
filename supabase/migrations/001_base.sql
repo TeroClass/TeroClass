@@ -4277,6 +4277,17 @@ select i.id, s.default_seats, s.default_monthly_tokens
  where i.parent_id is null and s.id
 on conflict (root_id) do nothing;
 
+-- ══ Aula en vivo (LiveKit): qué papel tiene quien llama en una clase del calendario ══
+-- Lo usa api/class/token.js con el token del usuario antes de firmar el acceso a la sala.
+-- Solo responde por quien llama: 'teacher' (docente o suplente), 'student' (inscripto o invitado),
+-- 'admin' (admin de la unidad) o null. No revela nada de otras personas.
+create or replace function public.live_room_role(p_session uuid) returns text
+language sql stable security definer set search_path = public as
+$$ select s.role from (select public.tc_classdoc_role(p_session) as role) s
+    where exists (select 1 from public.class_sessions cs where cs.id = p_session and cs.status <> 'cancelled') $$;
+revoke all on function public.live_room_role(uuid) from public, anon;
+grant execute on function public.live_room_role(uuid) to authenticated;
+
 -- Que la API de Supabase vea enseguida las funciones nuevas
 notify pgrst, 'reload schema';
 

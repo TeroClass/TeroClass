@@ -6,7 +6,7 @@
 //
 // Token format follows LiveKit's AccessToken (HS256 JWT): iss = API key, sub = identity,
 // nbf/exp, name, metadata (string) and the "video" grant.
-import { livekitEnv, signJwt, getUser, getProfile, bearer } from '../_lib/livekit.js';
+import { livekitEnv, signJwt, getUser, getProfile, bearer, SUPABASE_URL, SUPABASE_KEY } from '../_lib/livekit.js';
 
 export const TOKEN_TTL_S = 2 * 60 * 60;     // a class plus margin
 export const CONSENT_VERSION = '2026-10';   // bump when the consent text changes
@@ -15,8 +15,29 @@ const EMAIL_RE = /^[^\s@<>"']{1,64}@[^\s@<>"']{1,190}\.[A-Za-z]{2,24}$/;
 const STAFF_ROLES = new Set(['teacher', 'org_admin', 'superadmin']);
 
 // Rooms are created by a teacher as "<ownerKey>-<random>"; only that teacher gets roomAdmin.
-// TODO(live): once supabase/migrations/002_live_class.sql runs, look the room up in
-// live_sessions (livekit_room → teacher_id, enrolled session_participants) instead.
+// Calendar classes ("sess-<uuid>") are checked against the database (live_room_role). Ad-hoc rooms below:
+// only the creating teacher hosts; anyone signed in with the link can join as a student.
+// "sess-" + 32 hex chars (uuid without dashes) → uuid, or null for ad-hoc rooms.
+export function sessionIdFromRoom(room) {
+  const m = /^sess-([0-9a-f]{32})$/i.exec(String(room || ''));
+  if (!m) return null;
+  const h = m[1].toLowerCase();
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+// The caller's role in a calendar class, asked with THEIR session (RLS-safe). undefined = could not check.
+async function liveRoomRole(token, sessionId) {
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/live_room_role`, {
+      method: 'POST', signal: controller.signal,
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_session: sessionId }),
+    });
+    if (!r.ok) return undefined;
+    const t = await r.text(); let d = null; try { d = t ? JSON.parse(t) : null; } catch { return undefined; }
+    return typeof d === 'string' ? d : null;
+  } finally { clearTimeout(timer); }
+}
 export const ownerKey = userId => String(userId || '').replace(/-/g, '').slice(0, 12).toLowerCase();
 
 function cleanName(v, fallback) {
@@ -58,7 +79,17 @@ export default async function handler(req, res) {
   if (v.error) return res.status(400).json({ error: v.error, code: 'invalid' });
 
   let isAdmin = false;
-  if (v.role === 'teacher') {
+  // Calendar classes: room "sess-<session uuid without dashes>". Access is decided by the database
+  // (teacher/substitute host, enrolled or invited students join); nobody else gets a token.
+  const sessId = sessionIdFromRoom(v.room);
+  if (sessId) {
+    let role = null;
+    try { role = await liveRoomRole(token, sessId); } catch { role = undefined; }
+    if (role === undefined) return res.status(503).json({ error: 'Could not check your access to this class. Please try again.', code: 'access_check' });
+    if (role === 'teacher') isAdmin = v.role === 'teacher';
+    else if (role === 'student') { if (v.role === 'teacher') return res.status(403).json({ error: 'Only the teacher of this class can host it.', code: 'owner' }); }
+    else return res.status(403).json({ error: 'You are not part of this class.', code: 'not_member' });
+  } else if (v.role === 'teacher') {
     let profile = null;
     try { profile = await getProfile(token, user.id); } catch { profile = null; }
     if (!profile || !STAFF_ROLES.has(profile.role)) return res.status(403).json({ error: 'Only teachers can host a class.', code: 'role' });
