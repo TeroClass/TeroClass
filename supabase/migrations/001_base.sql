@@ -59,6 +59,64 @@ create table if not exists public.invitations (
   created_at timestamptz not null default now()
 );
 create index if not exists invitations_email_idx on public.invitations (lower(email));
+-- Auditoría 2026-10 (TC-07, TC-16, P-04): las invitaciones vencen (14 días), se pueden cancelar o reenviar, y una
+-- cuenta que YA existe nunca se mueve sola: queda una invitación pendiente (user_id) que la persona acepta o rechaza
+-- dentro de la app (my_invitations / respond_invitation).
+alter table public.invitations add column if not exists expires_at timestamptz;
+alter table public.invitations add column if not exists declined_at timestamptz;
+alter table public.invitations add column if not exists cancelled_at timestamptz;
+alter table public.invitations add column if not exists last_sent_at timestamptz;
+alter table public.invitations add column if not exists user_id uuid references auth.users(id) on delete cascade;
+-- invitaciones pendientes que ya existían: 14 días desde ahora (no se vencen de golpe al actualizar)
+update public.invitations set expires_at = greatest(created_at, now()) + interval '14 days' where expires_at is null;
+alter table public.invitations alter column expires_at set default (now() + interval '14 days');
+alter table public.invitations alter column expires_at set not null;
+create index if not exists invitations_user_idx on public.invitations (user_id) where user_id is not null;
+create index if not exists invitations_inst_idx on public.invitations (institution_id, created_at desc);
+-- Pendiente = ni aceptada, ni rechazada, ni cancelada, y sin vencer
+create or replace function public.tc_inv_pending(i public.invitations) returns boolean
+language sql stable set search_path = public, pg_temp as
+$$ select i.accepted_at is null and i.declined_at is null and i.cancelled_at is null and i.expires_at > now() $$;
+create or replace function public.tc_inv_status(i public.invitations) returns text
+language sql stable set search_path = public, pg_temp as
+$$ select case when i.accepted_at is not null then 'accepted' when i.declined_at is not null then 'declined'
+               when i.cancelled_at is not null then 'cancelled' when i.expires_at <= now() then 'expired' else 'pending' end $$;
+
+-- Contadores de límites de frecuencia (IA por IP, emails, documento de clase, salas). Sin acceso directo:
+-- solo las funciones de abajo (tc_rate_take). Las filas viejas se borran solas.
+create table if not exists public.rate_counters (
+  key text not null check (length(key) between 1 and 200),
+  window_start timestamptz not null,
+  amount bigint not null default 0,
+  primary key (key, window_start)
+);
+create index if not exists rate_counters_window_idx on public.rate_counters (window_start);
+alter table public.rate_counters enable row level security;
+revoke all on public.rate_counters from anon, authenticated;
+-- Suma p_amount a la ventana actual de p_key; devuelve false (y no suma) si se pasaría de p_limit. Uso interno.
+create or replace function public.tc_rate_take(p_key text, p_amount bigint, p_limit bigint, p_window_s integer) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_ws timestamptz := to_timestamp(floor(extract(epoch from now()) / greatest(p_window_s, 1)) * greatest(p_window_s, 1));
+        v_after bigint;
+begin
+  if random() < 0.01 then delete from public.rate_counters where window_start < now() - interval '2 days'; end if;
+  insert into public.rate_counters as r (key, window_start, amount) values (left(p_key, 200), v_ws, greatest(p_amount, 0))
+  on conflict (key, window_start) do update set amount = r.amount + excluded.amount where r.amount + excluded.amount <= p_limit
+  returning r.amount into v_after;
+  if v_after is null then return false; end if;
+  if v_after > p_limit then  -- primera fila de la ventana ya por encima del límite
+    update public.rate_counters set amount = amount - greatest(p_amount, 0) where key = left(p_key, 200) and window_start = v_ws;
+    return false;
+  end if;
+  return true;
+end $$;
+revoke all on function public.tc_rate_take(text, bigint, bigint, integer) from public, anon, authenticated;
+
+-- Marcas de cambios de datos que se aplican UNA sola vez (volver a correr el script no los repite).
+create table if not exists public.tc_schema_marks (key text primary key, done_at timestamptz not null default now());
+alter table public.tc_schema_marks enable row level security;
+revoke all on public.tc_schema_marks from anon, authenticated;
 
 create table if not exists public.plannings (
   id uuid primary key default gen_random_uuid(),
@@ -70,6 +128,7 @@ create table if not exists public.plannings (
   updated_at timestamptz not null default now()
 );
 create index if not exists plannings_owner_idx on public.plannings (owner_id);
+create index if not exists profiles_institution_idx on public.profiles (institution_id) where institution_id is not null;  -- TC-25
 create index if not exists plannings_inst_idx on public.plannings (institution_id);
 
 -- Columnas de marca de la institución
@@ -78,9 +137,19 @@ alter table public.institutions add column if not exists color text default '#7c
 alter table public.institutions add column if not exists bg_color text default '#f0eef8';
 alter table public.institutions add column if not exists font text default 'Inter';
 alter table public.institutions add column if not exists admin_email text;
--- Si es true, quien se registra desde /org/<slug> entra directo como docente.
--- Si es false, solo se entra por invitación.
-alter table public.institutions add column if not exists open_registration boolean not null default true;
+-- Si es true, quien se registra desde /org/<slug> entra directo como docente (ocupa un asiento).
+-- Si es false (por defecto desde 2026-10, TC-02), solo se entra por invitación.
+alter table public.institutions add column if not exists open_registration boolean not null default false;
+alter table public.institutions alter column open_registration set default false;
+-- Una sola vez: las instituciones que ya existían pasan a "solo por invitación" (un admin lo puede volver a abrir
+-- en Panel → Equipo → Acceso por link; volver a correr el script no lo pisa).
+do $$
+begin
+  if not exists (select 1 from public.tc_schema_marks where key = '2026-10-open-registration-off') then
+    update public.institutions set open_registration = false where open_registration;
+    insert into public.tc_schema_marks (key) values ('2026-10-open-registration-off');
+  end if;
+end $$;
 
 -- Jerarquía de hasta 3 niveles: institución madre › sede/facultad › cátedra/área.
 -- parent_id null = institución madre (las instituciones que ya existían quedan así).
@@ -258,20 +327,20 @@ end $$;
 
 -- ========== FUNCIONES DE AYUDA ==========
 create or replace function public.my_role() returns text
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select role from public.profiles where id = auth.uid() $$;
 
 create or replace function public.my_institution() returns uuid
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select institution_id from public.profiles where id = auth.uid() $$;
 
 create or replace function public.is_superadmin() returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select coalesce((select role = 'superadmin' from public.profiles where id = auth.uid()), false) $$;
 
 -- ¿Ese usuario es súper admin? (uso interno: ocultar su identidad a los demás)
 create or replace function public.is_superadmin_id(p_user uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select p_user is not null and exists (select 1 from public.profiles where id = p_user and role = 'superadmin') $$;
 -- (lo usan las políticas RLS, que corren con el rol de quien consulta: authenticated necesita ejecutarla;
 --  solo responde sí/no para un id que ya se conoce, y los ids del súper admin no se muestran a nadie)
@@ -282,7 +351,7 @@ grant execute on function public.is_superadmin_id(uuid) to authenticated;
 -- Así ni su id ni su identidad aparecen en filas que leen admins y docentes (created_by, invited_by,
 -- uploaded_by). Corre como el dueño de la función (puede consultar profiles).
 create or replace function public.hide_superadmin_refs() returns trigger
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare c text; j jsonb := to_jsonb(new);
 begin
@@ -298,7 +367,7 @@ revoke all on function public.hide_superadmin_refs() from public, anon, authenti
 -- ===== Jerarquía: ayudas =====
 -- Cadena de una unidad: ella misma (depth 0) y sus ancestros (depth 1 = padre, 2 = abuelo).
 create or replace function public.institution_chain(p_id uuid) returns table (id uuid, depth integer)
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ with recursive up(id, parent_id, depth) as (
      select i.id, i.parent_id, 0 from public.institutions i where i.id = p_id
      union all
@@ -309,12 +378,12 @@ $$ with recursive up(id, parent_id, depth) as (
 
 -- Ancestros (sin incluirse): padre, abuelo...
 create or replace function public.institution_ancestors(p_id uuid) returns setof uuid
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select c.id from public.institution_chain(p_id) c where c.depth > 0 order by c.depth desc $$;
 
 -- Descendientes (sin incluirse): hijos, nietos...
 create or replace function public.institution_descendants(p_id uuid) returns setof uuid
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ with recursive down(id, depth) as (
      select i.id, 1 from public.institutions i where i.parent_id = p_id
      union all
@@ -325,12 +394,12 @@ $$ with recursive down(id, depth) as (
 
 -- Nivel: 1 = institución madre, 2 = sede/facultad, 3 = cátedra/área
 create or replace function public.institution_level(p_id uuid) returns integer
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select count(*)::int from public.institution_chain(p_id) $$;
 
 -- Cuántos niveles cuelgan debajo (0 = no tiene sub-unidades)
 create or replace function public.institution_height(p_id uuid) returns integer
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ with recursive down(id, depth) as (
      select i.id, 1 from public.institutions i where i.parent_id = p_id
      union all
@@ -352,13 +421,13 @@ grant execute on function public.institution_height(uuid) to authenticated;
 
 -- ¿Esta unidad es la mía o una de sus superiores? (docentes: leer resúmenes del playbook heredado)
 create or replace function public.in_my_chain(inst uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select inst is not null and exists (
      select 1 from public.institution_chain(public.my_institution()) c where c.id = inst) $$;
 
 -- Admin de una unidad = súper admin, o org_admin de esa unidad o de cualquiera de sus superiores
 create or replace function public.is_admin_of(inst uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select public.is_superadmin() or (inst is not null and exists (
      select 1 from public.profiles p
       where p.id = auth.uid() and p.role = 'org_admin' and p.institution_id is not null
@@ -367,34 +436,34 @@ $$ select public.is_superadmin() or (inst is not null and exists (
 -- ===== Plan y consumo: ayudas internas (sin acceso desde la app) =====
 -- Mes de consumo: primer día del mes calendario en UTC
 create or replace function public.billing_month() returns date
-language sql stable set search_path = public as
+language sql stable set search_path = public, pg_temp as
 $$ select date_trunc('month', now() at time zone 'utc')::date $$;
 
 -- Cuenta de una unidad = su institución madre (la cima de la cadena)
 create or replace function public.billing_root(p_inst uuid) returns uuid
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select c.id from public.institution_chain(p_inst) c order by c.depth desc limit 1 $$;
 
 -- Asientos en uso: docentes + admins de toda la cuenta (madre y todo lo que cuelga)
 create or replace function public.seats_used(p_root uuid) returns integer
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select count(*)::int from public.profiles
     where role in ('teacher','org_admin') and institution_id is not null
       and (institution_id = p_root or institution_id in (select public.institution_descendants(p_root))) $$;
 
 -- Plan vigente (si la cuenta todavía no tiene fila, valen los valores por defecto)
 create or replace function public.billing_seats(p_root uuid) returns integer
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select coalesce((select a.seats from public.billing_accounts a where a.root_id = p_root),
                    (select s.default_seats from public.platform_settings s where s.id)) $$;
 
 create or replace function public.seat_available(p_root uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select p_root is not null and public.seats_used(p_root) < public.billing_seats(p_root) $$;
 
 -- Crea la fila del plan con los valores por defecto si falta (uso interno, escribe)
 create or replace function public.ensure_billing_account(p_root uuid) returns void
-language sql volatile security definer set search_path = public as
+language sql volatile security definer set search_path = public, pg_temp as
 $$ insert into public.billing_accounts (root_id, seats, monthly_tokens)
    select p_root, s.default_seats, s.default_monthly_tokens from public.platform_settings s
     where s.id and p_root is not null and exists (select 1 from public.institutions i where i.id = p_root and i.parent_id is null)
@@ -403,7 +472,7 @@ $$ insert into public.billing_accounts (root_id, seats, monthly_tokens)
 -- Antes de sumar a alguien a una unidad: ¿queda un asiento en la cuenta? (si ya ocupa uno en la
 -- misma cuenta, moverlo no cuesta otro). Error claro si no.
 create or replace function public.assert_seat_for(p_inst uuid, p_user uuid default null) returns void
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_root uuid := public.billing_root(p_inst); v_used int; v_seats int;
 begin
@@ -433,7 +502,7 @@ revoke all on function public.assert_seat_for(uuid, uuid) from public, anon, aut
 -- Al registrarse: crear perfil y aplicar invitación pendiente (o slug abierto).
 -- Todo se basa en auth.users.email (el email real de la cuenta), nunca en profiles.email.
 create or replace function public.handle_new_user() returns trigger
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare
   inv     public.invitations%rowtype;
@@ -446,9 +515,10 @@ declare
   v_student boolean := coalesce(new.raw_user_meta_data->>'via', '') = 'student_link';
 begin
   if v_email <> '' then
-    select * into inv from public.invitations
-     where lower(email) = v_email and accepted_at is null
-     order by created_at desc limit 1;
+    -- solo invitaciones vigentes (TC-16: vencen a los 14 días; canceladas o rechazadas no cuentan)
+    select * into inv from public.invitations i
+     where lower(i.email) = v_email and public.tc_inv_pending(i)
+     order by i.created_at desc limit 1;
   end if;
 
   if inv.id is not null then
@@ -489,7 +559,7 @@ create trigger on_auth_user_created
 
 -- Si cambia el email de la cuenta (Auth) o se confirma, reflejarlo en el perfil
 create or replace function public.handle_user_updated() returns trigger
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 begin
   if new.email is distinct from old.email then
@@ -514,7 +584,7 @@ create trigger plannings_touch before update on public.plannings
 -- rol e institución solo el súper admin (las funciones del servidor y el panel de
 -- Supabase corren con otro rol y sí pueden).
 create or replace function public.protect_profile() returns trigger
-language plpgsql set search_path = public as
+language plpgsql set search_path = public, pg_temp as
 $$
 begin
   if current_user in ('authenticated','anon') then
@@ -538,7 +608,7 @@ create trigger profiles_protect before update on public.profiles
 -- Barras de enfoque: valida y normaliza methodology_config.
 -- Devuelve siempre {"hidden":[...],"custom":[{key,label,tooltip,def}]}; formato inválido → error.
 create or replace function public.clean_methodology_config(p jsonb) returns jsonb
-language plpgsql immutable set search_path = public as
+language plpgsql immutable set search_path = public, pg_temp as
 $$
 declare
   v_hidden jsonb := '[]'::jsonb;
@@ -591,7 +661,7 @@ end $$;
 -- Un org_admin puede cambiar nombre, colores, tipografía, logo, prompt, documentos
 -- y si el registro por link está abierto.
 create or replace function public.protect_institution() returns trigger
-language plpgsql set search_path = public as
+language plpgsql set search_path = public, pg_temp as
 $$
 begin
   new.slug := nullif(lower(trim(new.slug)), '');
@@ -620,7 +690,7 @@ create trigger institutions_protect before insert or update on public.institutio
 
 -- Jerarquía: máximo 3 niveles y sin ciclos (corre antes que institutions_protect)
 create or replace function public.institutions_hierarchy() returns trigger
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 begin
   if tg_op = 'UPDATE' and new.parent_id is not distinct from old.parent_id then return new; end if;
@@ -645,7 +715,7 @@ create trigger institutions_hierarchy before insert or update of parent_id on pu
 -- editar una planificación vieja esta pasa a su institución actual, así la regla
 -- "institution_id = mi institución" no le impide guardar.
 create or replace function public.plannings_keep_institution() returns trigger
-language plpgsql set search_path = public as
+language plpgsql set search_path = public, pg_temp as
 $$
 begin
   if current_user in ('authenticated','anon') and not public.is_superadmin()
@@ -729,7 +799,7 @@ on conflict (id) do nothing;
 
 -- ¿Es admin de la institución dueña de esta carpeta (<institution_id>/archivo)?
 create or replace function public.can_manage_logo(p_name text) returns boolean
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_inst uuid;
 begin
@@ -766,7 +836,7 @@ create policy logos_delete on storage.objects for delete to authenticated
 -- Marca efectiva: si una sub-unidad no tiene color / fondo / tipografía / logo propios,
 -- usa los de la unidad superior más cercana que sí los tenga.
 create or replace function public.institution_branding(p_id uuid) returns json
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select json_build_object(
      'name',     (select i.name from public.institutions i where i.id = p_id),
      'color',    coalesce((select i.color    from public.institution_chain(p_id) c join public.institutions i on i.id = c.id where i.color    is not null order by c.depth limit 1), '#7c5cbf'),
@@ -780,7 +850,7 @@ revoke all on function public.institution_branding(uuid) from public, anon, auth
 drop function if exists public.get_org_branding(text);
 create function public.get_org_branding(p_slug text)
 returns table (name text, slug text, color text, bg_color text, font text, logo_url text, open_registration boolean, path text, seats_full boolean)
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select i.name, i.slug, b->>'color', b->>'bg_color', b->>'font', b->>'logo_url', i.open_registration, b->>'path',
           not public.seat_available(public.billing_root(i.id))
      from public.institutions i
@@ -794,7 +864,7 @@ grant execute on function public.get_org_branding(text) to anon, authenticated;
 -- methodology efectiva: barras base sin "hidden" + "custom" (de la madre hacia abajo, cada nivel
 -- primero oculta y después agrega). La pueden pedir: súper admin, sus admins y quien pertenece a ella.
 create or replace function public.get_effective_config(p_inst uuid default null) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare
   v_inst   uuid := coalesce(p_inst, public.my_institution());
@@ -843,7 +913,7 @@ grant execute on function public.get_effective_config(uuid) to authenticated;
 
 -- Súper admin: totales de la plataforma (incluye usos de IA de hoy, UTC)
 create or replace function public.platform_stats() returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 begin
   if not public.is_superadmin() then raise exception 'No autorizado'; end if;
@@ -863,14 +933,14 @@ grant execute on function public.platform_stats() to authenticated;
 
 -- Cantidad de org_admins de una institución (uso interno)
 create or replace function public.org_admin_count(p_inst uuid) returns integer
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select count(*)::int from public.profiles where institution_id = p_inst and role = 'org_admin' $$;
 revoke all on function public.org_admin_count(uuid) from public, anon, authenticated;
 
 -- Una institución madre no puede quedarse sin admin. Las sub-unidades sí (las siguen
 -- administrando los admins de las unidades superiores). Uso interno.
 create or replace function public.assert_not_last_admin(p_inst uuid) returns void
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 begin
   if p_inst is null then return; end if;
@@ -882,12 +952,17 @@ begin
 end $$;
 revoke all on function public.assert_not_last_admin(uuid) from public, anon, authenticated;
 
--- Sumar a alguien a una institución (si ya tiene cuenta, directo; si no, invitación).
--- Devuelve 'added' | 'invited' | 'not_allowed' (esa cuenta no se puede invitar; al súper admin
--- que llama se le devuelve 'superadmin'). No revela a otros que ese email es del dueño.
+-- Sumar a alguien a una institución. Devuelve:
+--   'invited'   → no tiene cuenta: invitación por email (se aplica sola cuando se registra con ese email; vence a los 14 días)
+--   'pending'   → YA tiene cuenta (estudiante, docente sin institución…): queda una invitación pendiente que la persona
+--                 acepta o rechaza dentro de la app (TC-07: nunca se mueve una cuenta sin su aceptación)
+--   'added'     → ya es docente/admin de una unidad que quien invita administra (dentro de la misma cuenta):
+--                 reorganización interna, se mueve directo (como antes)
+--   'not_allowed' (esa cuenta no se puede invitar; al súper admin que llama se le devuelve 'superadmin').
+-- No revela a otros que ese email es del dueño.
 create or replace function public.invite_member(p_inst uuid, p_email text, p_role text default 'teacher')
 returns text
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare
   prof    public.profiles%rowtype;
@@ -908,17 +983,28 @@ begin
     if prof.role = 'superadmin' then
       return case when public.is_superadmin() then 'superadmin' else 'not_allowed' end;
     end if;
-    -- Se puede mover a alguien entre unidades que uno administra; si está en otra, no.
-    if prof.institution_id is not null and prof.institution_id <> p_inst
-       and not public.is_admin_of(prof.institution_id) then
+    -- Reorganización interna: ya es docente/admin de una unidad que administro, en la misma cuenta → directo.
+    if prof.role in ('teacher','org_admin') and prof.institution_id is not null and public.is_admin_of(prof.institution_id)
+       and public.billing_root(prof.institution_id) = public.billing_root(p_inst) then
+      if prof.role = 'org_admin' and (prof.institution_id is distinct from p_inst or p_role <> 'org_admin') then
+        perform public.assert_not_last_admin(prof.institution_id);
+      end if;
+      perform public.assert_seat_for(p_inst, prof.id);
+      update public.profiles set institution_id = p_inst, role = p_role where id = prof.id;
+      return 'added';
+    end if;
+    -- De otra institución que no administro: no se puede invitar.
+    if prof.institution_id is not null and not public.is_admin_of(prof.institution_id) then
       raise exception 'Esa persona ya pertenece a otra institución';
     end if;
-    if prof.role = 'org_admin' and (prof.institution_id is distinct from p_inst or p_role <> 'org_admin') then
-      perform public.assert_not_last_admin(prof.institution_id);
-    end if;
+    -- Cualquier otra cuenta (estudiante, docente sin institución, admin de otra cuenta que administro como súper
+    -- admin…): invitación pendiente; la persona la acepta o la rechaza en la app.
     perform public.assert_seat_for(p_inst, prof.id);
-    update public.profiles set institution_id = p_inst, role = p_role where id = prof.id;
-    return 'added';
+    delete from public.invitations
+     where institution_id = p_inst and accepted_at is null and (user_id = prof.id or lower(email) = v_email);
+    insert into public.invitations (email, institution_id, role, invited_by, user_id)
+    values (v_email, p_inst, p_role, auth.uid(), prof.id);
+    return 'pending';
   end if;
 
   perform public.assert_seat_for(p_inst, null);
@@ -934,7 +1020,7 @@ grant execute on function public.invite_member(uuid, text, text) to authenticate
 -- Cambiar el rol de alguien de la institución ('teacher' | 'org_admin'). Devuelve el rol nuevo.
 create or replace function public.set_member_role(p_user uuid, p_role text)
 returns text
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare t public.profiles%rowtype;
 begin
@@ -959,7 +1045,7 @@ grant execute on function public.set_member_role(uuid, text) to authenticated;
 -- Sacar a alguien de la institución (queda como docente sin institución). Devuelve 'removed'.
 create or replace function public.remove_member(p_user uuid)
 returns text
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare t public.profiles%rowtype;
 begin
@@ -988,7 +1074,7 @@ drop function if exists public.create_institution(text, text, text, text);
 create or replace function public.create_institution(p_name text, p_slug text, p_admin_email text default '',
                                                      p_color text default null, p_parent uuid default null)
 returns uuid
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare
   new_id  uuid;
@@ -1031,7 +1117,7 @@ grant execute on function public.create_institution(text, text, text, text, uuid
 -- Borrar una sub-unidad vacía (sin sub-unidades ni personas). La puede borrar el súper
 -- admin o un admin de una unidad superior. Devuelve 'deleted'.
 create or replace function public.delete_institution(p_inst uuid) returns text
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare v_parent uuid; v_found boolean;
 begin
@@ -1061,7 +1147,7 @@ grant execute on function public.delete_institution(uuid) to authenticated;
 -- Mantiene su rol (sin institución queda como docente). Devuelve 'moved'.
 create or replace function public.admin_move_member(p_user uuid, p_inst uuid)
 returns text
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare t public.profiles%rowtype;
 begin
@@ -1086,14 +1172,19 @@ grant execute on function public.admin_move_member(uuid, uuid) to authenticated;
 
 -- Límite diario de IA. Suma 1 uso y devuelve {"allowed":bool,"used":int,"limit":int}.
 -- Límites por día (UTC): súper admin 500, org_admin 150, docente con institución 60,
--- usuario sin institución 15.
+-- usuario sin institución 15. TC-01 (2026-10): las cuentas sin institución son las que cualquiera puede crear gratis,
+-- así que arrancan más bajo: email sin confirmar 3, cuenta de menos de 7 días 5, después 15. Estos topes valen
+-- aunque falte la clave del servidor (no dependen de SUPABASE_SERVICE_ROLE_KEY).
 create or replace function public.ai_daily_limit(p_uid uuid) returns integer
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select case
      when p.role = 'student' then 0          -- estudiantes: sin generador
      when p.role = 'superadmin' then 500
      when p.role = 'org_admin' and p.institution_id is not null then 150
      when p.institution_id is not null then 60
+     when p.id is null then 0
+     when (select u.email_confirmed_at from auth.users u where u.id = p_uid) is null then 3
+     when p.created_at > now() - interval '7 days' then 5
      else 15 end
    from (select null) x left join public.profiles p on p.id = p_uid $$;
 revoke all on function public.ai_daily_limit(uuid) from public, anon, authenticated;
@@ -1101,7 +1192,7 @@ revoke all on function public.ai_daily_limit(uuid) from public, anon, authentica
 -- Metadatos de un pedido a la IA: solo valores conocidos (el resto se descarta). Uso interno.
 -- {kind, subjects[≤5, ≤60 car.], language, age_band, level, bars{clave: 0-100, ≤20}}
 create or replace function public.ai_meta_clean(p jsonb) returns jsonb
-language plpgsql immutable set search_path = public as
+language plpgsql immutable set search_path = public, pg_temp as
 $$
 declare
   v_kind text; v_subj text[] := '{}'; v_s text; v_bars jsonb := '{}'::jsonb; k text; v jsonb; n int := 0;
@@ -1140,7 +1231,7 @@ revoke all on function public.ai_meta_clean(jsonb) from public, anon, authentica
 -- La versión vieja sin argumentos se reemplaza (llamarla sin nada sigue funcionando: p_meta es opcional).
 drop function if exists public.consume_ai_quota();
 create or replace function public.consume_ai_quota(p_meta jsonb default null) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare
   v_uid   uuid := auth.uid();
@@ -1183,7 +1274,7 @@ grant execute on function public.consume_ai_quota(jsonb) to authenticated;
 -- api/generate.js (con el token del usuario) marca cómo terminó su pedido: una sola vez, solo los propios,
 -- dentro de los 15 minutos. Devuelve true si lo marcó.
 create or replace function public.finish_ai_event(p_event bigint, p_ok boolean) returns boolean
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_n integer;
 begin
@@ -1198,7 +1289,7 @@ grant execute on function public.finish_ai_event(bigint, boolean) to authenticat
 
 -- Consultar el uso de hoy sin gastar (para mostrar en la app)
 create or replace function public.get_ai_quota() returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_uid uuid := auth.uid(); v_limit integer;
 begin
@@ -1256,7 +1347,7 @@ grant select (id, institution_id, name, kind, summary, chars, uploaded_by, creat
 grant insert, update, delete on public.institution_documents to authenticated;
 
 create or replace function public.get_document_content(p_id uuid) returns text
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_inst uuid; v_content text;
 begin
@@ -1301,7 +1392,7 @@ create policy tpr_select on public.token_purchase_requests for select
 -- {allowed, scope:'institution'|'personal'|'unlimited', root_id, allowance, used_month, extra_balance,
 --  remaining, warn (quedan ≤ 20% de la asignación del mes), is_admin, can_buy, month, resets_on}
 create or replace function public.ai_budget_check(p_user uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare
   p public.profiles%rowtype;
@@ -1348,7 +1439,7 @@ grant execute on function public.ai_budget_check(uuid) to service_role;
 -- extra nunca baja de 0). Devuelve el mismo json que ai_budget_check, ya actualizado.
 create or replace function public.ai_record_usage(p_user uuid, p_prompt integer, p_completion integer, p_kind text default 'generate')
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare
   v_prompt int := least(greatest(coalesce(p_prompt, 0), 0), 2000000);
@@ -1393,14 +1484,14 @@ grant execute on function public.ai_record_usage(uuid, integer, integer, text) t
 
 -- Para api/billing/status: confirma que la clave del servidor funciona y que este script corrió
 create or replace function public.billing_service_ping() returns boolean
-language sql stable security definer set search_path = public as $$ select true $$;
+language sql stable security definer set search_path = public, pg_temp as $$ select true $$;
 revoke all on function public.billing_service_ping() from public, anon, authenticated;
 grant execute on function public.billing_service_ping() to service_role;
 
 -- ── Funciones para la APP (con permisos) ──
 -- ¿Quién ve el consumo de una cuenta? El súper admin y los org_admin de cualquier unidad de esa cuenta.
 create or replace function public.can_view_billing(p_root uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select p_root is not null and (public.is_superadmin() or (
      public.my_role() = 'org_admin' and public.my_institution() is not null
      and public.billing_root(public.my_institution()) = p_root)) $$;
@@ -1408,7 +1499,7 @@ revoke all on function public.can_view_billing(uuid) from public, anon, authenti
 
 -- Asientos de una cuenta: {root_id, seats, used, available, full}
 create or replace function public.get_seat_status(p_root uuid default null) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_root uuid := public.billing_root(coalesce(p_root, public.my_institution())); v_used int; v_seats int;
 begin
@@ -1424,7 +1515,7 @@ grant execute on function public.get_seat_status(uuid) to authenticated;
 -- Totales de la cuenta para todos sus admins; el detalle por unidad y por docente, solo de lo que
 -- cada admin administra (el admin de una sede no ve a los docentes de otra sede).
 create or replace function public.get_billing_summary(p_inst uuid default null) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare
   v_inst  uuid := coalesce(p_inst, public.my_institution());
@@ -1486,7 +1577,7 @@ grant execute on function public.get_billing_summary(uuid) to authenticated;
 -- Pedir un paquete de tokens (queda pendiente hasta que el súper admin confirme el pago).
 -- Solo los admins de la institución madre. Una solicitud pendiente a la vez.
 create or replace function public.request_token_pack() returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_root uuid := public.my_institution(); s public.platform_settings%rowtype; r public.token_purchase_requests%rowtype;
 begin
@@ -1509,7 +1600,7 @@ grant execute on function public.request_token_pack() to authenticated;
 
 -- Solicitudes de compra: súper admin todas (o por estado); admins, las de su cuenta.
 create or replace function public.list_purchase_requests(p_status text default null) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_root uuid;
 begin
@@ -1535,7 +1626,7 @@ grant execute on function public.list_purchase_requests(text) to authenticated;
 
 -- Súper admin: aprobar (suma el paquete al saldo extra de la cuenta, una sola vez) o rechazar.
 create or replace function public.decide_purchase_request(p_id uuid, p_approve boolean, p_note text default '') returns text
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare r public.token_purchase_requests%rowtype; v_note text := left(trim(coalesce(p_note, '')), 500);
 begin
@@ -1561,7 +1652,7 @@ grant execute on function public.decide_purchase_request(uuid, boolean, text) to
 
 -- Súper admin: asientos y tokens por mes de una institución madre
 create or replace function public.set_institution_plan(p_root uuid, p_seats integer, p_monthly_tokens bigint) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 begin
   if not public.is_superadmin() then raise exception 'No autorizado'; end if;
@@ -1580,7 +1671,7 @@ grant execute on function public.set_institution_plan(uuid, integer, bigint) to 
 -- Súper admin: ajustes de la plataforma (paquete, precio, moneda, asignación personal, valores por defecto)
 create or replace function public.update_platform_settings(p_pack_tokens bigint, p_pack_price numeric, p_currency text,
   p_personal_monthly_tokens bigint, p_default_seats integer, p_default_monthly_tokens bigint) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_cur text := upper(trim(coalesce(p_currency, '')));
 begin
@@ -1606,7 +1697,7 @@ grant execute on function public.update_platform_settings(bigint, numeric, text,
 
 -- Súper admin: ajustes + plan y consumo del mes de cada institución madre + consumo personal
 create or replace function public.platform_billing_overview() returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_month date := public.billing_month(); s public.platform_settings%rowtype;
 begin
@@ -1643,7 +1734,7 @@ revoke all on sequence public.ai_events_id_seq from anon, authenticated;
 
 -- Súper admin: precio de la IA por millón de tokens (USD) para el costo estimado
 create or replace function public.update_ai_prices(p_input numeric, p_output numeric) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 begin
   if not public.is_superadmin() then raise exception 'No autorizado'; end if;
@@ -1670,7 +1761,7 @@ grant execute on function public.update_ai_prices(numeric, numeric) to authentic
 -- Sin nombres ni emails de personas: solo totales.
 create or replace function public.platform_insights(p_days integer, p_unit uuid default null, p_exclude_self boolean default true)
 returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare
   v_days  integer := least(greatest(coalesce(p_days, 30), 1), 366);
@@ -1835,24 +1926,24 @@ alter table public.institutions add column if not exists consent_managed_by_inst
 
 -- ── ayudas de formato (uso interno) ──
 create or replace function public.tc_email_ok(p text) returns boolean
-language sql immutable set search_path = public as
+language sql immutable set search_path = public, pg_temp as
 $$ select p is not null and length(p) <= 254 and p ~ '^[^@[:space:]<>"'',;()]+@[^@[:space:]<>"'',;()]+\.[A-Za-z]{2,24}$' $$;
 create or replace function public.tc_tz_ok(p text) returns boolean
-language sql stable set search_path = public as
+language sql stable set search_path = public, pg_temp as
 $$ select p is not null and length(p) between 1 and 64 and exists (select 1 from pg_timezone_names where name = p) $$;
 create or replace function public.tc_clean_text(p text, n integer) returns text
-language sql immutable set search_path = public as
+language sql immutable set search_path = public, pg_temp as
 $$ select left(btrim(regexp_replace(regexp_replace(coalesce(p, ''), '[[:cntrl:]<>]', ' ', 'g'), '\s+', ' ', 'g')), n) $$;
 -- fecha + hora local de una zona → instante (timestamptz). Respeta cambios de horario.
 create or replace function public.tc_local_ts(d date, t time, tz text) returns timestamptz
-language sql stable set search_path = public as $$ select (d + t) at time zone tz $$;
+language sql stable set search_path = public, pg_temp as $$ select (d + t) at time zone tz $$;
 -- días de una serie: 1 = lunes … 7 = domingo (ISO)
 create or replace function public.tc_series_dates(p_days integer[], p_from date, p_to date) returns setof date
-language sql immutable set search_path = public as
+language sql immutable set search_path = public, pg_temp as
 $$ select g::date from generate_series(p_from::timestamp, p_to::timestamp, interval '1 day') g
     where extract(isodow from g)::int = any(p_days) $$;
 create or replace function public.tc_weekdays(p integer[]) returns integer[]
-language plpgsql immutable set search_path = public as
+language plpgsql immutable set search_path = public, pg_temp as
 $$
 declare v integer[];
 begin
@@ -1862,11 +1953,11 @@ begin
   return v;
 end $$;
 create or replace function public.tc_check_duration(p integer) returns void
-language plpgsql immutable set search_path = public as
+language plpgsql immutable set search_path = public, pg_temp as
 $$ begin if p is null or p < 5 or p > 720 then raise exception 'Duración inválida (de 5 a 720 minutos)'; end if; end $$;
 -- token del feed de calendario: 64 caracteres hex (dos UUID v4 aleatorios, ~244 bits)
 create or replace function public.tc_new_token() returns text
-language sql volatile set search_path = public as
+language sql volatile set search_path = public, pg_temp as
 $$ select replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '') $$;
 
 -- ── tablas ──
@@ -1948,6 +2039,9 @@ create index if not exists class_sessions_group_idx on public.class_sessions (gr
 create index if not exists class_sessions_series_idx on public.class_sessions (series_id);
 create index if not exists class_sessions_teacher_idx on public.class_sessions (teacher_id, starts_at);
 create index if not exists class_sessions_inst_idx on public.class_sessions (institution_id, starts_at);
+-- P-06 (2026-10): la clase planificada (una planificación guardada del docente) que se da en esta clase del calendario
+alter table public.class_sessions add column if not exists planning_id uuid references public.plannings(id) on delete set null;
+create index if not exists class_sessions_planning_idx on public.class_sessions (planning_id) where planning_id is not null;
 
 -- Invitados por email a una clase (clases sueltas o extra en un grupo)
 create table if not exists public.session_invitees (
@@ -2003,12 +2097,12 @@ create trigger enrollments_hide_owner before insert or update of loaded_by on pu
 -- ── permisos (uso interno y de las políticas) ──
 -- ¿Doy clase en este grupo? (docente o suplente)
 create or replace function public.teaches_group(p_group uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select auth.uid() is not null and exists (
      select 1 from public.class_groups g where g.id = p_group and auth.uid() in (g.teacher_id, g.substitute_id)) $$;
 -- ¿Puedo editar esta clase? Grupo: su docente o suplente actual. Suelta: quien la creó.
 create or replace function public.teaches_session(p_session uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select auth.uid() is not null and exists (
      select 1 from public.class_sessions s left join public.class_groups g on g.id = s.group_id
       where s.id = p_session
@@ -2017,7 +2111,7 @@ $$ select auth.uid() is not null and exists (
                  and public.billing_root(public.my_institution()) = public.billing_root(s.institution_id)))) $$;
 -- ¿Este usuario asiste a esta clase como estudiante? (miembro del grupo o invitado)
 create or replace function public.tc_attends(p_session uuid, p_user uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select p_user is not null and exists (
      select 1 from public.student_enrollments e
       where e.user_id = p_user
@@ -2026,13 +2120,13 @@ $$ select p_user is not null and exists (
              or exists (select 1 from public.session_invitees i where i.session_id = p_session and i.enrollment_id = e.id))) $$;
 -- Nombre visible de una persona (nunca su email). El súper admin aparece como "TeroClass team" ante los demás.
 create or replace function public.tc_person_name(p_user uuid) returns text
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select case when p_user is null then ''
                when public.is_superadmin_id(p_user) and not public.is_superadmin() then 'TeroClass team'
                else coalesce((select nullif(btrim(p.name), '') from public.profiles p where p.id = p_user), '') end $$;
 -- Docente/suplente para las pantallas de admin: {id,name,email}; email solo si quien pregunta administra a esa persona
 create or replace function public.tc_person_json(p_user uuid) returns json
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select case when p_user is null then null
                when public.is_superadmin_id(p_user) and not public.is_superadmin() then
                  json_build_object('id', null, 'name', 'TeroClass team', 'email', null, 'masked', true)
@@ -2042,7 +2136,7 @@ $$ select case when p_user is null then null
                        from public.profiles p where p.id = p_user) end $$;
 -- Docente válido para un grupo de esta unidad: teacher u org_admin de la misma cuenta, que quien asigna administra
 create or replace function public.tc_assert_teacher(p_unit uuid, p_user uuid) returns void
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare p public.profiles%rowtype;
 begin
@@ -2056,7 +2150,7 @@ begin
 end $$;
 -- Crea (o encuentra) la inscripción de un email en una unidad. Nombre: se actualiza si viene uno.
 create or replace function public.tc_ensure_enrollment(p_unit uuid, p_email text, p_name text, p_source text) returns uuid
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_email text := btrim(coalesce(p_email, '')); v_name text := public.tc_clean_text(p_name, 120); v_id uuid;
 begin
@@ -2078,7 +2172,7 @@ end $$;
 -- La sesión actual viene de un link o código enviado por email (prueba que la persona controla ese email).
 -- Supabase lo informa en el claim "amr" del JWT.
 create or replace function public.tc_session_via_email() returns boolean
-language plpgsql stable set search_path = public as
+language plpgsql stable set search_path = public, pg_temp as
 $$
 declare j jsonb;
 begin
@@ -2110,7 +2204,7 @@ revoke all on function public.tc_session_via_email() from public, anon, authenti
 -- Si un docente deja la institución (o deja de ser docente/admin), deja de ser docente / suplente de sus grupos
 -- (y así pierde el acceso a los emails de esos estudiantes).
 create or replace function public.profiles_groups_cleanup() returns trigger
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 begin
   if old.institution_id is not null
@@ -2133,11 +2227,11 @@ create trigger profiles_groups_cleanup after update of institution_id, role on p
 --   registered  → docente/admin de la misma cuenta que quien pregunta administra ({id, name})
 --   invited     → sin cuenta, ya tiene una invitación pendiente en la cuenta
 --   invite      → sin cuenta: se lo invita como docente (invite_member)
---   add         → tiene cuenta pero sin unidad: invite_member lo suma directo (ocupa un asiento)
+--   add         → tiene cuenta pero sin unidad: invite_member le deja una invitación pendiente que acepta en la app
 --   not_allowed → es de otra institución / de una unidad que no administro / no se puede invitar
 --   bad_email · none
 create or replace function public.tc_person_status(p_unit uuid, p_email text) returns jsonb
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_email text := lower(btrim(coalesce(p_email, ''))); p public.profiles%rowtype; v_root uuid := public.billing_root(p_unit);
 begin
@@ -2154,7 +2248,7 @@ begin
     end if;
     return jsonb_build_object('status', 'add');
   end if;
-  if exists (select 1 from public.invitations i where lower(i.email) = v_email and i.accepted_at is null
+  if exists (select 1 from public.invitations i where lower(i.email) = v_email and public.tc_inv_pending(i)
               and public.billing_root(i.institution_id) = v_root) then
     return jsonb_build_object('status', 'invited');
   end if;
@@ -2167,7 +2261,7 @@ revoke all on function public.tc_person_status(uuid, text) from public, anon, au
 -- (permisos + asientos). Sin asientos: queda pendiente igual (sin invitación). Devuelve
 -- 'assigned' | 'invited' | 'seats_full' | 'none'. Uso interno (quien llama ya verificó que administra el grupo).
 create or replace function public.tc_assign_person(p_group uuid, p_kind text, p_email text) returns text
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare g public.class_groups%rowtype; st jsonb; v_email text := lower(btrim(coalesce(p_email, ''))); v_id uuid; v_res text;
 begin
@@ -2190,7 +2284,7 @@ begin
   else update public.class_groups set substitute_id = null, pending_substitute_email = v_email where id = p_group; end if;
   if st->>'status' = 'invited' then return 'invited'; end if;
   begin
-    v_res := public.invite_member(g.institution_id, v_email, 'teacher');   -- 'add': el trigger lo asigna enseguida
+    v_res := public.invite_member(g.institution_id, v_email, 'teacher');   -- 'pending': el trigger lo asigna cuando acepta
   exception when others then
     if sqlerrm ilike '%asientos%' then return 'seats_full'; end if;
     raise;
@@ -2203,7 +2297,7 @@ revoke all on function public.tc_assign_person(uuid, text, text) from public, an
 -- invite_member a una cuenta existente, mover de unidad) toma los grupos que lo esperaban por su email
 -- (email REAL de la cuenta, auth.users) dentro de la misma cuenta.
 create or replace function public.tc_claim_pending_groups() returns trigger
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare v_email text; v_root uuid;
 begin
@@ -2231,7 +2325,7 @@ create trigger profiles_claim_pending_groups after insert or update of instituti
 create or replace function public.tc_series_apply(p_series uuid, p_title text, p_days integer[], p_start_time time,
                                                   p_duration integer, p_start_date date, p_end_date date, p_timezone text)
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare s public.session_series%rowtype; v_tz text; v_sd date; v_today date; v_del int := 0; v_upd int := 0; v_ins int := 0;
 begin
@@ -2266,12 +2360,12 @@ revoke all on function public.tc_series_apply(uuid, text, integer[], time, integ
 
 -- ── ADMIN: grupos y estudiantes de la unidad elegida (y todo lo que cuelga de ella) ──
 create or replace function public.tc_unit_scope(p_unit uuid) returns uuid[]
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select array(select p_unit union all select public.institution_descendants(p_unit)) $$;
 revoke all on function public.tc_unit_scope(uuid) from public, anon, authenticated;
 
 create or replace function public.tc_assert_admin(p_unit uuid) returns void
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$ begin
   if p_unit is null or not exists (select 1 from public.institutions where id = p_unit) or not public.is_admin_of(p_unit) then
     raise exception 'No autorizado';
@@ -2280,7 +2374,7 @@ end $$;
 revoke all on function public.tc_assert_admin(uuid) from public, anon, authenticated;
 
 create or replace function public.list_groups(p_unit uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 begin
   perform public.tc_assert_admin(p_unit);
@@ -2289,10 +2383,10 @@ begin
            public.tc_person_json(g.teacher_id) as teacher, public.tc_person_json(g.substitute_id) as substitute,
            -- pendientes (invitados que todavía no se registraron): solo en esta función, solo para admins
            case when g.pending_teacher_email is not null then json_build_object('email', g.pending_teacher_email,
-             'invited', exists (select 1 from public.invitations iv where lower(iv.email) = g.pending_teacher_email and iv.accepted_at is null
+             'invited', exists (select 1 from public.invitations iv where lower(iv.email) = g.pending_teacher_email and public.tc_inv_pending(iv)
                                   and public.billing_root(iv.institution_id) = public.billing_root(g.institution_id))) end as pending_teacher,
            case when g.pending_substitute_email is not null then json_build_object('email', g.pending_substitute_email,
-             'invited', exists (select 1 from public.invitations iv where lower(iv.email) = g.pending_substitute_email and iv.accepted_at is null
+             'invited', exists (select 1 from public.invitations iv where lower(iv.email) = g.pending_substitute_email and public.tc_inv_pending(iv)
                                   and public.billing_root(iv.institution_id) = public.billing_root(g.institution_id))) end as pending_substitute,
            (select count(*) from public.group_members m where m.group_id = g.id)::int as students,
            (select min(s.starts_at) from public.class_sessions s
@@ -2306,7 +2400,7 @@ begin
 end $$;
 
 create or replace function public.list_students(p_unit uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 begin
   perform public.tc_assert_admin(p_unit);
@@ -2322,7 +2416,7 @@ end $$;
 
 -- Estudiantes de un grupo (nombre + email): admins de su unidad y su docente / suplente
 create or replace function public.list_group_members(p_group uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_inst uuid;
 begin
@@ -2341,7 +2435,7 @@ create or replace function public.create_group(p_unit uuid, p_name text, p_teach
                                                p_substitute uuid default null, p_timezone text default 'America/Montevideo',
                                                p_teacher_email text default null, p_substitute_email text default null)
 returns uuid
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_name text := public.tc_clean_text(p_name, 120); v_tz text := coalesce(nullif(btrim(p_timezone), ''), 'America/Montevideo'); v_id uuid;
         v_te text := case when p_teacher is null then lower(btrim(coalesce(p_teacher_email, ''))) else '' end;
@@ -2370,7 +2464,7 @@ drop function if exists public.update_group(uuid, text, uuid, uuid, text);
 create or replace function public.update_group(p_group uuid, p_name text, p_teacher uuid, p_substitute uuid, p_timezone text,
                                                p_teacher_email text default null, p_substitute_email text default null)
 returns uuid
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare g public.class_groups%rowtype; v_name text := public.tc_clean_text(p_name, 120); v_tz text := btrim(coalesce(p_timezone, ''));
         v_te text := case when p_teacher is null then lower(btrim(coalesce(p_teacher_email, ''))) else '' end;
@@ -2398,7 +2492,7 @@ end $$;
 
 -- Borrar un grupo (con sus clases; los estudiantes siguen cargados en la unidad)
 create or replace function public.delete_group(p_group uuid) returns text
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_inst uuid;
 begin
@@ -2412,7 +2506,7 @@ end $$;
 -- Devuelve {enrollment_id, created, in_group}
 create or replace function public.add_student(p_unit uuid, p_email text, p_name text default '', p_group uuid default null)
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_unit uuid := p_unit; v_id uuid; v_new boolean; v_in boolean := false; n int;
 begin
@@ -2434,7 +2528,7 @@ end $$;
 -- Sumar una inscripción a un grupo. Si el grupo es de otra unidad, la inscripción se copia a esa unidad
 -- (así los admins de la unidad del grupo ven a sus estudiantes). Devuelve la inscripción usada.
 create or replace function public.group_add_student(p_group uuid, p_enrollment uuid) returns uuid
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare g public.class_groups%rowtype; e public.student_enrollments%rowtype; v_id uuid;
 begin
@@ -2450,7 +2544,7 @@ begin
 end $$;
 
 create or replace function public.group_remove_student(p_group uuid, p_enrollment uuid) returns text
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_inst uuid;
 begin
@@ -2462,7 +2556,7 @@ end $$;
 
 -- Mover de un grupo a otro (p_from null = solo agregar al destino)
 create or replace function public.move_student(p_enrollment uuid, p_from_group uuid, p_to_group uuid) returns uuid
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_id uuid;
 begin
@@ -2481,7 +2575,7 @@ end $$;
 
 -- Quitar a un estudiante de la unidad (borra la inscripción de esa unidad y su lugar en los grupos)
 create or replace function public.remove_student(p_enrollment uuid) returns text
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_inst uuid;
 begin
@@ -2513,7 +2607,7 @@ end $$;
 --   nunca se tocan.
 create or replace function public.import_students(p_unit uuid, p_rows jsonb, p_create_groups boolean default false, p_commit boolean default false)
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare
   v_scope uuid[]; v_root uuid; r jsonb; i int := 0; k text; w jsonb;
@@ -2810,7 +2904,7 @@ end $$;
 -- ── DOCENTES: sus grupos y sus clases ──
 -- Grupos donde soy docente o suplente
 create or replace function public.my_groups() returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 begin
   if auth.uid() is null then raise exception 'No autorizado'; end if;
@@ -2826,7 +2920,7 @@ end $$;
 create or replace function public.create_series(p_group uuid, p_title text, p_weekdays integer[], p_start_time time,
                                                 p_duration integer, p_start_date date, p_end_date date)
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare g public.class_groups%rowtype; v_days integer[]; v_id uuid; v_n int; v_title text := public.tc_clean_text(p_title, 200);
 begin
@@ -2854,7 +2948,7 @@ end $$;
 create or replace function public.update_series(p_series uuid, p_title text, p_weekdays integer[], p_start_time time,
                                                 p_duration integer, p_end_date date)
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare s public.session_series%rowtype; v_days integer[]; v_title text := public.tc_clean_text(p_title, 200);
 begin
@@ -2870,7 +2964,7 @@ end $$;
 
 -- Cancelar toda la serie desde ahora (las clases quedan como canceladas: el feed lo avisa a los calendarios)
 create or replace function public.cancel_series(p_series uuid) returns integer
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare s public.session_series%rowtype; v_n int;
 begin
@@ -2887,7 +2981,7 @@ end $$;
 create or replace function public.create_session(p_group uuid, p_title text, p_starts_at timestamptz, p_duration integer,
                                                  p_timezone text default null, p_emails text[] default null)
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare g public.class_groups%rowtype; v_inst uuid; v_tz text; v_id uuid; v_e text; v_enr uuid; v_n int := 0;
         v_title text := public.tc_clean_text(p_title, 200); v_emails text[] := '{}';
@@ -2929,7 +3023,7 @@ end $$;
 -- Editar UNA clase (título, inicio, duración). Si es de una serie queda marcada: editar la serie no la pisa.
 create or replace function public.update_session(p_session uuid, p_title text, p_starts_at timestamptz, p_duration integer)
 returns uuid
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 begin
   if not public.teaches_session(p_session) then raise exception 'No autorizado'; end if;
@@ -2946,7 +3040,7 @@ end $$;
 
 -- Cancelar (o reactivar con p_cancel = false) UNA clase
 create or replace function public.cancel_session(p_session uuid, p_cancel boolean default true) returns text
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 begin
   if not public.teaches_session(p_session) then raise exception 'No autorizado'; end if;
@@ -2960,7 +3054,7 @@ end $$;
 -- Filas de calendario para una persona (docente, suplente, quien creó una clase suelta o estudiante).
 create or replace function public.tc_calendar_rows(p_user uuid, p_from timestamptz, p_to timestamptz, p_limit integer)
 returns jsonb
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select coalesce(jsonb_agg(x order by x.starts_at, x.id), '[]'::jsonb) from (
      select s.id, coalesce(nullif(s.title, ''), g.name, '') as title, s.title as raw_title, s.starts_at, s.ends_at, s.timezone,
             s.status, s.seq, s.updated_at, s.group_id, g.name as group_name, i.name as unit_name, s.series_id, s.modified,
@@ -2969,6 +3063,11 @@ $$ select coalesce(jsonb_agg(x order by x.starts_at, x.id), '[]'::jsonb) from (
                  when g.id is null and s.teacher_id = p_user then 'teacher'
                  else 'student' end as role,
             public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name,
+            -- plan adjunto (P-06): solo el docente / suplente / quien la creó ve cuál es (nunca los estudiantes)
+            case when (g.id is not null and p_user in (g.teacher_id, g.substitute_id)) or (g.id is null and s.teacher_id = p_user)
+                 then s.planning_id end as planning_id,
+            case when (g.id is not null and p_user in (g.teacher_id, g.substitute_id)) or (g.id is null and s.teacher_id = p_user)
+                 then (select pl.title from public.plannings pl where pl.id = s.planning_id) end as planning_title,
             ((select count(*) from public.group_members m where m.group_id = s.group_id)
              + (select count(*) from public.session_invitees si where si.session_id = s.id))::int as people
        from public.class_sessions s
@@ -2986,7 +3085,7 @@ revoke all on function public.tc_calendar_rows(uuid, timestamptz, timestamptz, i
 
 -- Mi calendario (máximo 200 días por consulta). can_edit = docente / suplente / quien la creó.
 create or replace function public.my_calendar(p_from timestamptz, p_to timestamptz) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 begin
   if auth.uid() is null then raise exception 'No autorizado'; end if;
@@ -2997,7 +3096,7 @@ end $$;
 
 -- Quiénes están en una clase (nombre + email): su docente / suplente / quien la creó, y los admins de su unidad
 create or replace function public.session_people(p_session uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_inst uuid; v_group uuid;
 begin
@@ -3015,7 +3114,7 @@ end $$;
 
 -- Admin: calendario (solo lectura) de la unidad y lo que cuelga
 create or replace function public.unit_calendar(p_unit uuid, p_from timestamptz, p_to timestamptz) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 begin
   perform public.tc_assert_admin(p_unit);
@@ -3037,7 +3136,7 @@ end $$;
 -- importar mayúsculas, y solo si esta sesión se abrió con un link/código enviado a ese email.
 -- No cambia el rol (los docentes/admins que además son estudiantes ven esas clases en su calendario).
 create or replace function public.claim_enrollments() returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_uid uuid := auth.uid(); v_email text; v_conf timestamptz; v_n int := 0; v_ok boolean;
 begin
@@ -3056,7 +3155,7 @@ end $$;
 -- Panel del estudiante: sus grupos (con el nombre del docente y CUÁNTOS compañeros, nunca sus emails),
 -- sus clases (desde ayer hasta 120 días) y sus datos. Súper admin ("Ver como"): p_group y/o p_enrollment.
 create or replace function public.student_view(p_group uuid default null, p_enrollment uuid default null) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_enr uuid[] := '{}'; v_groups uuid[] := '{}'; v_name text := ''; v_email text := '';
 begin
@@ -3113,7 +3212,7 @@ end $$;
 -- ── CALENDARIO EXTERNO (Google Calendar, Outlook, Apple) sin proveedor de email ──
 -- Mi token del feed (lo crea si falta; p_reset = true lo cambia y el link viejo deja de funcionar)
 create or replace function public.my_calendar_token(p_reset boolean default false) returns text
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_uid uuid := auth.uid();
 begin
@@ -3127,7 +3226,7 @@ end $$;
 -- del token (60 días para atrás, 400 para adelante), sin emails ni datos de otros estudiantes.
 -- Token inválido o desconocido → lista vacía.
 create or replace function public.calendar_feed(p_token text) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_uid uuid;
 begin
@@ -3142,7 +3241,7 @@ end $$;
 
 -- Para api/notify (con el token de quien da la clase): la clase y los emails de sus estudiantes
 create or replace function public.session_notify_payload(p_session uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 begin
   if not public.teaches_session(p_session) then raise exception 'No autorizado'; end if;
@@ -3229,7 +3328,7 @@ create trigger student_insights_touch before update on public.student_insights f
 -- ── ayudas internas ──
 -- Estudiantes de una clase: miembros del grupo + invitados por email
 create or replace function public.tc_session_students(p_session uuid) returns table (enrollment_id uuid, name text, email text)
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select e.id, e.name, e.email from public.class_sessions s
      join public.group_members m on m.group_id = s.group_id
      join public.student_enrollments e on e.id = m.enrollment_id
@@ -3240,17 +3339,17 @@ $$ select e.id, e.name, e.email from public.class_sessions s
     where si.session_id = p_session $$;
 -- ¿Puedo ver los insights de esta clase? Docente / suplente (o quien creó la clase suelta) y admins de su unidad.
 create or replace function public.tc_can_view_insights(p_session uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select auth.uid() is not null and exists (
      select 1 from public.class_sessions s
       where s.id = p_session and (public.teaches_session(s.id) or public.is_admin_of(s.institution_id))) $$;
 -- Texto libre del docente: sin caracteres de control (se conservan los saltos de línea)
 create or replace function public.tc_clean_note(p text, n integer) returns text
-language sql immutable set search_path = public as
+language sql immutable set search_path = public, pg_temp as
 $$ select left(btrim(regexp_replace(coalesce(p, ''), '[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]', '', 'g')), n) $$;
 -- Lista resumida de insights de unas inscripciones (lo que ve el propio estudiante), más nuevas primero
 create or replace function public.tc_insight_summaries(p_enr uuid[], p_limit integer) returns json
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select coalesce(json_agg(x order by x.starts_at desc, x.id), '[]'::json) from (
      select si.id, si.session_id, coalesce(nullif(s.title, ''), g.name, '') as title, s.starts_at, s.ends_at, s.timezone,
             g.name as group_name, public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name,
@@ -3273,7 +3372,7 @@ revoke all on function public.tc_insight_summaries(uuid[], integer) from public,
 -- Idempotente: si la clase ya tiene informe no se toca; cada estudiante recibe una fila una sola vez (los que se
 -- suman después reciben la suya en la próxima llamada). Las filas quedan marcadas is_demo = true.
 create or replace function public.generate_demo_insights(p_session uuid, p_payload jsonb) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare s public.class_sessions%rowtype; v_pool int; v_base jsonb; v_teacher boolean; v_n int := 0;
 begin
@@ -3317,7 +3416,7 @@ end $$;
 create or replace function public.list_insight_sessions(p_unit uuid default null, p_mine boolean default true,
   p_group uuid default null, p_teacher uuid default null, p_from date default null, p_to date default null, p_q text default null)
 returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_me uuid := auth.uid(); v_mine boolean := coalesce(p_mine, true); v_units uuid[]; v_q text; v_root uuid;
 begin
@@ -3390,7 +3489,7 @@ end $$;
 -- Una clase: informe del docente + insights de cada estudiante (con su nombre; nunca emails).
 -- can_edit = docente / suplente (escribe la reflexión y los mensajes); los admins la ven en solo lectura.
 create or replace function public.get_session_insights(p_session uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare s public.class_sessions%rowtype; g public.class_groups%rowtype; v_teach boolean;
 begin
@@ -3420,7 +3519,7 @@ end $$;
 
 -- Reflexión del docente (solo su docente / suplente; los admins la leen)
 create or replace function public.save_teacher_reflection(p_session uuid, p_reflection text) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare r public.teacher_insights%rowtype;
 begin
@@ -3433,7 +3532,7 @@ end $$;
 
 -- Mensaje del docente a un estudiante: guardar borrador (p_publish = false) o publicarlo (el estudiante lo ve).
 create or replace function public.save_insight_message(p_insight uuid, p_message text, p_publish boolean default false) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_sess uuid; v_msg text := public.tc_clean_note(p_message, 4000); r public.student_insights%rowtype;
 begin
@@ -3451,7 +3550,7 @@ end $$;
 -- ESTUDIANTE: mis insights (lista) y uno completo. Súper admin ("Ver como" estudiante): p_enrollment
 -- (un grupo sin estudiante elegido = estudiante genérico: sin insights propios).
 create or replace function public.my_insights(p_group uuid default null, p_enrollment uuid default null) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_enr uuid[] := '{}';
 begin
@@ -3469,7 +3568,7 @@ begin
 end $$;
 
 create or replace function public.my_insight(p_id uuid, p_enrollment uuid default null) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare si public.student_insights%rowtype; s public.class_sessions%rowtype; g public.class_groups%rowtype; e public.student_enrollments%rowtype;
 begin
@@ -3598,7 +3697,7 @@ create trigger class_doc_versions_hide_owner before insert on public.class_doc_v
 -- Mi papel en el documento de esta clase: 'teacher' (docente / suplente / quien creó la clase suelta),
 -- 'student' (asiste: miembro del grupo o invitado), 'admin' (admin de su unidad o súper admin: solo lectura) o null.
 create or replace function public.tc_classdoc_role(p_session uuid) returns text
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select case when auth.uid() is null or s.id is null then null
                when public.teaches_session(s.id) then 'teacher'
                when public.tc_attends(s.id, auth.uid()) then 'student'
@@ -3606,7 +3705,7 @@ $$ select case when auth.uid() is null or s.id is null then null
      from (select p_session as id) x left join public.class_sessions s on s.id = x.id $$;
 -- Nombre que ven los demás en el documento (nunca el email): estudiante = nombre cargado por la institución
 create or replace function public.tc_classdoc_name(p_session uuid, p_user uuid, p_role text) returns text
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select coalesce(nullif(case when p_role = 'student' then
             (select btrim(e.name) from public.student_enrollments e
               where e.user_id = p_user
@@ -3617,22 +3716,22 @@ $$ select coalesce(nullif(case when p_role = 'student' then
           nullif(public.tc_person_name(p_user), ''), 'Participante') $$;
 -- Color estable por persona y clase (paleta de la app)
 create or replace function public.tc_classdoc_color(p_session uuid, p_user uuid) returns text
-language sql immutable set search_path = public as
+language sql immutable set search_path = public, pg_temp as
 $$ select (array['#7c5cbf','#0891b2','#d97706','#059669','#db2777','#4f46e5','#b45309','#0f766e','#9333ea','#dc2626'])
           [1 + abs(hashtext(coalesce(p_session::text, '') || coalesce(p_user::text, ''))) % 10] $$;
 -- base64 → bytea (null si no es base64 válido)
 create or replace function public.tc_b64(p text) returns bytea
-language plpgsql immutable set search_path = public as
+language plpgsql immutable set search_path = public, pg_temp as
 $$ begin
   if p is null or p = '' or p !~ '^[A-Za-z0-9+/=[:space:]]+$' then return null; end if;
   return decode(p, 'base64');
 exception when others then return null;
 end $$;
 create or replace function public.tc_b64e(p bytea) returns text
-language sql immutable set search_path = public as $$ select translate(encode(p, 'base64'), E'\n\r', '') $$;
+language sql immutable set search_path = public, pg_temp as $$ select translate(encode(p, 'base64'), E'\n\r', '') $$;
 -- Guarda una versión con la foto + los cambios pendientes (máximo 20 por documento; "fin de clase" se conserva)
 create or replace function public.tc_classdoc_add_version(p_session uuid, p_label text) returns uuid
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare d public.class_docs%rowtype; v_parts bytea[]; v_id uuid;
 begin
@@ -3646,14 +3745,17 @@ begin
   values (p_session, v_parts, p_label, (select coalesce(sum(octet_length(x)), 0) from unnest(v_parts) x),
           case when p_label in ('manual','before_restore') then auth.uid() end)
   returning id into v_id;
+  -- máximo 20 versiones y 40 MB por documento (TC-14): se borran las más viejas, la de "fin de clase" se conserva
   delete from public.class_doc_versions where id in (
-    select id from (select id, row_number() over (order by (label = 'class_end') desc, created_at desc, id) rn
-                      from public.class_doc_versions where session_id = p_session) x where x.rn > 20);
+    select id from (select id, row_number() over (order by (label = 'class_end') desc, created_at desc, id) rn,
+                           sum(bytes) over (order by (label = 'class_end') desc, created_at desc, id) acc
+                      from public.class_doc_versions where session_id = p_session) x
+     where x.rn > 20 or (x.acc > 41943040 and x.rn > 1));
   return v_id;
 end $$;
 -- Crea la fila del documento (si falta) y la bloquea hasta el fin de la transacción: los cambios quedan numerados en orden
 create or replace function public.tc_classdoc_lock_row(p_session uuid) returns public.class_docs
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare d public.class_docs%rowtype;
 begin
@@ -3664,7 +3766,7 @@ end $$;
 -- Política de Realtime: ¿puedo escuchar (p_send = false) o mandar (true) en este canal? Solo canales "classdoc:<uuid>".
 -- Mandar: docente y estudiantes de la clase (los admins solo escuchan). Por el canal no viaja contenido.
 create or replace function public.tc_classdoc_rt_ok(p_topic text, p_send boolean) returns boolean
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_role text;
 begin
@@ -3686,7 +3788,7 @@ grant execute on function public.tc_classdoc_rt_ok(text, boolean) to authenticat
 -- ── funciones de la app ──
 -- Abrir: la clase, mi papel, si puedo editar, la foto + los cambios pendientes y el canal de tiempo real.
 create or replace function public.classdoc_open(p_session uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v_role text := public.tc_classdoc_role(p_session); s public.class_sessions%rowtype; g public.class_groups%rowtype;
         d public.class_docs%rowtype;
@@ -3719,7 +3821,7 @@ end $$;
 -- Mandar un cambio (actualización Yjs en base64). Docente siempre; estudiantes si no está bloqueado; admins nunca.
 create or replace function public.classdoc_push(p_session uuid, p_generation integer, p_update text, p_client text default '')
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_role text := public.tc_classdoc_role(p_session); d public.class_docs%rowtype; s public.class_sessions%rowtype;
         v_data bytea := public.tc_b64(p_update); v_id bigint; v_last timestamptz;
@@ -3731,6 +3833,11 @@ begin
   d := public.tc_classdoc_lock_row(p_session);
   if v_role = 'student' and d.locked then raise exception 'El docente bloqueó el documento'; end if;
   if p_generation is distinct from d.generation then raise exception 'Documento desactualizado: volvé a abrirlo'; end if;
+  -- TC-14: tope por documento (20 MB entre foto y cambios sin compactar) y por persona (4 MB por minuto)
+  if d.bytes + octet_length(v_data) > 20971520 then raise exception 'El documento llegó a su tamaño máximo'; end if;
+  if not public.tc_rate_take('classdoc:' || auth.uid()::text, octet_length(v_data), 4194304, 60) then
+    raise exception 'Demasiados cambios seguidos: esperá un momento';
+  end if;
   select * into s from public.class_sessions where id = p_session;
   -- versiones automáticas: "fin de clase" (el estado al terminar, antes del primer cambio posterior) y cada 10 minutos
   if now() > s.ends_at and not exists (select 1 from public.class_doc_versions where session_id = p_session and label = 'class_end') then
@@ -3749,7 +3856,7 @@ end $$;
 create or replace function public.classdoc_pull(p_session uuid, p_after bigint default 0, p_generation integer default null,
                                                 p_client text default '', p_presence jsonb default null)
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_role text := public.tc_classdoc_role(p_session); d public.class_docs%rowtype; v_reset boolean; v_client text := left(coalesce(p_client, ''), 40);
 begin
@@ -3785,7 +3892,7 @@ end $$;
 -- Foto compacta (la manda un editor cada tanto): reemplaza la foto y borra los cambios ya incluidos (hasta p_upto)
 create or replace function public.classdoc_snapshot(p_session uuid, p_generation integer, p_state text, p_upto bigint)
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_role text := public.tc_classdoc_role(p_session); d public.class_docs%rowtype; v_data bytea := public.tc_b64(p_state); v_max bigint;
 begin
@@ -3806,7 +3913,7 @@ end $$;
 
 -- Bloquear (los estudiantes solo leen) o desbloquear: solo docente / suplente
 create or replace function public.classdoc_set_lock(p_session uuid, p_locked boolean) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare d public.class_docs%rowtype;
 begin
@@ -3820,7 +3927,7 @@ end $$;
 
 -- Historial: versiones (cualquiera con acceso las ve) · una versión completa · guardar una ahora / fin de clase (docente)
 create or replace function public.classdoc_versions(p_session uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 begin
   if public.tc_classdoc_role(p_session) is null then raise exception 'No autorizado'; end if;
@@ -3829,7 +3936,7 @@ begin
                      from public.class_doc_versions v where v.session_id = p_session), '[]'::json);
 end $$;
 create or replace function public.classdoc_version(p_version uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v public.class_doc_versions%rowtype;
 begin
@@ -3839,7 +3946,7 @@ begin
                            'parts', (select json_agg(public.tc_b64e(x) order by o) from unnest(v.parts) with ordinality t(x, o)));
 end $$;
 create or replace function public.classdoc_add_version(p_session uuid, p_label text default 'manual') returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_id uuid;
 begin
@@ -3855,7 +3962,7 @@ end $$;
 -- Restaurar una versión (solo docente / suplente): guarda la actual como "antes de restaurar", vuelve a esa versión y
 -- sube generation (los navegadores abiertos recargan; los cambios de una generación vieja se rechazan).
 create or replace function public.classdoc_restore(p_version uuid) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v public.class_doc_versions%rowtype; d public.class_docs%rowtype; x bytea;
 begin
@@ -3875,7 +3982,7 @@ end $$;
 -- Clases de un grupo (pasadas y próximas) para la tarjeta del grupo: docente / suplente o admin de su unidad
 create or replace function public.group_sessions(p_group uuid, p_past_days integer default 60, p_future_days integer default 30)
 returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare g public.class_groups%rowtype;
 begin
@@ -3954,12 +4061,12 @@ create trigger session_attendance_hide_owner before insert or update of updated_
 
 -- ── ayudas internas ──
 create or replace function public.tc_late_minutes(p_inst uuid) returns integer
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select coalesce((select i.attendance_late_minutes from public.institution_chain(p_inst) c join public.institutions i on i.id = c.id
                      where i.attendance_late_minutes is not null order by c.depth limit 1), 10) $$;
 -- La inscripción con la que este usuario asiste a esta clase
 create or replace function public.tc_session_enrollment(p_session uuid, p_user uuid) returns uuid
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select e.id from public.student_enrollments e
     where p_user is not null and e.user_id = p_user
       and (exists (select 1 from public.group_members m join public.class_sessions s on s.group_id = m.group_id
@@ -3968,12 +4075,12 @@ $$ select e.id from public.student_enrollments e
     order by e.created_at limit 1 $$;
 -- Estado que se muestra: corrección del docente › lo que calculó la sala › ausente si la clase terminó › pendiente
 create or replace function public.tc_att_status(p_override text, p_auto text, p_first_join timestamptz, p_ends_at timestamptz) returns text
-language sql stable set search_path = public as
+language sql stable set search_path = public, pg_temp as
 $$ select coalesce(p_override, case when p_first_join is not null then coalesce(p_auto, 'present') end,
                    case when now() > p_ends_at then 'absent' else 'pending' end) $$;
 -- Entrar / latido / salir: suma los segundos dentro del horario de la clase desde el último latido (si fue hace < 150 s)
 create or replace function public.tc_att_touch(p_session uuid, p_mode text) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare s public.class_sessions%rowtype; v_kind text; v_enr uuid; r public.session_attendance%rowtype; v_add integer := 0;
         v_now timestamptz := now(); v_late integer;
@@ -4023,7 +4130,7 @@ end $$;
 -- Resumen de asistencia de unas inscripciones (lo que ve el propio estudiante): clases terminadas y no canceladas de
 -- sus grupos (desde el día en que lo sumaron al grupo) + las clases a las que lo invitaron
 create or replace function public.tc_attendance_summary(p_enr uuid[]) returns json
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ with exp as (
      select distinct on (s.id, x.enr) s.id as session_id, x.enr, s.ends_at, g.name as group_name, s.group_id
        from (select unnest(coalesce(p_enr, '{}')) as enr) x
@@ -4045,7 +4152,7 @@ $$ with exp as (
    from st $$;
 -- Tasa total de asistencia (Métricas del súper admin; sin nombres): presentes + tarde / esperados, clases terminadas del período
 create or replace function public.tc_attendance_rate(p_since timestamptz, p_units uuid[]) returns json
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ with exp as (
      select s.id, s.ends_at, x.enrollment_id from public.class_sessions s
        cross join lateral public.tc_session_students(s.id) x
@@ -4067,15 +4174,15 @@ revoke all on function public.tc_attendance_rate(timestamptz, uuid[]) from publi
 
 -- ── funciones de la app ──
 create or replace function public.attendance_join(p_session uuid) returns json
-language plpgsql volatile security definer set search_path = public as $$ begin return public.tc_att_touch(p_session, 'join'); end $$;
+language plpgsql volatile security definer set search_path = public, pg_temp as $$ begin return public.tc_att_touch(p_session, 'join'); end $$;
 create or replace function public.attendance_heartbeat(p_session uuid) returns json
-language plpgsql volatile security definer set search_path = public as $$ begin return public.tc_att_touch(p_session, 'beat'); end $$;
+language plpgsql volatile security definer set search_path = public, pg_temp as $$ begin return public.tc_att_touch(p_session, 'beat'); end $$;
 create or replace function public.attendance_leave(p_session uuid) returns json
-language plpgsql volatile security definer set search_path = public as $$ begin return public.tc_att_touch(p_session, 'leave'); end $$;
+language plpgsql volatile security definer set search_path = public, pg_temp as $$ begin return public.tc_att_touch(p_session, 'leave'); end $$;
 
 -- Lista de una clase (nombre, email, estado, minutos): docente / suplente (puede corregir) o admin de su unidad (lectura)
 create or replace function public.session_attendance(p_session uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare s public.class_sessions%rowtype; g public.class_groups%rowtype; v_teach boolean;
 begin
@@ -4114,7 +4221,7 @@ end $$;
 
 -- Corrección del docente / suplente: presente, tarde, ausente, justificado (o null = volver a lo automático) + nota
 create or replace function public.set_attendance(p_session uuid, p_enrollment uuid, p_status text, p_note text default null) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare s public.class_sessions%rowtype; r public.session_attendance%rowtype; v_status text := nullif(btrim(coalesce(p_status, '')), '');
 begin
@@ -4139,7 +4246,7 @@ end $$;
 -- Docente / suplente del grupo o admin de su unidad. Rango: fechas locales del grupo (máx. 366 días; por defecto 90).
 -- Emails: los que cargó esa institución (los ven el docente y los admins, como en la lista del grupo).
 create or replace function public.attendance_report(p_group uuid, p_from date default null, p_to date default null) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare g public.class_groups%rowtype; v_to date; v_from date;
 begin
@@ -4196,7 +4303,7 @@ end $$;
 
 -- Retraso permitido de una unidad (admins): minutos después del inicio para contar "tarde" (null = heredar de la unidad superior)
 create or replace function public.set_attendance_late_minutes(p_unit uuid, p_minutes integer) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 begin
   perform public.tc_assert_admin(p_unit);
@@ -4211,7 +4318,7 @@ end $$;
 create or replace function public.attendance_record_external(p_session uuid, p_enrollment uuid, p_joined_at timestamptz,
   p_left_at timestamptz, p_seconds integer, p_participation_seconds integer default null, p_source text default 'auto')
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare s public.class_sessions%rowtype; r public.session_attendance%rowtype;
 begin
@@ -4282,7 +4389,7 @@ on conflict (root_id) do nothing;
 -- Solo responde por quien llama: 'teacher' (docente o suplente), 'student' (inscripto o invitado),
 -- 'admin' (admin de la unidad) o null. No revela nada de otras personas.
 create or replace function public.live_room_role(p_session uuid) returns text
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select s.role from (select public.tc_classdoc_role(p_session) as role) s
     where exists (select 1 from public.class_sessions cs where cs.id = p_session and cs.status <> 'cancelled') $$;
 revoke all on function public.live_room_role(uuid) from public, anon;
@@ -4306,7 +4413,7 @@ grant execute on function public.live_room_role(uuid) to authenticated;
 -- Relación con 002_live_class.sql: su tabla "consents" (por llamada y participante) queda como registro de auditoría
 -- que escribe el servidor (service role) a partir de user_consents (columna user_consent_id); ver 002.
 create or replace function public.tc_consent_version() returns text
-language sql immutable set search_path = public as
+language sql immutable set search_path = public, pg_temp as
 $$ select '2026-10'::text $$;   -- = CONSENT_VERSION de public/live-class.js y api/class/token.js (tests/api-consent.test.mjs lo verifica)
 revoke all on function public.tc_consent_version() from public, anon;
 grant execute on function public.tc_consent_version() to authenticated, service_role;
@@ -4323,9 +4430,30 @@ create table if not exists public.user_consents (
   guardian_email text check (guardian_email is null or public.tc_email_ok(guardian_email)),
   guardian_consent boolean not null default false,
   created_at timestamptz not null default now(),
-  constraint user_consents_minor_guardian check (not is_minor or (guardian_name is not null and guardian_email is not null and guardian_consent)),
+  constraint user_consents_minor_guardian check (not is_minor or (guardian_name is not null and guardian_email is not null)),
   constraint user_consents_revoked check ((revoked_at is null) = (revoked_reason is null))
 );
+-- 2026-10 (P-10): el "sí" de un menor cuenta recién cuando el tutor/a lo confirma desde SU link (guardian_token);
+-- antes alcanzaba con una casilla que marcaba el propio menor. guardian_consent = confirmado por el tutor/a.
+alter table public.user_consents add column if not exists guardian_token text;
+alter table public.user_consents add column if not exists guardian_confirmed_at timestamptz;
+alter table public.user_consents add column if not exists guardian_declined_at timestamptz;
+alter table public.user_consents add column if not exists guardian_token_expires_at timestamptz;
+create unique index if not exists user_consents_guardian_token_idx on public.user_consents (guardian_token) where guardian_token is not null;
+alter table public.user_consents drop constraint if exists user_consents_minor_guardian;
+alter table public.user_consents add constraint user_consents_minor_guardian
+  check (not is_minor or (guardian_name is not null and guardian_email is not null));
+-- Una sola vez: los "sí" de menores que ya existían (casilla marcada por el propio menor) quedan esperando la
+-- confirmación del tutor/a (no se graban hasta que confirme). Se les genera el link.
+do $$
+begin
+  if not exists (select 1 from public.tc_schema_marks where key = '2026-10-minor-guardian-confirm') then
+    update public.user_consents set guardian_consent = false, guardian_token = public.tc_new_token(),
+           guardian_token_expires_at = now() + interval '30 days'
+     where is_minor and revoked_at is null and guardian_confirmed_at is null;
+    insert into public.tc_schema_marks (key) values ('2026-10-minor-guardian-confirm');
+  end if;
+end $$;
 create unique index if not exists user_consents_one_active on public.user_consents (user_id) where revoked_at is null;
 create index if not exists user_consents_user_idx on public.user_consents (user_id, granted_at desc);
 
@@ -4336,10 +4464,14 @@ create table if not exists public.consent_declines (
   session_id uuid references public.class_sessions(id) on delete set null,     -- la clase a la que estaba entrando
   role text not null default 'student' check (role in ('student','teacher')),
   version text not null check (length(version) between 1 and 40),
-  reason text not null check (char_length(reason) between 10 and 1000),
+  reason text not null default '' check (char_length(reason) <= 1000),   -- opcional desde 2026-10 (P-11)
   notified_at timestamptz,
   created_at timestamptz not null default now()
 );
+-- 2026-10 (P-11): la justificación pasa a ser OPCIONAL (antes: obligatoria, mínimo 10 caracteres)
+alter table public.consent_declines alter column reason set default '';
+alter table public.consent_declines drop constraint if exists consent_declines_reason_check;
+alter table public.consent_declines add constraint consent_declines_reason_check check (char_length(reason) <= 1000);
 create index if not exists consent_declines_inst_idx on public.consent_declines (institution_id, created_at desc);
 create index if not exists consent_declines_user_idx on public.consent_declines (user_id, created_at desc);
 
@@ -4356,7 +4488,7 @@ create policy cd_select on public.consent_declines for select to authenticated
 
 -- Estado del consentimiento de quien llama (lo usan el lobby, el perfil y api/class/token.js). Sin datos del tutor/a.
 create or replace function public.my_consent() returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare c public.user_consents%rowtype; v text := public.tc_consent_version(); v_rev timestamptz;
 begin
@@ -4370,14 +4502,20 @@ begin
     'granted', c.id is not null and c.version = v,
     'recorded', c.id is not null and c.version = v and (not c.is_minor or c.guardian_consent),
     'version', c.version, 'granted_at', c.granted_at, 'revoked_at', case when c.id is null then v_rev end,
-    'minor', coalesce(c.is_minor, false), 'guardian_consent', case when c.is_minor then c.guardian_consent end);
+    'minor', coalesce(c.is_minor, false), 'guardian_consent', case when c.is_minor then c.guardian_consent end,
+    -- P-10: el menor ve el estado de la confirmación de su tutor/a y el link para mandárselo (solo su propia fila)
+    'guardian_status', case when not coalesce(c.is_minor, false) then null when c.guardian_consent then 'confirmed'
+                            when c.guardian_declined_at is not null then 'declined' else 'pending' end,
+    'guardian_token', case when c.is_minor and not c.guardian_consent and c.guardian_declined_at is null
+                                and coalesce(c.guardian_token_expires_at, now()) > now() then c.guardian_token end);
 end $$;
 
--- "Sí" (una sola casilla). Menores: nombre + email + confirmación del tutor/a. Reemplaza un "sí" anterior (otra versión).
+-- "Sí" (una sola casilla). Menores: nombre + email del tutor/a; cuenta recién cuando el tutor/a confirma desde su link
+-- (P-10, guardian_consent_respond). p_guardian_consent se ignora (lo marcaba el propio menor). Reemplaza un "sí" anterior.
 create or replace function public.grant_recording_consent(p_version text, p_minor boolean default false, p_guardian_name text default null,
                                                           p_guardian_email text default null, p_guardian_consent boolean default false)
 returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_minor boolean := coalesce(p_minor, false); v_name text := public.tc_clean_text(p_guardian_name, 120);
         v_email text := btrim(coalesce(p_guardian_email, ''));
@@ -4387,17 +4525,20 @@ begin
   if v_minor then
     if v_name = '' then raise exception 'Menores de 18: falta el nombre del tutor/a'; end if;
     if not public.tc_email_ok(v_email) then raise exception 'Menores de 18: email del tutor/a inválido'; end if;
-    if not coalesce(p_guardian_consent, false) then raise exception 'Menores de 18: el tutor/a tiene que confirmar el consentimiento'; end if;
+    if lower(v_email) = lower(coalesce((select u.email from auth.users u where u.id = auth.uid()), '')) then
+      raise exception 'Menores de 18: el email del tutor/a tiene que ser distinto del tuyo';
+    end if;
   end if;
   update public.user_consents set revoked_at = now(), revoked_reason = 'superseded' where user_id = auth.uid() and revoked_at is null;
-  insert into public.user_consents (user_id, version, is_minor, guardian_name, guardian_email, guardian_consent)
-  values (auth.uid(), p_version, v_minor, case when v_minor then v_name end, case when v_minor then v_email end, v_minor);
+  insert into public.user_consents (user_id, version, is_minor, guardian_name, guardian_email, guardian_consent, guardian_token, guardian_token_expires_at)
+  values (auth.uid(), p_version, v_minor, case when v_minor then v_name end, case when v_minor then v_email end, false,
+          case when v_minor then public.tc_new_token() end, case when v_minor then now() + interval '30 days' end);
   return public.my_consent();
 end $$;
 
 -- Revocar desde el perfil: se vuelve a preguntar en la próxima clase.
 create or replace function public.revoke_recording_consent() returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 begin
   if auth.uid() is null then raise exception 'No autorizado'; end if;
@@ -4405,16 +4546,16 @@ begin
   return public.my_consent();
 end $$;
 
--- "No" + justificación obligatoria (mín. 10 caracteres). Va a la/s institución/es de esa persona para esa clase:
+-- "No" + justificación OPCIONAL (P-11, 2026-10; antes obligatoria). Si la persona escribe algo, le llega a la/s
+-- institución/es de esa persona para esa clase (vacío = queda solo el "no aceptó", sin texto):
 -- estudiante → las unidades que lo cargaron (grupo o invitación de la clase; sin clase: todas sus inscripciones);
 -- docente → su unidad. Sin institución: queda con institution_id null (solo la ve la propia persona y el súper admin).
 create or replace function public.decline_recording_consent(p_session uuid, p_reason text) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_reason text := public.tc_clean_note(p_reason, 1000); v_role text; v_insts uuid[]; v_ids uuid[] := '{}'; v_id uuid; v_i uuid;
 begin
   if auth.uid() is null then raise exception 'No autorizado'; end if;
-  if char_length(v_reason) < 10 then raise exception 'La justificación es obligatoria (mínimo 10 caracteres)'; end if;
   if exists (select 1 from public.user_consents where user_id = auth.uid() and revoked_at is null and version = public.tc_consent_version()) then
     raise exception 'Ya diste tu consentimiento';
   end if;
@@ -4454,7 +4595,7 @@ end $$;
 -- ADMIN (unidad elegida + lo que cuelga): estado de cada persona que cargó (estudiantes) o que pertenece (docentes/admins)
 -- y las justificaciones dirigidas a esas unidades. Nombre / email: los que cargó esa institución. El súper admin no aparece.
 create or replace function public.consent_overview(p_unit uuid) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v text := public.tc_consent_version(); v_scope uuid[];
 begin
@@ -4502,17 +4643,19 @@ end $$;
 
 -- Cantidad de justificaciones nuevas (badge de Grupos) desde un momento dado.
 create or replace function public.consent_new_declines(p_unit uuid, p_since timestamptz) returns integer
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 begin
   perform public.tc_assert_admin(p_unit);
+  -- solo las que traen un motivo escrito (un "no" sin texto no es una novedad que haya que leer)
   return (select count(*)::int from public.consent_declines
-           where institution_id = any(public.tc_unit_scope(p_unit)) and created_at > coalesce(p_since, '-infinity'::timestamptz));
+           where institution_id = any(public.tc_unit_scope(p_unit)) and created_at > coalesce(p_since, '-infinity'::timestamptz)
+             and btrim(reason) <> '');
 end $$;
 
 -- Métricas (súper admin): solo totales, sin nombres. Personas = docentes/admins de las unidades + inscripciones.
 create or replace function public.platform_consent_counts(p_unit uuid default null) returns json
-language plpgsql stable security definer set search_path = public as
+language plpgsql stable security definer set search_path = public, pg_temp as
 $$
 declare v text := public.tc_consent_version(); v_units uuid[];
 begin
@@ -4540,13 +4683,14 @@ end $$;
 -- últimos 15 minutos que todavía no se avisaron. Las marca como avisadas. Destinatarios: org_admins de la unidad o de
 -- sus superiores (nunca el súper admin).
 create or replace function public.consent_decline_notify_payload(p_user uuid) returns json
-language plpgsql volatile security definer set search_path = public as
+language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare r json;
 begin
   with due as (
     update public.consent_declines d set notified_at = now()
      where d.user_id = p_user and d.notified_at is null and d.institution_id is not null and d.created_at > now() - interval '15 minutes'
+       and btrim(d.reason) <> ''   -- P-11: un "no" sin motivo no genera email
     returning d.*)
   select coalesce(json_agg(json_build_object(
       'id', due.id, 'role', due.role, 'reason', due.reason, 'created_at', due.created_at, 'unit_name', i.name,
@@ -4573,6 +4717,359 @@ begin
 end $$;
 revoke all on function public.consent_decline_notify_payload(uuid) from public, anon, authenticated;
 grant execute on function public.consent_decline_notify_payload(uuid) to service_role;
+
+-- ══════════ AUDITORÍA PRE-LANZAMIENTO (2026-10): invitaciones, límites, plan de la clase, tutor/a, cuenta ══════════
+-- Ver README → "Pre-launch fixes". Todo se puede volver a correr; nada de esto lee ni escribe datos de otras personas
+-- fuera de las reglas de siempre (RLS + funciones security definer).
+
+-- ── Invitaciones (TC-07, TC-16, P-03, P-04) ──
+-- Las invitaciones ya no se escriben directo desde la app: solo con invite_member / cancel_invitation /
+-- resend_invitation / respond_invitation. Los admins las leen (RLS) y la persona invitada ve las suyas.
+drop policy if exists inv_all on public.invitations;
+drop policy if exists inv_select on public.invitations;
+create policy inv_select on public.invitations for select
+  using (public.is_admin_of(institution_id) or user_id = auth.uid());
+
+-- Invitaciones pendientes para MÍ (cuenta existente: por user_id; o por mi email verificado).
+create or replace function public.my_invitations() returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_email text; v_conf boolean;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  select lower(btrim(u.email)), u.email_confirmed_at is not null into v_email, v_conf from auth.users u where u.id = auth.uid();
+  return coalesce((select json_agg(json_build_object(
+      'id', i.id, 'role', i.role, 'institution_id', i.institution_id, 'unit_name', ins.name,
+      'path', (select string_agg(x.name, ' › ' order by c.depth desc) from public.institution_chain(i.institution_id) c join public.institutions x on x.id = c.id),
+      'invited_by', case when i.invited_by is null then 'TeroClass' else public.tc_person_name(i.invited_by) end,
+      'created_at', i.created_at, 'expires_at', i.expires_at) order by i.created_at desc)
+    from public.invitations i join public.institutions ins on ins.id = i.institution_id
+   where public.tc_inv_pending(i)
+     and (i.user_id = auth.uid() or (i.user_id is null and v_conf and lower(i.email) = v_email))), '[]'::json);
+end $$;
+
+-- Aceptar o rechazar una invitación pendiente. Aceptar aplica las mismas reglas de siempre (asientos, último admin).
+create or replace function public.respond_invitation(p_id uuid, p_accept boolean) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare inv public.invitations%rowtype; me public.profiles%rowtype; v_email text; v_conf boolean;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  select lower(btrim(u.email)), u.email_confirmed_at is not null into v_email, v_conf from auth.users u where u.id = auth.uid();
+  select * into inv from public.invitations i where i.id = p_id
+     and (i.user_id = auth.uid() or (i.user_id is null and v_conf and lower(i.email) = v_email)) for update;
+  if inv.id is null then raise exception 'No autorizado'; end if;
+  if not public.tc_inv_pending(inv) then raise exception 'Esta invitación ya no está vigente'; end if;
+  if not coalesce(p_accept, false) then
+    update public.invitations set declined_at = now() where id = inv.id;
+    return json_build_object('status', 'declined');
+  end if;
+  select * into me from public.profiles where id = auth.uid();
+  if me.id is null or me.role = 'superadmin' then raise exception 'No autorizado'; end if;
+  if me.role = 'org_admin' and me.institution_id is not null and me.institution_id is distinct from inv.institution_id then
+    perform public.assert_not_last_admin(me.institution_id);
+  end if;
+  perform public.assert_seat_for(inv.institution_id, me.id);
+  update public.profiles set institution_id = inv.institution_id, role = inv.role where id = me.id;
+  update public.invitations set accepted_at = now(), user_id = auth.uid() where id = inv.id;
+  -- las demás invitaciones pendientes para mí quedan sin efecto (solo se pertenece a una unidad)
+  update public.invitations i set declined_at = now()
+   where i.id <> inv.id and i.accepted_at is null and i.declined_at is null and i.cancelled_at is null
+     and (i.user_id = auth.uid() or lower(i.email) = v_email);
+  return json_build_object('status', 'accepted', 'institution_id', inv.institution_id, 'role', inv.role);
+end $$;
+
+-- ADMIN: invitaciones de la unidad elegida y de todo lo que cuelga (pendientes, vencidas, aceptadas, rechazadas,
+-- canceladas; las 300 más nuevas). Quién invitó: nombre (el súper admin aparece como "TeroClass").
+create or replace function public.list_invitations(p_unit uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  perform public.tc_assert_admin(p_unit);
+  return coalesce((select json_agg(x order by x.sort_key, x.created_at desc) from (
+    select i.id, i.email, i.role, i.institution_id as unit_id, ins.name as unit_name, ins.slug as unit_slug,
+           i.created_at, i.expires_at, i.accepted_at, i.declined_at, i.cancelled_at, i.last_sent_at,
+           public.tc_inv_status(i) as status, i.user_id is not null as has_account,
+           case when i.invited_by is null then 'TeroClass' else public.tc_person_name(i.invited_by) end as invited_by,
+           case public.tc_inv_status(i) when 'pending' then 0 when 'expired' then 1 else 2 end as sort_key
+      from public.invitations i join public.institutions ins on ins.id = i.institution_id
+     where i.institution_id = any(public.tc_unit_scope(p_unit))
+     order by i.created_at desc limit 300) x), '[]'::json);
+end $$;
+
+create or replace function public.cancel_invitation(p_id uuid) returns text
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare inv public.invitations%rowtype;
+begin
+  select * into inv from public.invitations where id = p_id;
+  if inv.id is null or not public.is_admin_of(inv.institution_id) then raise exception 'No autorizado'; end if;
+  if inv.accepted_at is not null then raise exception 'Esta invitación ya fue aceptada'; end if;
+  update public.invitations set cancelled_at = coalesce(cancelled_at, now()) where id = p_id;
+  return 'cancelled';
+end $$;
+
+-- Reenviar: vuelve a estar vigente 14 días (también una vencida o cancelada; no una aceptada o rechazada).
+create or replace function public.resend_invitation(p_id uuid) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare inv public.invitations%rowtype;
+begin
+  select * into inv from public.invitations where id = p_id;
+  if inv.id is null or not public.is_admin_of(inv.institution_id) then raise exception 'No autorizado'; end if;
+  if inv.accepted_at is not null then raise exception 'Esta invitación ya fue aceptada'; end if;
+  if inv.declined_at is not null then raise exception 'La persona rechazó esta invitación: invitala de nuevo'; end if;
+  if inv.user_id is null then perform public.assert_seat_for(inv.institution_id, null); end if;
+  update public.invitations set expires_at = now() + interval '14 days', cancelled_at = null, last_sent_at = now() where id = p_id;
+  return (select json_build_object('id', i.id, 'email', i.email, 'role', i.role, 'unit_name', ins.name, 'unit_slug', ins.slug,
+                                   'expires_at', i.expires_at, 'has_account', i.user_id is not null)
+            from public.invitations i join public.institutions ins on ins.id = i.institution_id where i.id = p_id);
+end $$;
+
+-- Datos de una invitación para el email (api/notify/invite.js, con el token de quien invita): solo admins de esa unidad.
+create or replace function public.invitation_notify_payload(p_id uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare inv public.invitations%rowtype;
+begin
+  select * into inv from public.invitations where id = p_id;
+  if inv.id is null or not public.is_admin_of(inv.institution_id) or not public.tc_inv_pending(inv) then raise exception 'No autorizado'; end if;
+  return (select json_build_object('id', inv.id, 'email', inv.email, 'role', inv.role, 'unit_name', ins.name, 'unit_slug', ins.slug,
+                                   'expires_at', inv.expires_at, 'has_account', inv.user_id is not null,
+                                   'inviter', public.tc_person_name(auth.uid()))
+            from public.institutions ins where ins.id = inv.institution_id);
+end $$;
+
+do $$
+declare f text;
+begin
+  foreach f in array array['my_invitations()', 'respond_invitation(uuid, boolean)', 'list_invitations(uuid)', 'cancel_invitation(uuid)',
+                           'resend_invitation(uuid)', 'invitation_notify_payload(uuid)'] loop
+    execute format('revoke all on function public.%s from public, anon', f);
+    execute format('grant execute on function public.%s to authenticated', f);
+  end loop;
+end $$;
+revoke all on function public.tc_inv_pending(public.invitations) from public, anon, authenticated;
+revoke all on function public.tc_inv_status(public.invitations) from public, anon, authenticated;
+
+-- ── Límites de envío de emails (TC-08): por persona y por día, antes de que exista RESEND_API_KEY ──
+-- La API (notify/session, notify/invite, notify/guardian) lo pide con el token de quien manda, ANTES de enviar.
+-- Topes: máximo 100 destinatarios por envío; por día (UTC) 30 envíos y 300 destinatarios (docentes/admins),
+-- 3 envíos y 3 destinatarios para cuentas sin institución ni grupo (p. ej. el email al tutor/a).
+create or replace function public.email_quota_take(p_kind text, p_recipients integer) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_role text := public.my_role(); v_staff boolean; v_n int := coalesce(p_recipients, 0); v_sends int; v_rcpt int;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  if p_kind is null or p_kind not in ('session','invite','guardian','consent') then raise exception 'Tipo inválido'; end if;
+  if v_n < 1 then return json_build_object('allowed', false, 'reason', 'none'); end if;
+  if v_n > 100 then return json_build_object('allowed', false, 'reason', 'too_many_recipients', 'max', 100); end if;
+  v_staff := v_role in ('teacher','org_admin','superadmin') and (public.my_institution() is not null or v_role = 'superadmin');
+  v_sends := case when v_role = 'superadmin' then 200 when v_staff then 30 else 3 end;
+  v_rcpt := case when v_role = 'superadmin' then 2000 when v_staff then 300 else 3 end;
+  if not public.tc_rate_take('mail:n:' || auth.uid()::text, 1, v_sends, 86400) then
+    return json_build_object('allowed', false, 'reason', 'daily_sends', 'max', v_sends);
+  end if;
+  if not public.tc_rate_take('mail:r:' || auth.uid()::text, v_n, v_rcpt, 86400) then
+    return json_build_object('allowed', false, 'reason', 'daily_recipients', 'max', v_rcpt);
+  end if;
+  return json_build_object('allowed', true);
+end $$;
+revoke all on function public.email_quota_take(text, integer) from public, anon;
+grant execute on function public.email_quota_take(text, integer) to authenticated;
+
+-- ── Límite global por IP (TC-01): la API manda una clave HMAC de la IP (nunca la IP), así nadie puede adivinar ni
+-- gastar el cupo de la IP de otra persona. También limita cuántas veces la llama una misma cuenta.
+create or replace function public.ip_rate_hit(p_key text, p_limit integer, p_window_s integer) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  if p_key is null or p_key !~ '^[a-z]{2,10}:[0-9a-f]{64}$' then raise exception 'Clave inválida'; end if;
+  if p_limit is null or p_limit not between 1 and 100000 or p_window_s is null or p_window_s not between 10 and 86400 then
+    raise exception 'Límite inválido';
+  end if;
+  if not public.tc_rate_take('iprl:' || auth.uid()::text, 1, 3000, 3600) then return false; end if;
+  return public.tc_rate_take(p_key, 1, p_limit, p_window_s);
+end $$;
+revoke all on function public.ip_rate_hit(text, integer, integer) from public, anon;
+grant execute on function public.ip_rate_hit(text, integer, integer) to authenticated;
+
+-- ── Salas sueltas del aula en vivo (TC-13) ──
+-- Una sala que no es de una clase del calendario se llama "<12 hex del docente>-<algo>". Solo puede entrar quien la
+-- creó ('host') y el personal (docentes/admins) de la MISMA cuenta (institución madre) que quien la creó ('guest').
+-- Estudiantes y cuentas sin institución: no (sus clases van por el calendario, que decide live_room_role).
+create or replace function public.adhoc_room_access(p_owner_key text) returns text
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare me public.profiles%rowtype;
+begin
+  if auth.uid() is null or p_owner_key is null or p_owner_key !~ '^[0-9a-f]{12}$' then return null; end if;
+  select * into me from public.profiles where id = auth.uid();
+  if me.id is null or me.role not in ('teacher','org_admin','superadmin') then return null; end if;
+  if replace(me.id::text, '-', '') like p_owner_key || '%' then return 'host'; end if;
+  if me.institution_id is null then return null; end if;
+  if exists (select 1 from public.profiles o
+              where replace(o.id::text, '-', '') like p_owner_key || '%' and o.role in ('teacher','org_admin')
+                and o.institution_id is not null and public.billing_root(o.institution_id) = public.billing_root(me.institution_id)) then
+    return 'guest';
+  end if;
+  return null;
+end $$;
+revoke all on function public.adhoc_room_access(text) from public, anon;
+grant execute on function public.adhoc_room_access(text) to authenticated;
+-- Nombre visible en la sala (TC-27): lo decide la base, nunca el navegador. Inscripción: el nombre que cargó la
+-- institución; si no, el del perfil.
+create or replace function public.live_display_name(p_session uuid default null) returns text
+language sql stable security definer set search_path = public, pg_temp as
+$$ select left(coalesce(
+     (select nullif(btrim(e.name), '') from public.student_enrollments e
+       where p_session is not null and e.id = public.tc_session_enrollment(p_session, auth.uid())),
+     (select nullif(btrim(p.name), '') from public.profiles p where p.id = auth.uid()),
+     (select split_part(p.email, '@', 1) from public.profiles p where p.id = auth.uid()),
+     'Participant'), 80) $$;
+revoke all on function public.live_display_name(uuid) from public, anon;
+grant execute on function public.live_display_name(uuid) to authenticated;
+
+-- ── Plan de la clase (P-06): una planificación guardada adjunta a una clase del calendario ──
+-- Solo el docente / suplente (o quien creó la clase suelta) adjunta o quita, y solo planificaciones propias.
+create or replace function public.set_session_plan(p_session uuid, p_planning uuid) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_title text;
+begin
+  if auth.uid() is null or not public.teaches_session(p_session) then raise exception 'No autorizado'; end if;
+  if p_planning is not null then
+    select pl.title into v_title from public.plannings pl where pl.id = p_planning and pl.owner_id = auth.uid();
+    if not found then raise exception 'Esa planificación no es tuya'; end if;
+  end if;
+  update public.class_sessions set planning_id = p_planning where id = p_session;
+  return json_build_object('planning_id', p_planning, 'planning_title', v_title);
+end $$;
+-- El plan de una clase para quien la da (docente / suplente / quien la creó): título, guía docente y parámetros.
+-- A los estudiantes nunca (la guía tiene las respuestas): devuelve null.
+create or replace function public.session_plan(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if auth.uid() is null or not public.teaches_session(p_session) then return null; end if;
+  return (select json_build_object('id', pl.id, 'title', pl.title, 'content', coalesce(pl.data->>'content', ''),
+                                   'params', coalesce(pl.data->'params', '{}'::jsonb), 'mine', pl.owner_id = auth.uid())
+            from public.class_sessions s join public.plannings pl on pl.id = s.planning_id where s.id = p_session);
+end $$;
+revoke all on function public.set_session_plan(uuid, uuid) from public, anon;
+grant execute on function public.set_session_plan(uuid, uuid) to authenticated;
+revoke all on function public.session_plan(uuid) from public, anon;
+grant execute on function public.session_plan(uuid) to authenticated;
+
+-- ── Tutor/a de un menor (P-10): confirma o rechaza desde SU link (/tutor?t=<token>), sin cuenta ──
+-- No es una verificación de identidad (eso queda pendiente: ver README); sí evita que el propio menor marque la casilla.
+create or replace function public.guardian_consent_info(p_token text) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare c public.user_consents%rowtype;
+begin
+  if p_token is null or p_token !~ '^[0-9a-f]{64}$' then return json_build_object('status', 'invalid'); end if;
+  select * into c from public.user_consents where guardian_token = p_token;
+  if c.id is null or c.revoked_at is not null then return json_build_object('status', 'invalid'); end if;
+  if c.guardian_token_expires_at is not null and c.guardian_token_expires_at < now() and not c.guardian_consent then
+    return json_build_object('status', 'expired');
+  end if;
+  return json_build_object(
+    'status', case when c.guardian_consent then 'confirmed' when c.guardian_declined_at is not null then 'declined' else 'pending' end,
+    'student', coalesce((select split_part(nullif(btrim(p.name), ''), ' ', 1) from public.profiles p where p.id = c.user_id), ''),
+    'guardian_name', c.guardian_name, 'requested_at', c.granted_at);
+end $$;
+create or replace function public.guardian_consent_respond(p_token text, p_accept boolean) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare c public.user_consents%rowtype;
+begin
+  if p_token is null or p_token !~ '^[0-9a-f]{64}$' then raise exception 'Link inválido'; end if;
+  select * into c from public.user_consents where guardian_token = p_token for update;
+  if c.id is null or c.revoked_at is not null then raise exception 'Link inválido'; end if;
+  if c.guardian_token_expires_at is not null and c.guardian_token_expires_at < now() and not c.guardian_consent then
+    raise exception 'El link venció: pedile un link nuevo';
+  end if;
+  if coalesce(p_accept, false) then
+    update public.user_consents set guardian_consent = true, guardian_confirmed_at = now(), guardian_declined_at = null where id = c.id;
+  else
+    update public.user_consents set guardian_consent = false, guardian_confirmed_at = null, guardian_declined_at = now() where id = c.id;
+  end if;
+  return public.guardian_consent_info(p_token);
+end $$;
+revoke all on function public.guardian_consent_info(text) from public;
+grant execute on function public.guardian_consent_info(text) to anon, authenticated;
+revoke all on function public.guardian_consent_respond(text, boolean) from public;
+grant execute on function public.guardian_consent_respond(text, boolean) to anon, authenticated;
+-- Para el email al tutor/a (api/notify/guardian.js, con el token del menor): solo su propio pedido pendiente.
+create or replace function public.guardian_email_payload() returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  return (select json_build_object('guardian_email', c.guardian_email, 'guardian_name', c.guardian_name, 'token', c.guardian_token,
+                                   'student', coalesce((select nullif(btrim(p.name), '') from public.profiles p where p.id = c.user_id), ''))
+            from public.user_consents c
+           where c.user_id = auth.uid() and c.revoked_at is null and c.is_minor and not c.guardian_consent
+             and c.guardian_token is not null and coalesce(c.guardian_token_expires_at, now()) > now());
+end $$;
+revoke all on function public.guardian_email_payload() from public, anon;
+grant execute on function public.guardian_email_payload() to authenticated;
+
+-- ── Mis datos (TC-21, derechos de acceso / portabilidad): todo lo mío, en JSON ──
+create or replace function public.my_data_export() returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  return json_build_object(
+    'exported_at', now(),
+    'profile', (select json_build_object('email', p.email, 'name', p.name, 'role', p.role, 'created_at', p.created_at,
+                                         'institution', (select i.name from public.institutions i where i.id = p.institution_id))
+                  from public.profiles p where p.id = auth.uid()),
+    'plannings', coalesce((select json_agg(json_build_object('title', pl.title, 'created_at', pl.created_at, 'updated_at', pl.updated_at, 'data', pl.data)
+                                           order by pl.created_at) from public.plannings pl where pl.owner_id = auth.uid()), '[]'::json),
+    'enrollments', coalesce((select json_agg(json_build_object('institution', i.name, 'name', e.name, 'email', e.email, 'created_at', e.created_at))
+                               from public.student_enrollments e join public.institutions i on i.id = e.institution_id
+                              where e.user_id = auth.uid()), '[]'::json),
+    'recording_consent', coalesce((select json_agg(json_build_object('version', c.version, 'granted_at', c.granted_at, 'revoked_at', c.revoked_at,
+                                                                     'minor', c.is_minor, 'guardian_name', c.guardian_name, 'guardian_email', c.guardian_email,
+                                                                     'guardian_confirmed_at', c.guardian_confirmed_at) order by c.granted_at)
+                                     from public.user_consents c where c.user_id = auth.uid()), '[]'::json),
+    'recording_declines', coalesce((select json_agg(json_build_object('created_at', d.created_at, 'reason', d.reason) order by d.created_at)
+                                      from public.consent_declines d where d.user_id = auth.uid()), '[]'::json),
+    'insights', coalesce((select json_agg(json_build_object('class', coalesce(nullif(s.title, ''), g.name), 'starts_at', s.starts_at,
+                                                            'data', si.data, 'message', si.published_message) order by s.starts_at)
+                            from public.student_insights si join public.student_enrollments e on e.id = si.enrollment_id
+                            join public.class_sessions s on s.id = si.session_id left join public.class_groups g on g.id = s.group_id
+                           where e.user_id = auth.uid()), '[]'::json),
+    'attendance', coalesce((select json_agg(json_build_object('class', coalesce(nullif(s.title, ''), g.name), 'starts_at', s.starts_at,
+                                                              'first_join', a.first_join, 'minutes', round(coalesce(a.seconds_present, 0) / 60.0)) order by s.starts_at)
+                              from public.session_attendance a join public.class_sessions s on s.id = a.session_id
+                              left join public.class_groups g on g.id = s.group_id where a.user_id = auth.uid()), '[]'::json));
+end $$;
+revoke all on function public.my_data_export() from public, anon;
+grant execute on function public.my_data_export() to authenticated;
+-- Antes de borrar la cuenta (api/account/delete.js): ¿se puede? (el súper admin y el último admin de una institución madre no)
+create or replace function public.account_delete_check() returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare me public.profiles%rowtype;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  select * into me from public.profiles where id = auth.uid();
+  if me.role = 'superadmin' then return json_build_object('ok', false, 'reason', 'superadmin'); end if;
+  if me.role = 'org_admin' and me.institution_id is not null
+     and (select parent_id from public.institutions where id = me.institution_id) is null
+     and public.org_admin_count(me.institution_id) <= 1 then
+    return json_build_object('ok', false, 'reason', 'last_admin');
+  end if;
+  return json_build_object('ok', true);
+end $$;
+revoke all on function public.account_delete_check() from public, anon;
+grant execute on function public.account_delete_check() to authenticated;
 
 -- Que la API de Supabase vea enseguida las funciones nuevas
 notify pgrst, 'reload schema';

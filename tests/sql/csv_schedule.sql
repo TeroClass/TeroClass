@@ -60,6 +60,7 @@ select qc.eq('C: superadmin creates the tree', $$select (public.create_instituti
   and public.create_institution('D Madre','sd-madre','sd-adm@x.com') is not null)::text$$, 'true');
 select public.set_institution_plan(qc.inst('sc-madre'), 20, 1000000);
 reset role;
+update public.institutions set open_registration = true where slug in ('sc-sede','sc-sede2','sd-madre') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at) values
   (gen_random_uuid(),'sc-adm@x.com','{"name":"Admin C"}',now()),
   (gen_random_uuid(),'sc-sadm@x.com','{"name":"Admin Sede"}',now()),
@@ -215,11 +216,15 @@ set role authenticated; select qc.as_user(qc.uid('new.sub@x.com')::text);
 select qc.eq('C: ...and sees the classes as substitute', $$select (count(*) > 0)::text||':'||min(x->>'role') from json_array_elements(public.my_calendar(now(), now() + interval '40 days')) x$$, 'true:substitute');
 reset role;
 
--- ===== existing account without a unit: added through invite_member and assigned at once =====
+-- ===== existing account without a unit: pending invitation (TC-07), assigned as soon as the person accepts it =====
 set role authenticated; select qc.as_user(qc.uid('sc-sadm@x.com')::text);
 select set_config('qc.rows4', $j$[{"line":2,"group":"Alemán","teacher_email":"sc-loner@x.com","weekdays":[5]}]$j$, false);
 select qc.eq('C: preview: account without a unit → "add"', $$select qc.pick(public.import_students(qc.inst('sc-sede'), current_setting('qc.rows4')::jsonb, true, false)::text, 'Alemán')->'teacher'->>'status'$$, 'add');
 select public.import_students(qc.inst('sc-sede'), current_setting('qc.rows4')::jsonb, true, true);
+reset role;
+select qc.eq('C: ...not moved before accepting (pending teacher of the group)', $$select coalesce(p.institution_id::text,'none')||':'||coalesce(g.pending_teacher_email,'-') from public.profiles p, public.class_groups g where p.email = 'sc-loner@x.com' and g.name = 'Alemán'$$, 'none:sc-loner@x.com');
+set role authenticated; select qc.as_user(qc.uid('sc-loner@x.com')::text);
+select qc.eq('C: ...the person accepts the invitation in the app', $$select public.respond_invitation((public.my_invitations()->0->>'id')::uuid, true)->>'status'$$, 'accepted');
 reset role;
 select qc.eq('C: ...added to the unit as teacher and assigned', $$select p.role||':'||(select slug from public.institutions i where i.id = p.institution_id)||':'||(g.teacher_id = p.id)::text from public.profiles p, public.class_groups g where p.id = qc.uid('sc-loner@x.com') and g.id = qc.grp('Alemán')$$, 'teacher:sc-sede:true');
 

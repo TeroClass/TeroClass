@@ -21,6 +21,10 @@
 # Recording consent (consent.sql: one checkbox per person, grant/revoke/version, minors + guardian, declines visibility,
 # admin overview, Métricas totals, notification payload) runs with the other suites and after an upgrade from git 9993462
 # (before the consent) with data (+ the current 001 twice; the data must survive; then 002 still applies).
+# Pre-launch audit fixes (launch_fixes.sql: registration by link off, invitations need acceptance + expiry, e-mail / IP /
+# document caps, ad-hoc rooms, plan of a class, data export, search_path) run with the other suites and after an upgrade
+# from git 203e2e1 (before the fixes) with data: data kept, institutions closed ONCE (re-opening survives a re-run),
+# pending invitations get an expiry, minors' self-given consents wait for the guardian; then launch_fixes.sql.
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -30,7 +34,7 @@ trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null' EXIT
 $PSQL -d $DB -f tests/sql/supabase-stub.sql >/dev/null 2>&1
 for i in 1 2; do $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; done
 fail=0
-for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance consent; do
+for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance consent launch_fixes; do
   out=$($PSQL -d $DB -f tests/sql/$t.sql 2>&1)
   echo "$out" | grep -E '\*\*FAIL\*\*' || true
   sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
@@ -173,5 +177,38 @@ if git cat-file -e 9993462:supabase/migrations/001_base.sql 2>/dev/null; then
       [[ "$sum" =~ \|\ +0$ ]] || fail=1
     else echo "upgrade: **FAIL** could not upgrade from 9993462"; fail=1; fi
   else echo "upgrade: **FAIL** could not load 9993462 + data"; fail=1; fi
+fi
+# Upgrade from 203e2e1 (before the pre-launch audit fixes) with data, then the current 001 twice and 002
+if git cat-file -e 203e2e1:supabase/migrations/001_base.sql 2>/dev/null; then
+  UP6=${DB}_up6
+  $PSQL -d postgres -c "create database $UP6" >/dev/null
+  trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up2" >/dev/null; $PSQL -d postgres -c "drop database if exists $LV" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up3" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up4" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up5" >/dev/null; $PSQL -d postgres -c "drop database if exists $UP6" >/dev/null' EXIT
+  $PSQL -d $UP6 -f tests/sql/supabase-stub.sql >/dev/null 2>&1
+  DATA="select (select count(*) from public.class_groups)||'/'||(select count(*) from public.student_enrollments)||'/'||(select count(*) from public.class_sessions)||'/'||(select count(*) from public.profiles)||'/'||(select count(*) from public.invitations)||'/'||(select count(*) from public.user_consents)||'/'||(select count(*) from public.consent_declines)||'/'||(select count(*) from public.class_docs)||'/'||(select count(*) from public.teacher_insights)"
+  if git show 203e2e1:supabase/migrations/001_base.sql | $PSQL -d $UP6 >/dev/null 2>&1 \
+     && git show 203e2e1:tests/sql/students.sql | $PSQL -d $UP6 >/dev/null 2>&1 && git show 203e2e1:tests/sql/class_insights.sql | $PSQL -d $UP6 >/dev/null 2>&1 \
+     && git show 203e2e1:tests/sql/classdoc_attendance.sql | $PSQL -d $UP6 >/dev/null 2>&1 && git show 203e2e1:tests/sql/consent.sql | $PSQL -d $UP6 >/dev/null 2>&1; then
+    before=$($PSQL -At -d $UP6 -c "$DATA")
+    open_before=$($PSQL -At -d $UP6 -c "select count(*) from public.institutions where open_registration")
+    minors_before=$($PSQL -At -d $UP6 -c "select count(*) from public.user_consents where is_minor and revoked_at is null and guardian_consent")
+    if $PSQL -d $UP6 -f supabase/migrations/001_base.sql >/dev/null 2>&1; then
+      checks=$($PSQL -At -d $UP6 -c "select (select count(*) from public.institutions where open_registration)||'/'||(select count(*) from public.invitations where expires_at is null)||'/'||(select count(*) from public.invitations where accepted_at is null and expires_at < now() + interval '13 days')||'/'||(select count(*) from public.user_consents where is_minor and revoked_at is null and guardian_consent)||'/'||(select count(*) from public.user_consents where is_minor and revoked_at is null and guardian_token is null)")
+      $PSQL -d $UP6 -c "update public.institutions set open_registration = true where slug = (select slug from public.institutions order by created_at limit 1)" >/dev/null
+      if $PSQL -d $UP6 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP6 -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
+        after=$($PSQL -At -d $UP6 -c "$DATA")
+        reopened=$($PSQL -At -d $UP6 -c "select count(*) from public.institutions where open_registration")
+        if [[ "$before" == "$after" && "$open_before" != "0" && "$minors_before" != "0" && "$checks" == "0/0/0/0/0" && "$reopened" == "1" ]]; then
+          echo "upgrade (203e2e1 + data → current 001 ×2 → 002): data kept ($after), $open_before institutions closed once (re-opening kept), invitations expire, $minors_before minor consent(s) wait for the guardian"
+        else echo "upgrade: **FAIL** 203e2e1 before=$before after=$after open_before=$open_before minors_before=$minors_before checks=$checks reopened=$reopened"; fail=1; fi
+        for t in launch_fixes; do
+          out=$($PSQL -d $UP6 -f tests/sql/$t.sql 2>&1)
+          echo "$out" | grep -E '\*\*FAIL\*\*' || true
+          sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
+          echo "upgrade (203e2e1 → current ×2) + $t: passed | failed = $sum"
+          [[ "$sum" =~ \|\ +0$ ]] || fail=1
+        done
+      else echo "upgrade: **FAIL** could not re-run the current 001 / 002 after 203e2e1"; fail=1; fi
+    else echo "upgrade: **FAIL** could not upgrade from 203e2e1"; fail=1; fi
+  else echo "upgrade: **FAIL** could not load 203e2e1 + data"; fail=1; fi
 fi
 exit $fail

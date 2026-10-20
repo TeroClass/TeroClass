@@ -49,6 +49,7 @@ select qs.eq('S: superadmin creates the tree', $$select (public.create_instituti
   and public.create_institution('B Madre','sb-madre','sb-adm@x.com') is not null)::text$$, 'true');
 select public.set_institution_plan(qs.inst('sa-madre'), 8, 1000000);
 reset role;
+update public.institutions set open_registration = true where slug in ('sa-cat','sa-sede1','sa-sede2','sb-madre') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at) values
   (gen_random_uuid(),'sa-adm@x.com','{"name":"Admin A"}',now()),
   (gen_random_uuid(),'sa-s1adm@x.com','{"name":"Admin Sede 1"}',now()),
@@ -197,6 +198,7 @@ select qs.fails('S: teacher without institution cannot create ad hoc classes', $
 reset role;
 
 -- ===== students: magic link sign-in, claim by verified email =====
+update public.institutions set open_registration = true where slug in ('sa-cat') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at) values
   (gen_random_uuid(),'ana.perez@mail.com','{"via":"student_link"}',now()),
   (gen_random_uuid(),'bruno@mail.com','{"via":"student_link"}',null),           -- link not confirmed yet

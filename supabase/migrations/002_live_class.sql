@@ -144,24 +144,24 @@ create index if not exists student_insights_participant_idx on public.student_in
 
 -- ========== FUNCIONES DE AYUDA (security definer: evitan recursión entre políticas) ==========
 create or replace function public.owns_session(p_session uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select exists (select 1 from public.live_sessions where id = p_session and teacher_id = auth.uid()) $$;
 
 create or replace function public.admin_of_session(p_session uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select coalesce((select (s.institution_id is not null and public.is_admin_of(s.institution_id))
                       or public.is_superadmin()
                     from public.live_sessions s where s.id = p_session), false) $$;
 
 -- Alumno/a o tutor/a de un participante concreto
 create or replace function public.is_self_or_guardian(p_participant uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select exists (select 1 from public.session_participants
                    where id = p_participant and auth.uid() is not null
                      and (user_id = auth.uid() or guardian_user_id = auth.uid())) $$;
 
 create or replace function public.in_session(p_session uuid) returns boolean
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select exists (select 1 from public.session_participants
                    where session_id = p_session and auth.uid() is not null
                      and (user_id = auth.uid() or guardian_user_id = auth.uid())) $$;
@@ -184,7 +184,7 @@ create trigger live_sessions_touch before update on public.live_sessions
 -- La institución de la sesión es siempre la del docente (como plannings) y la planificación
 -- vinculada tiene que ser suya.
 create or replace function public.live_sessions_guard() returns trigger
-language plpgsql set search_path = public as
+language plpgsql set search_path = public, pg_temp as
 $$
 begin
   if current_user in ('authenticated','anon') and not public.is_superadmin() then
@@ -207,7 +207,7 @@ create trigger live_sessions_guard before insert or update on public.live_sessio
 
 -- Consentimiento de menores: solo un tutor/a puede darlo.
 create or replace function public.consents_guard() returns trigger
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare v_minor boolean; v_session uuid;
 begin
@@ -274,7 +274,7 @@ drop policy if exists cs_insert on public.consents;   -- (antes: el navegador ag
 revoke insert, update, delete on public.consents from anon, authenticated;
 
 create or replace function public.revoke_consent(p_id uuid) returns void
-language plpgsql security definer set search_path = public as
+language plpgsql security definer set search_path = public, pg_temp as
 $$
 declare v_part uuid; v_user uuid;
 begin
@@ -319,7 +319,7 @@ revoke all on public.live_sessions, public.session_participants, public.consents
 
 -- Para el job de borrado (service role): audio vencido que todavía no se borró.
 create or replace function public.recordings_due_for_deletion() returns setof public.recordings
-language sql stable security definer set search_path = public as
+language sql stable security definer set search_path = public, pg_temp as
 $$ select * from public.recordings where deleted_at is null and retention_until <= now() $$;
 revoke all on function public.recordings_due_for_deletion() from public, anon, authenticated;
 

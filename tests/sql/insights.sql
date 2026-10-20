@@ -43,6 +43,7 @@ select qi.eq('I: superadmin creates the tree', $$select (public.create_instituti
   and public.create_institution('Ins Cát 1','ins-cat1','',null,qi.inst('ins-sede1')) is not null
   and public.create_institution('Ins Otra','ins-otra','') is not null)::text$$, 'true');
 reset role;
+update public.institutions set open_registration = true where slug in ('ins-cat1','ins-otra','ins-sede2') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data) values
   (gen_random_uuid(),'ins-madm@x.com','{"name":"Ins Admin"}'),
   (gen_random_uuid(),'ins-t1@x.com','{"org_slug":"ins-cat1","name":"T1"}'),

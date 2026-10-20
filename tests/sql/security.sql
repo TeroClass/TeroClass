@@ -78,6 +78,7 @@ select qa.eq('flow: one pending invitation for new@a.com', $$select count(*) fro
 reset role;
 
 -- signups
+update public.institutions set open_registration = true where slug in ('alpha','beta') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data) values
  (:'ADMA','a@a.com','{}'), (:'ADMB','b@b.com','{}'),
  (:'T1','t1@a.com','{"org_slug":"alpha","name":"T One"}'), (:'T2','t2@a.com','{"org_slug":"ALPHA"}'),
@@ -215,7 +216,17 @@ select qa.fails('H4: upload with non-uuid folder (no crash, denied)', $$insert i
 select qa.rows('H4: admin A cannot delete B logo', $$delete from storage.objects where name not like public.my_institution()||'/%'$$, 0);
 
 -- ===== H2: AI quota =====
+-- TC-01 (2026-10): accounts without an institution start lower: unconfirmed email 3, account younger than 7 days 5, then 15
 select qa.as_user(:'LONER');
+select qa.eq('TC-01: no-institution user with unconfirmed email → limit 3', $$select public.get_ai_quota()->>'limit'$$, '3');
+reset role;
+update auth.users set email_confirmed_at = now() where id = :'LONER';
+set role authenticated; select qa.as_user(:'LONER');
+select qa.eq('TC-01: confirmed but new account (< 7 days) → limit 5', $$select public.get_ai_quota()->>'limit'$$, '5');
+reset role;
+update public.profiles set created_at = now() - interval '8 days' where id in (:'LONER', :'T2');
+update auth.users set email_confirmed_at = now() where id = :'T2';
+set role authenticated; select qa.as_user(:'LONER');
 select qa.eq('H2: no-institution user limit 15', $$select public.consume_ai_quota()->>'limit'$$, '15');
 do $$ begin for i in 2..15 loop perform public.consume_ai_quota(); end loop; end $$;
 select qa.eq('H2: 15th call allowed', $$select public.get_ai_quota()->>'used'$$, '15');

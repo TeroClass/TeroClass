@@ -70,6 +70,7 @@ select qh.eq('H: madm sees invitations of descendants', $$select count(*) from p
 reset role;
 
 -- ===== signups (invite / slug on any node) =====
+update public.institutions set open_registration = true where slug in ('cat1-h','madre-h','sede1-h') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data) values
  (gen_random_uuid(),'s1adm@h.com','{}'), (gen_random_uuid(),'c1adm@h.com','{}'),
  (gen_random_uuid(),'tc1@h.com','{"org_slug":"cat1-h"}'), (gen_random_uuid(),'ts2@h.com','{}'),

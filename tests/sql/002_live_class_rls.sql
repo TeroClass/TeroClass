@@ -24,6 +24,7 @@ grant execute on function as_user(text), expect(boolean, text), expect_denied(te
 insert into public.institutions(id, name, slug) values
   ('aaaaaaaa-0000-4000-8000-000000000001', 'Inst A', 'inst-a'),
   ('bbbbbbbb-0000-4000-8000-000000000001', 'Inst B', 'inst-b');
+update public.institutions set open_registration = true where slug in ('inst-a','inst-b') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id, email, raw_user_meta_data) values
   ('00000000-0000-4000-8000-0000000000a1', 't1@a.com', '{"org_slug":"inst-a"}'),
   ('00000000-0000-4000-8000-0000000000a2', 't2@a.com', '{"org_slug":"inst-a"}'),
@@ -99,7 +100,11 @@ select expect_denied($$insert into public.consents(session_id, participant_id, k
   'the browser cannot insert consents any more (server only, from user_consents)');
 select expect((public.grant_recording_consent(public.tc_consent_version())->>'recorded')::boolean, 'student gives the single consent (001)');
 select as_user('00000000-0000-4000-8000-000000000052');
-select expect((public.grant_recording_consent(public.tc_consent_version(), true, 'Laura Pérez', 'guardian@x.com', true)->>'recorded')::boolean, 'minor gives it with guardian name + email + confirmation');
+select expect(not (public.grant_recording_consent(public.tc_consent_version(), true, 'Laura Pérez', 'guardian@x.com', true)->>'recorded')::boolean, 'minor gives it with guardian name + email: not recorded until the guardian confirms (P-10)');
+reset role;
+select set_config('lv.gtok', (select guardian_token from public.user_consents where user_id = '00000000-0000-4000-8000-000000000052' and revoked_at is null), false);
+set role anon;
+select expect((public.guardian_consent_respond(current_setting('lv.gtok'), true)->>'status') = 'confirmed', 'the guardian confirms from their link');
 reset role;
 insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id, user_consent_id)
   select 'dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000051', 'recording', true, c.version, c.user_id, c.id

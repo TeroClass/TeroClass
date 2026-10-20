@@ -46,6 +46,7 @@ select qn.eq('S: superadmin creates the tree', $$select (public.create_instituti
   and public.create_institution('CN Sede 2','cn-s2','cn-s2adm@x.com',null,qn.inst('cn-madre')) is not null
   and public.create_institution('CN Otra','cn-otra','cn-oadm@x.com') is not null)::text$$, 'true');
 reset role;
+update public.institutions set open_registration = true where slug in ('cn-otra','cn-s1','cn-s2') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at) values
   (gen_random_uuid(),'cn-adm@x.com','{"name":"CN Admin"}',now()),
   (gen_random_uuid(),'cn-s1adm@x.com','{"name":"CN Admin S1"}',now()),
@@ -111,11 +112,33 @@ select qn.eq('U: version bump → outdated, not recorded (asked again)', $$selec
 select qn.as_user(qn.uid('cn-minor@x.com')::text);
 select qn.fails('M: minor without guardian name', $$select public.grant_recording_consent('2026-10', true, '', 'g@x.com', true)$$, 'nombre del tutor');
 select qn.fails('M: minor with an invalid guardian email', $$select public.grant_recording_consent('2026-10', true, 'Laura Pérez', 'no-es-email', true)$$, 'email del tutor');
-select qn.fails('M: minor without the guardian''s confirmation', $$select public.grant_recording_consent('2026-10', true, 'Laura Pérez', 'laura@x.com', false)$$, 'confirmar');
-select qn.eq('M: minor with guardian name + email + confirmation → recorded', $$select public.grant_recording_consent('2026-10', true, 'Laura <b>Pérez</b>', 'laura@x.com', true)->>'recorded'$$, 'true');
-select qn.eq('M: … flagged minor with guardian consent', $$select (public.my_consent()->>'minor')||'/'||(public.my_consent()->>'guardian_consent')$$, 'true/true');
+select qn.fails('M: the guardian''s email cannot be the minor''s own (P-10)', $$select public.grant_recording_consent('2026-10', true, 'Laura Pérez', 'CN-minor@x.com', true)$$, 'distinto del tuyo');
+-- P-10 (2026-10): the minor's own checkbox no longer counts; the guardian confirms from their own link
+select qn.eq('M: minor yes → NOT recorded yet (the minor''s own checkbox is ignored)', $$select public.grant_recording_consent('2026-10', true, 'Laura <b>Pérez</b>', 'laura@x.com', true)->>'recorded'$$, 'false');
+select qn.eq('M: … waiting for the guardian', $$select public.my_consent()->>'guardian_status'$$, 'pending');
+select qn.eq('M: … the minor gets the link token to send to the guardian', $$select (public.my_consent()->>'guardian_token' ~ '^[0-9a-f]{64}$')::text$$, 'true');
 select qn.eq('M: my_consent never returns guardian data', $$select (public.my_consent()::text not ilike '%laura%')::text$$, 'true');
 select qn.eq('M: guardian name stored cleaned (no HTML)', $$select guardian_name from public.user_consents where user_id = auth.uid() and revoked_at is null$$, 'Laura b Pérez /b');
+select set_config('qn.gtok', public.my_consent()->>'guardian_token', false);
+reset role;
+set role anon; select qn.as_user('');
+select qn.eq('M: guardian link (anon): pending + the student''s first name only', $$select (public.guardian_consent_info(current_setting('qn.gtok'))->>'status')||'/'||(public.guardian_consent_info(current_setting('qn.gtok'))->>'student')$$, 'pending/Mini');
+select qn.eq('M: a wrong token reveals nothing', $$select public.guardian_consent_info(repeat('a', 64))::text$$, '{"status" : "invalid"}');
+select qn.fails('M: a malformed token is refused', $$select public.guardian_consent_respond('nope', true)$$, 'Link inválido');
+select qn.eq('M: guardian says no', $$select public.guardian_consent_respond(current_setting('qn.gtok'), false)->>'status'$$, 'declined');
+reset role;
+set role authenticated; select qn.as_user(qn.uid('cn-minor@x.com')::text);
+select qn.eq('M: … minor not recorded, sees "declined"', $$select (public.my_consent()->>'recorded')||'/'||(public.my_consent()->>'guardian_status')$$, 'false/declined');
+reset role;
+set role anon; select qn.as_user('');
+select qn.eq('M: guardian changes their mind and confirms', $$select public.guardian_consent_respond(current_setting('qn.gtok'), true)->>'status'$$, 'confirmed');
+reset role;
+set role authenticated; select qn.as_user(qn.uid('cn-minor@x.com')::text);
+select qn.eq('M: … now recorded, flagged minor with guardian consent, link no longer shown', $$select (public.my_consent()->>'recorded')||'/'||(public.my_consent()->>'minor')||'/'||(public.my_consent()->>'guardian_consent')||'/'||coalesce(public.my_consent()->>'guardian_token','-')$$, 'true/true/true/-');
+reset role;
+update public.user_consents set guardian_token_expires_at = now() - interval '1 day' where guardian_token = current_setting('qn.gtok');
+set role anon; select qn.as_user('');
+select qn.eq('M: an expired link still shows a confirmation that was already given', $$select public.guardian_consent_info(current_setting('qn.gtok'))->>'status'$$, 'confirmed');
 reset role;
 select qn.fails('M: the table itself refuses a minor without guardian', $$insert into public.user_consents(user_id, version, is_minor) values (qn.uid('cn-minor@x.com'), '2026-10', true)$$, 'user_consents_minor_guardian');
 set role anon; select qn.as_user('');
@@ -126,7 +149,6 @@ reset role;
 
 -- ===== D: declines + justification =====
 set role authenticated; select qn.as_user(qn.uid('cn-x@x.com')::text);
-select qn.fails('D: justification is required (≥ 10 characters)', $$select public.decline_recording_consent(qn.sess('CN now'), '  no   ')$$, 'mínimo 10');
 select qn.eq('D: student declines in a class of Sede 1 → addressed only to Sede 1 (not Otra, which also loaded them)',
   $$select public.decline_recording_consent(qn.sess('CN now'), 'Prefiero no ser grabado <b>por ahora</b>')->>'institutions'$$, '1');
 select qn.eq('D: … stored for Sede 1', $$select count(*)||'/'||bool_and(institution_id = qn.inst('cn-s1')) from public.consent_declines where user_id = auth.uid()$$, '1/true');
@@ -146,7 +168,7 @@ select qn.eq('D: … the old "yes" is closed', $$select (public.my_consent()->>'
 select qn.as_user(:'OWNER');
 select qn.eq('D: super admin without a unit → row without institution', $$select (public.decline_recording_consent(null, 'Soy el dueño probando esto')->>'institutions')$$, '0');
 reset role;
-select qn.fails('D: table check: reason length', $$insert into public.consent_declines(user_id, version, reason) values (qn.uid('cn-x@x.com'), '2026-10', 'short')$$, 'consent_declines_reason_check');
+select qn.fails('D: table check: reason length (max 1000)', $$insert into public.consent_declines(user_id, version, reason) values (qn.uid('cn-x@x.com'), '2026-10', repeat('x', 1001))$$, 'consent_declines_reason_check');
 
 -- visibility of the justifications (RLS select + consent_overview)
 set role authenticated; select qn.as_user(qn.uid('cn-adm@x.com')::text);
@@ -195,6 +217,13 @@ select qn.eq('O: a revocation from the profile is reflected', $$select qn.person
 select qn.eq('O: badge count of new declines since a moment', $$select public.consent_new_declines(qn.inst('cn-madre'), now() - interval '1 hour')::text||'/'||public.consent_new_declines(qn.inst('cn-madre'), now() + interval '1 hour')$$, '3/0');
 select qn.as_user(qn.uid('cn-s2adm@x.com')::text);
 select qn.fails('O: badge count only for your own units', $$select public.consent_new_declines(qn.inst('cn-s1'), null)$$, 'No autorizado');
+-- P-11 (2026-10): the justification is OPTIONAL: an empty "no" is stored (status "did not accept"), without text
+select qn.as_user(qn.uid('cn-st4@x.com')::text);
+select qn.eq('P-11: a "no" without a reason is accepted (joins not recorded)', $$select public.decline_recording_consent(qn.sess('CN G2 now'), '   ')->>'institutions'$$, '1');
+select qn.eq('P-11: … stored with an empty reason', $$select string_agg((reason = '')::text, ',') from public.consent_declines where user_id = auth.uid()$$, 'true');
+select qn.as_user(qn.uid('cn-s2adm@x.com')::text);
+select qn.eq('P-11: … the admin sees "did not accept" with an empty reason', $$select (qn.person(qn.inst('cn-s2'), 'cn-st4@x.com')->>'status')||'/'||(public.consent_overview(qn.inst('cn-s2'))->'declines'->0->>'reason')$$, 'declined/');
+select qn.eq('P-11: … an empty "no" is not counted in the badge (nothing to read)', $$select public.consent_new_declines(qn.inst('cn-s2'), now() - interval '1 hour')::text$$, '0');
 
 -- Métricas (super admin): totals only
 select qn.fails('P: an admin cannot read platform consent totals', $$select public.platform_consent_counts(null)$$, 'No autorizado');

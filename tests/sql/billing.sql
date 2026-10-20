@@ -46,6 +46,7 @@ select qb.eq('B: superadmin creates madre A', $$select (public.create_institutio
 select qb.eq('B: superadmin creates madre B', $$select (public.create_institution('Bill B','bill-b','billb@x.com') is not null)::text$$, 'true');
 reset role;
 select qb.eq('B: new madre gets the default plan', $$select seats||'/'||monthly_tokens||'/'||extra_tokens_balance from public.billing_accounts where root_id=qb.inst('bill-a')$$, '10/2000000/0');
+update public.institutions set open_registration = true where slug in ('bill-a','bill-b') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data) values
   (gen_random_uuid(),'billa@x.com','{"name":"Admin A"}'), (gen_random_uuid(),'billb@x.com','{"name":"Admin B"}'),
   (gen_random_uuid(),'ta1@x.com','{"org_slug":"bill-a","name":"Teacher A1"}'),
@@ -59,6 +60,7 @@ set role authenticated; select qb.as_user(current_setting('qb.adma'));
 select qb.eq('B: admin A creates a sub-unit with its admin', $$select (public.create_institution('Bill A Sede','bill-a-s1','sadm@x.com',null,qb.inst('bill-a')) is not null)::text$$, 'true');
 reset role;
 select qb.eq('B: sub-units have no plan row of their own', $$select count(*) from public.billing_accounts where root_id=qb.inst('bill-a-s1')$$, '0');
+update public.institutions set open_registration = true where slug in ('bill-a-s1') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data) values
   (gen_random_uuid(),'sadm@x.com','{"name":"Sede Admin"}'), (gen_random_uuid(),'ts1@x.com','{"org_slug":"bill-a-s1","name":"Teacher S1"}');
 select set_config('qb.sadm', qb.uid('sadm@x.com')::text, false);
@@ -213,6 +215,7 @@ select qb.fails('B: creating a sub-unit with a new admin refused when full', $$s
 reset role;
 select qb.eq('B: ...and the sub-unit was not created (atomic)', $$select count(*) from public.institutions where slug='bill-a-s2'$$, '0');
 select qb.eq('B: get_org_branding reports seats_full', $$select seats_full::text from public.get_org_branding('bill-a-s1')$$, 'true');
+update public.institutions set open_registration = true where slug in ('bill-a') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data) values (gen_random_uuid(),'late@x.com','{"org_slug":"bill-a"}');
 select qb.eq('B: slug signup when full → account without institution', $$select coalesce(institution_id::text,'none')||':'||role from public.profiles where email='late@x.com'$$, 'none:teacher');
 -- an invitation saved while there was room, accepted after the seats filled up
@@ -228,9 +231,15 @@ set role authenticated; select qb.as_user(:'OWNER');
 select qb.eq('B: superadmin raises seats to 6', $$select public.set_institution_plan(qb.inst('bill-a'),6,1000)->>'seats'$$, '6');
 reset role;
 set role authenticated; select qb.as_user(current_setting('qb.adma'));
-select qb.eq('B: with free seats the existing account is added', $$select public.invite_member(qb.inst('bill-a'),'inv1@x.com','teacher')$$, 'added');
+-- TC-07 (2026-10): an existing account is never moved by an invitation: it gets a pending invitation it accepts in the app
+select qb.eq('B: with free seats the existing account gets a pending invitation', $$select public.invite_member(qb.inst('bill-a'),'inv1@x.com','teacher')$$, 'pending');
+reset role;
+set role authenticated; select qb.as_user(qb.uid('inv1@x.com')::text);
+select qb.eq('B: ...the person accepts it in the app', $$select public.respond_invitation((public.my_invitations()->0->>'id')::uuid, true)->>'status'$$, 'accepted');
+select qb.as_user(current_setting('qb.adma'));
 select qb.eq('B: seats used 5/6', $$select (public.get_seat_status(null)->>'used')||'/'||(public.get_seat_status(null)->>'seats')$$, '5/6');
 reset role;
+update public.institutions set open_registration = true where slug in ('bill-a-s1') and not open_registration; -- 2026-10: sign-up by link is off by default (TC-02); opened explicitly here
 insert into auth.users(id,email,raw_user_meta_data) values (gen_random_uuid(),'late2@x.com','{"org_slug":"bill-a-s1"}');
 select qb.eq('B: slug signup with a free seat joins (counts the whole account)', $$select (select slug from public.institutions i where i.id=institution_id) from public.profiles where email='late2@x.com'$$, 'bill-a-s1');
 select qb.eq('B: now full again', $$select seats_full::text from public.get_org_branding('bill-a')$$, 'true');
