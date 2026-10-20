@@ -1828,9 +1828,9 @@ grant execute on function public.platform_insights(integer, uuid, boolean) to au
 --     de sus compañeros (solo cuántos son).
 --   · Los estudiantes no tienen unidad (profiles.institution_id null) ni ocupan asientos.
 --   · Nada de esto se anota en ai_events; Métricas (platform_insights) solo recibe totales.
--- MENORES: muchos estudiantes son menores. Hoy no se graba nada, así que no hay flujo de consentimiento.
---   TODO(consent): antes de activar la grabación, pedir el consentimiento del adulto responsable (o usar
---   institutions.consent_managed_by_institution cuando la institución lo gestiona por su cuenta).
+-- MENORES: muchos estudiantes son menores. El consentimiento de grabación (uno solo, por persona) está al final de
+--   este archivo ("CONSENTIMIENTO DE GRABACIÓN"): para un menor exige nombre, email y confirmación del tutor/a.
+--   institutions.consent_managed_by_institution queda reservado (instituciones que lo gestionan por su cuenta; sin uso).
 alter table public.institutions add column if not exists consent_managed_by_institution boolean not null default false;
 
 -- ── ayudas de formato (uso interno) ──
@@ -4287,6 +4287,292 @@ $$ select s.role from (select public.tc_classdoc_role(p_session) as role) s
     where exists (select 1 from public.class_sessions cs where cs.id = p_session and cs.status <> 'cancelled') $$;
 revoke all on function public.live_room_role(uuid) from public, anon;
 grant execute on function public.live_room_role(uuid) to authenticated;
+
+-- ══════════ CONSENTIMIENTO DE GRABACIÓN (uno solo, por persona; 2026-10) ══════════
+-- Una sola casilla: "Acepto que mis clases en TeroClass se graben (solo audio) y que la IA las analice para generar mis
+-- insights y mejorar las clases" (grabación + análisis con IA + almacenamiento; el audio original se borra a los 30 días).
+--   · Se pide la PRIMERA vez que la persona entra a cualquier sala (docentes también). Un "sí" queda guardado acá
+--     (user_consents) y no se vuelve a pedir mientras siga vigente y la versión del texto coincida
+--     (tc_consent_version(); se sube cuando cambia el texto y entonces se vuelve a preguntar).
+--   · Menores de 18: el "sí" cuenta solo con nombre + email del tutor/a y su confirmación (lo exige la tabla).
+--   · Un "no" NO queda guardado como respuesta: se vuelve a preguntar en la próxima clase. Cada "no" pide una
+--     justificación obligatoria (consent_declines) que llega a los admins de la institución de esa persona
+--     (estudiante: la/s institución/es que lo cargaron para esa clase; docente: su unidad).
+--   · Revocar (desde el perfil) cierra el "sí" (revoked_at) y se vuelve a preguntar en la próxima clase.
+--   · api/class/token.js NO confía en lo que manda el navegador: lee my_consent() con el token del usuario y pone
+--     recorded / consent / minor / guardian_consent en la metadata de LiveKit (nunca datos del tutor/a).
+-- Privacidad: cada persona ve solo lo suyo (RLS); los admins ven el estado de las personas que cargó su unidad (y
+-- debajo) y las justificaciones dirigidas a ellas (consent_overview); nadie más. Escrituras: solo con estas funciones.
+-- Relación con 002_live_class.sql: su tabla "consents" (por llamada y participante) queda como registro de auditoría
+-- que escribe el servidor (service role) a partir de user_consents (columna user_consent_id); ver 002.
+create or replace function public.tc_consent_version() returns text
+language sql immutable set search_path = public as
+$$ select '2026-10'::text $$;   -- = CONSENT_VERSION de public/live-class.js y api/class/token.js (tests/api-consent.test.mjs lo verifica)
+revoke all on function public.tc_consent_version() from public, anon;
+grant execute on function public.tc_consent_version() to authenticated, service_role;
+
+create table if not exists public.user_consents (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  version text not null check (length(version) between 1 and 40),
+  granted_at timestamptz not null default now(),
+  revoked_at timestamptz,
+  revoked_reason text check (revoked_reason is null or revoked_reason in ('user','superseded')),
+  is_minor boolean not null default false,
+  guardian_name text check (guardian_name is null or length(guardian_name) between 1 and 120),
+  guardian_email text check (guardian_email is null or public.tc_email_ok(guardian_email)),
+  guardian_consent boolean not null default false,
+  created_at timestamptz not null default now(),
+  constraint user_consents_minor_guardian check (not is_minor or (guardian_name is not null and guardian_email is not null and guardian_consent)),
+  constraint user_consents_revoked check ((revoked_at is null) = (revoked_reason is null))
+);
+create unique index if not exists user_consents_one_active on public.user_consents (user_id) where revoked_at is null;
+create index if not exists user_consents_user_idx on public.user_consents (user_id, granted_at desc);
+
+create table if not exists public.consent_declines (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  institution_id uuid references public.institutions(id) on delete cascade,   -- null = sin institución (solo súper admin)
+  session_id uuid references public.class_sessions(id) on delete set null,     -- la clase a la que estaba entrando
+  role text not null default 'student' check (role in ('student','teacher')),
+  version text not null check (length(version) between 1 and 40),
+  reason text not null check (char_length(reason) between 10 and 1000),
+  notified_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists consent_declines_inst_idx on public.consent_declines (institution_id, created_at desc);
+create index if not exists consent_declines_user_idx on public.consent_declines (user_id, created_at desc);
+
+-- RLS: lectura directa solo de lo propio (y las justificaciones, también los admins de esa unidad); nadie escribe directo.
+alter table public.user_consents enable row level security;
+alter table public.consent_declines enable row level security;
+revoke all on public.user_consents, public.consent_declines from anon, authenticated;
+grant select on public.user_consents, public.consent_declines to authenticated;
+drop policy if exists uc_select_own on public.user_consents;
+create policy uc_select_own on public.user_consents for select to authenticated using (user_id = auth.uid());
+drop policy if exists cd_select on public.consent_declines;
+create policy cd_select on public.consent_declines for select to authenticated
+  using (user_id = auth.uid() or public.is_admin_of(institution_id));
+
+-- Estado del consentimiento de quien llama (lo usan el lobby, el perfil y api/class/token.js). Sin datos del tutor/a.
+create or replace function public.my_consent() returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare c public.user_consents%rowtype; v text := public.tc_consent_version(); v_rev timestamptz;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  select * into c from public.user_consents where user_id = auth.uid() and revoked_at is null;
+  select max(revoked_at) into v_rev from public.user_consents where user_id = auth.uid() and revoked_reason = 'user';
+  return json_build_object(
+    'current_version', v,
+    'status', case when c.id is null then case when v_rev is not null then 'revoked' else 'none' end
+                   when c.version <> v then 'outdated' else 'granted' end,
+    'granted', c.id is not null and c.version = v,
+    'recorded', c.id is not null and c.version = v and (not c.is_minor or c.guardian_consent),
+    'version', c.version, 'granted_at', c.granted_at, 'revoked_at', case when c.id is null then v_rev end,
+    'minor', coalesce(c.is_minor, false), 'guardian_consent', case when c.is_minor then c.guardian_consent end);
+end $$;
+
+-- "Sí" (una sola casilla). Menores: nombre + email + confirmación del tutor/a. Reemplaza un "sí" anterior (otra versión).
+create or replace function public.grant_recording_consent(p_version text, p_minor boolean default false, p_guardian_name text default null,
+                                                          p_guardian_email text default null, p_guardian_consent boolean default false)
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_minor boolean := coalesce(p_minor, false); v_name text := public.tc_clean_text(p_guardian_name, 120);
+        v_email text := btrim(coalesce(p_guardian_email, ''));
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  if p_version is distinct from public.tc_consent_version() then raise exception 'El texto del consentimiento cambió: recargá la página'; end if;
+  if v_minor then
+    if v_name = '' then raise exception 'Menores de 18: falta el nombre del tutor/a'; end if;
+    if not public.tc_email_ok(v_email) then raise exception 'Menores de 18: email del tutor/a inválido'; end if;
+    if not coalesce(p_guardian_consent, false) then raise exception 'Menores de 18: el tutor/a tiene que confirmar el consentimiento'; end if;
+  end if;
+  update public.user_consents set revoked_at = now(), revoked_reason = 'superseded' where user_id = auth.uid() and revoked_at is null;
+  insert into public.user_consents (user_id, version, is_minor, guardian_name, guardian_email, guardian_consent)
+  values (auth.uid(), p_version, v_minor, case when v_minor then v_name end, case when v_minor then v_email end, v_minor);
+  return public.my_consent();
+end $$;
+
+-- Revocar desde el perfil: se vuelve a preguntar en la próxima clase.
+create or replace function public.revoke_recording_consent() returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  update public.user_consents set revoked_at = now(), revoked_reason = 'user' where user_id = auth.uid() and revoked_at is null;
+  return public.my_consent();
+end $$;
+
+-- "No" + justificación obligatoria (mín. 10 caracteres). Va a la/s institución/es de esa persona para esa clase:
+-- estudiante → las unidades que lo cargaron (grupo o invitación de la clase; sin clase: todas sus inscripciones);
+-- docente → su unidad. Sin institución: queda con institution_id null (solo la ve la propia persona y el súper admin).
+create or replace function public.decline_recording_consent(p_session uuid, p_reason text) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_reason text := public.tc_clean_note(p_reason, 1000); v_role text; v_insts uuid[]; v_ids uuid[] := '{}'; v_id uuid; v_i uuid;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  if char_length(v_reason) < 10 then raise exception 'La justificación es obligatoria (mínimo 10 caracteres)'; end if;
+  if exists (select 1 from public.user_consents where user_id = auth.uid() and revoked_at is null and version = public.tc_consent_version()) then
+    raise exception 'Ya diste tu consentimiento';
+  end if;
+  if (select count(*) from public.consent_declines where user_id = auth.uid() and created_at > now() - interval '1 day') >= 20 then
+    raise exception 'Demasiadas respuestas hoy: probá mañana';
+  end if;
+  if p_session is not null then
+    if not exists (select 1 from public.class_sessions where id = p_session) then raise exception 'No autorizado'; end if;
+    if public.teaches_session(p_session) then v_role := 'teacher';
+    elsif public.tc_attends(p_session, auth.uid()) then v_role := 'student';
+    else raise exception 'No autorizado'; end if;
+  else
+    v_role := case when coalesce(public.my_role(), '') in ('teacher','org_admin','superadmin') then 'teacher' else 'student' end;
+  end if;
+  -- un "sí" de una versión anterior ya no vale: se cierra
+  update public.user_consents set revoked_at = now(), revoked_reason = 'superseded' where user_id = auth.uid() and revoked_at is null;
+  if v_role = 'teacher' then
+    v_insts := array_remove(array[public.my_institution()], null);
+  elsif p_session is not null then
+    v_insts := array(select distinct e.institution_id from public.student_enrollments e
+                      where e.user_id = auth.uid()
+                        and (exists (select 1 from public.group_members m join public.class_sessions s on s.group_id = m.group_id
+                                      where s.id = p_session and m.enrollment_id = e.id)
+                             or exists (select 1 from public.session_invitees i where i.session_id = p_session and i.enrollment_id = e.id)));
+  else
+    v_insts := array(select distinct e.institution_id from public.student_enrollments e where e.user_id = auth.uid());
+  end if;
+  if coalesce(array_length(v_insts, 1), 0) = 0 then v_insts := array[null::uuid]; end if;
+  foreach v_i in array v_insts loop
+    insert into public.consent_declines (user_id, institution_id, session_id, role, version, reason)
+    values (auth.uid(), v_i, p_session, v_role, public.tc_consent_version(), v_reason) returning id into v_id;
+    v_ids := v_ids || v_id;
+  end loop;
+  return json_build_object('ids', to_json(v_ids), 'recorded', false, 'institutions', (select count(*) from unnest(v_insts) x where x is not null));
+end $$;
+
+-- ADMIN (unidad elegida + lo que cuelga): estado de cada persona que cargó (estudiantes) o que pertenece (docentes/admins)
+-- y las justificaciones dirigidas a esas unidades. Nombre / email: los que cargó esa institución. El súper admin no aparece.
+create or replace function public.consent_overview(p_unit uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v text := public.tc_consent_version(); v_scope uuid[];
+begin
+  perform public.tc_assert_admin(p_unit);
+  v_scope := public.tc_unit_scope(p_unit);
+  return json_build_object('version', v,
+    'people', coalesce((select json_agg(json_build_object(
+        'kind', x.kind, 'name', x.name, 'email', x.email, 'unit_id', x.institution_id, 'unit_name', i.name, 'linked', x.user_id is not null,
+        'status', st.status, 'status_at', st.at, 'minor', coalesce(c.is_minor, false) and st.status = 'granted',
+        'guardian_consent', case when c.is_minor and st.status = 'granted' then c.guardian_consent end,
+        'declines', (select count(*) from public.consent_declines d2 where d2.user_id = x.user_id and d2.institution_id = any(v_scope)))
+        order by lower(x.name), lower(x.email))
+      from (select 'teacher'::text as kind, coalesce(nullif(btrim(p.name), ''), p.email) as name, p.email, p.institution_id, p.id as user_id
+              from public.profiles p where p.institution_id = any(v_scope) and p.role in ('teacher','org_admin')
+            union all
+            select 'student', coalesce(nullif(btrim(e.name), ''), e.email), e.email, e.institution_id, e.user_id
+              from public.student_enrollments e where e.institution_id = any(v_scope)) x
+      join public.institutions i on i.id = x.institution_id
+      left join public.user_consents c on c.user_id = x.user_id and c.revoked_at is null and c.version = v
+      left join lateral (select max(d.created_at) as at from public.consent_declines d where d.user_id = x.user_id and d.institution_id = any(v_scope)) ld on true
+      left join lateral (select max(u.revoked_at) as at from public.user_consents u where u.user_id = x.user_id and u.revoked_reason = 'user') lr on true
+      cross join lateral (select case
+          when x.user_id is null then 'pending'
+          when c.id is not null then 'granted'
+          when ld.at is not null and ld.at >= coalesce(lr.at, '-infinity'::timestamptz) then 'declined'
+          when lr.at is not null then 'revoked'
+          else 'pending' end as status) s0
+      cross join lateral (select s0.status, case s0.status when 'granted' then c.granted_at when 'declined' then ld.at when 'revoked' then lr.at end as at) st
+    ), '[]'::json),
+    'declines', coalesce((select json_agg(json_build_object(
+        'id', d.id, 'role', d.role, 'reason', d.reason, 'created_at', d.created_at, 'unit_id', d.institution_id, 'unit_name', i.name,
+        'name', case when d.role = 'student' then coalesce((select coalesce(nullif(btrim(e.name), ''), e.email) from public.student_enrollments e
+                                                            where e.user_id = d.user_id and e.institution_id = d.institution_id order by e.created_at limit 1), '')
+                     else public.tc_person_name(d.user_id) end,
+        'email', case when d.role = 'student' then (select e.email from public.student_enrollments e
+                                                     where e.user_id = d.user_id and e.institution_id = d.institution_id order by e.created_at limit 1)
+                      when public.is_superadmin_id(d.user_id) and not public.is_superadmin() then null
+                      else (select p.email from public.profiles p where p.id = d.user_id) end,
+        'session_id', d.session_id, 'class_title', coalesce(nullif(s.title, ''), g.name), 'class_starts_at', s.starts_at)
+        order by d.created_at desc)
+      from public.consent_declines d join public.institutions i on i.id = d.institution_id
+      left join public.class_sessions s on s.id = d.session_id left join public.class_groups g on g.id = s.group_id
+      where d.institution_id = any(v_scope)), '[]'::json));
+end $$;
+
+-- Cantidad de justificaciones nuevas (badge de Grupos) desde un momento dado.
+create or replace function public.consent_new_declines(p_unit uuid, p_since timestamptz) returns integer
+language plpgsql stable security definer set search_path = public as
+$$
+begin
+  perform public.tc_assert_admin(p_unit);
+  return (select count(*)::int from public.consent_declines
+           where institution_id = any(public.tc_unit_scope(p_unit)) and created_at > coalesce(p_since, '-infinity'::timestamptz));
+end $$;
+
+-- Métricas (súper admin): solo totales, sin nombres. Personas = docentes/admins de las unidades + inscripciones.
+create or replace function public.platform_consent_counts(p_unit uuid default null) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v text := public.tc_consent_version(); v_units uuid[];
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_unit is not null then v_units := public.tc_unit_scope(p_unit); end if;
+  return (with ppl as (
+      select distinct coalesce(x.user_id::text, 'e:' || x.eid::text) as k, x.user_id from (
+        select p.id as user_id, null::uuid as eid from public.profiles p
+         where p.role in ('teacher','org_admin') and p.institution_id is not null and (v_units is null or p.institution_id = any(v_units))
+        union all
+        select e.user_id, e.id from public.student_enrollments e where v_units is null or e.institution_id = any(v_units)) x),
+    st as (select case
+        when ppl.user_id is null then 'pending'
+        when exists (select 1 from public.user_consents c where c.user_id = ppl.user_id and c.revoked_at is null and c.version = v) then 'granted'
+        when (select max(d.created_at) from public.consent_declines d where d.user_id = ppl.user_id)
+             >= coalesce((select max(u.revoked_at) from public.user_consents u where u.user_id = ppl.user_id and u.revoked_reason = 'user'), '-infinity'::timestamptz)
+          then 'declined'
+        else 'pending' end as s from ppl)
+    select json_build_object('version', v, 'people', count(*), 'granted', count(*) filter (where s = 'granted'),
+                             'declined', count(*) filter (where s = 'declined'), 'pending', count(*) filter (where s = 'pending'))
+      from st);
+end $$;
+
+-- Aviso por email a los admins (api/notify/consent.js, SOLO con la service key): justificaciones de esa persona de los
+-- últimos 15 minutos que todavía no se avisaron. Las marca como avisadas. Destinatarios: org_admins de la unidad o de
+-- sus superiores (nunca el súper admin).
+create or replace function public.consent_decline_notify_payload(p_user uuid) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare r json;
+begin
+  with due as (
+    update public.consent_declines d set notified_at = now()
+     where d.user_id = p_user and d.notified_at is null and d.institution_id is not null and d.created_at > now() - interval '15 minutes'
+    returning d.*)
+  select coalesce(json_agg(json_build_object(
+      'id', due.id, 'role', due.role, 'reason', due.reason, 'created_at', due.created_at, 'unit_name', i.name,
+      'name', case when due.role = 'student' then coalesce((select coalesce(nullif(btrim(e.name), ''), e.email) from public.student_enrollments e
+                                                             where e.user_id = due.user_id and e.institution_id = due.institution_id order by e.created_at limit 1), '')
+                   else coalesce((select coalesce(nullif(btrim(p.name), ''), p.email) from public.profiles p where p.id = due.user_id), '') end,
+      'class_title', coalesce(nullif(s.title, ''), g.name), 'class_starts_at', s.starts_at, 'timezone', s.timezone,
+      'recipients', coalesce((select json_agg(distinct p.email) from public.profiles p
+                               where p.role = 'org_admin' and p.institution_id in (select c.id from public.institution_chain(due.institution_id) c)), '[]'::json))), '[]'::json)
+    into r
+    from due join public.institutions i on i.id = due.institution_id
+    left join public.class_sessions s on s.id = due.session_id left join public.class_groups g on g.id = s.group_id;
+  return r;
+end $$;
+
+do $$
+declare f text;
+begin
+  foreach f in array array['my_consent()', 'grant_recording_consent(text, boolean, text, text, boolean)', 'revoke_recording_consent()',
+    'decline_recording_consent(uuid, text)', 'consent_overview(uuid)', 'consent_new_declines(uuid, timestamptz)', 'platform_consent_counts(uuid)'] loop
+    execute format('revoke all on function public.%s from public, anon', f);
+    execute format('grant execute on function public.%s to authenticated', f);
+  end loop;
+end $$;
+revoke all on function public.consent_decline_notify_payload(uuid) from public, anon, authenticated;
+grant execute on function public.consent_decline_notify_payload(uuid) to service_role;
 
 -- Que la API de Supabase vea enseguida las funciones nuevas
 notify pgrst, 'reload schema';

@@ -13,7 +13,12 @@
 --   - Admins de la institución (y súper admin) ven las sesiones de su institución.
 --   - Grabaciones y transcripciones las escribe SOLO el servidor (service role, que salta RLS):
 --     el navegador nunca puede insertarlas ni modificarlas.
---   - Consentimientos: solo se agregan (append-only); revocar = revoke_consent().
+--   - Consentimientos (cambio 2026-10): la fuente de verdad es el consentimiento ÚNICO por persona de 001_base.sql
+--     (user_consents: una casilla = grabación + análisis con IA + almacenamiento; menores con tutor/a). La tabla
+--     "consents" de acá queda como REGISTRO DE AUDITORÍA por llamada: la escribe solo el servidor (service role) al
+--     dar acceso a la sala / empezar a grabar, copiando el user_consents vigente (columna user_consent_id; una fila
+--     por tipo: recording, ai_analysis, storage). El navegador ya no inserta acá. revoke_consent() revoca además el
+--     consentimiento de la persona (user_consents) para que deje de grabarse en todas sus clases.
 --   - Audio crudo: retention_until = 30 días; un job (service role) lo borra del storage
 --     y marca deleted_at (ver recordings_due_for_deletion()).
 --
@@ -29,10 +34,10 @@
 -- Requiere el 001_base.sql con insights de clase (class_sessions + student_insights por inscripción).
 do $$
 begin
-  if to_regclass('public.class_sessions') is null or not exists (
+  if to_regclass('public.class_sessions') is null or to_regclass('public.user_consents') is null or not exists (
        select 1 from information_schema.columns
         where table_schema = 'public' and table_name = 'student_insights' and column_name = 'enrollment_id') then
-    raise exception 'Primero ejecutá la versión actual de 001_base.sql (insights de clase)';
+    raise exception 'Primero ejecutá la versión actual de 001_base.sql (insights de clase y consentimiento único)';
   end if;
 end $$;
 
@@ -97,6 +102,8 @@ create table if not exists public.consents (
   constraint consents_guardian_fields check (given_by = 'self' or (guardian_name is not null and guardian_email is not null))
 );
 create index if not exists consents_participant_idx on public.consents (participant_id);
+-- El consentimiento único (001_base.sql) del que sale esta fila de auditoría.
+alter table public.consents add column if not exists user_consent_id uuid references public.user_consents(id) on delete set null;
 create index if not exists consents_session_idx on public.consents (session_id);
 
 -- Audio por participante (solo voz). Lo escribe el recorder (service role).
@@ -257,25 +264,29 @@ create policy sp_delete on public.session_participants for delete
 revoke update on public.session_participants from authenticated;
 grant update (display_name, role, is_minor, guardian_user_id) on public.session_participants to authenticated;
 
--- Consentimientos: cada persona (o su tutor) agrega los suyos; nadie los edita ni borra.
+-- Consentimientos (auditoría por llamada): los lee el docente, los admins y cada persona (o su tutor); los escribe solo
+-- el servidor (service role) a partir de user_consents. Nadie los edita ni borra desde la app.
 drop policy if exists cs_select on public.consents;
 create policy cs_select on public.consents for select
   using (public.owns_session(session_id) or public.admin_of_session(session_id)
          or public.is_self_or_guardian(participant_id) or given_by_user_id = auth.uid());
-drop policy if exists cs_insert on public.consents;
-create policy cs_insert on public.consents for insert
-  with check (given_by_user_id = auth.uid() and public.is_self_or_guardian(participant_id)
-              and revoked_at is null);
-revoke update, delete on public.consents from anon, authenticated;
+drop policy if exists cs_insert on public.consents;   -- (antes: el navegador agregaba los suyos; ahora solo el servidor)
+revoke insert, update, delete on public.consents from anon, authenticated;
 
 create or replace function public.revoke_consent(p_id uuid) returns void
 language plpgsql security definer set search_path = public as
 $$
-declare v_part uuid;
+declare v_part uuid; v_user uuid;
 begin
   select participant_id into v_part from public.consents where id = p_id and revoked_at is null;
   if v_part is null or not public.is_self_or_guardian(v_part) then raise exception 'No autorizado'; end if;
   update public.consents set revoked_at = now() where id = p_id;
+  -- el consentimiento único de esa persona (001_base.sql) también se revoca: deja de grabarse en todas sus clases
+  -- y se le vuelve a preguntar en la próxima.
+  select user_id into v_user from public.session_participants where id = v_part;
+  if v_user is not null then
+    update public.user_consents set revoked_at = now(), revoked_reason = 'user' where user_id = v_user and revoked_at is null;
+  end if;
   -- TODO(live): el servidor deja de grabar a este participante y borra lo que corresponda.
 end $$;
 revoke all on function public.revoke_consent(uuid) from public, anon;

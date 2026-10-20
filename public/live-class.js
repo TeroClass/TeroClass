@@ -11,13 +11,31 @@
  * Ending a class from the calendar (teacher / substitute) stores demo insights for that class
  * (generate_demo_insights) and opens them in Insights (public/insights-panel.js).
  * All user data (names, titles, chat, plan text) is escaped with esc() / formatDoc().
+ *
+ * RECORDING CONSENT (2026-10): ONE checkbox, asked the first time a person enters any class room (teachers too), stored
+ * per person in the database (001_base.sql: user_consents, my_consent / grant_recording_consent / revoke_recording_consent).
+ * A "yes" is permanent until revoked from the profile menu ("Recording of my classes") or until CONSENT_VERSION changes.
+ * A "no" asks for a required justification ("Justificá tu respuesta", decline_recording_consent → the institution's admins,
+ * emailed by /api/notify/consent when RESEND_API_KEY exists) and the person joins NOT recorded; asked again next class.
+ * Under 18: guardian name + email + confirmation in the same step. Classes are recorded AUTOMATICALLY (audio only, only
+ * people who consented); the teacher can pause ("Pause recording"), and it resumes by itself after PAUSE_MAX_S.
+ * The LiveKit token (api/class/token.js) reads the consent from the database, never from this browser.
  */
 (function () {
   'use strict';
 
   const LK_VERSION = '2.22.3';
   const LK_CDN = `https://cdn.jsdelivr.net/npm/livekit-client@${LK_VERSION}/dist/livekit-client.umd.js`;
-  const CONSENT_VERSION = '2026-10';
+  const CONSENT_VERSION = '2026-10'; // = tc_consent_version() (001_base.sql) and api/class/token.js; bump all three when the text changes
+  const CONSENT_TEXT = 'I agree that my classes on TeroClass are recorded (audio only) and that AI analyses them to create my insights and improve the classes.';
+  const CONSENT_MORE = ['Only your voice is recorded (audio), never video, and only for people who agreed.',
+    'AI creates your learning insights (recap, progress and feedback) and the teacher\'s observation report, to improve the classes.',
+    'The original audio is deleted after 30 days; the insights stay in your TeroClass record.',
+    'Each person is identified by their own microphone, never by voiceprint. No emotion detection.',
+    'You can turn it off at any time from your profile menu (Recording of my classes).',
+    'Under 18: a parent or guardian must agree.'];
+  const DECLINE_MIN = 10;          // characters of the required justification (same rule in the database)
+  const PAUSE_MAX_S = 5 * 60;      // a teacher's pause resumes by itself after 5 minutes
   const V = window.TCInsightsView; // shared insights view (loaded before this file)
   const DEMO_BANNER = V.DEMO_BANNER;
 
@@ -77,10 +95,10 @@ Cierre y ticket de salida (5 min)
   // ════════════════════════════════════════════════════════════════════════════════════════
   // PROVIDERS
   // A provider owns the connection to the media server. The UI only talks to this interface:
-  //   connect({room,name,role,consent,recorded,minor,guardianOk,localStream}) → Promise
+  //   connect({room,name,role,recorded,minor,guardianOk,localStream}) → Promise (recording starts 'on': auto-recording)
   //   disconnect(), setMicrophoneEnabled(on), setCameraEnabled(on),
   //   startScreenShare(stream), stopScreenShare(), sendChat(text), setHandRaised(up),
-  //   setRecording('on'|'paused'|'off'), attachVideo(participantId, videoEl), participants(),
+  //   setRecording('on'|'paused'|'off') (teacher: pause / resume; 'off' only at the end), attachVideo(participantId, videoEl), participants(),
   //   attachScreen(participantId, videoEl) (someone else's shared screen)
   // Events (on/off): 'participants' (list), 'speaking' (Set of ids), 'chat' ({from,name,text,ts}),
   //   'hand' ({id,up}), 'recording' (state), 'screens' ([{id,name}] of remote screen shares), 'disconnected'.
@@ -106,31 +124,32 @@ Cierre y ticket de salida (5 min)
   }
 
   // ── Demo: simulated classmates, nothing leaves the browser ──
+  // one consent covers recording + AI analysis + storage (see CONSENT_TEXT)
   const DEMO_PEOPLE = [
-    { name: 'Valentina Ruiz', consent: { recording: true, ai_analysis: true, storage: true } },
-    { name: 'Mateo Fernández', consent: { recording: true, ai_analysis: true, storage: false } },
-    { name: 'Sofía Pereira', consent: { recording: true, ai_analysis: true, storage: true } },
-    { name: 'Lucas Silva', consent: { recording: false, ai_analysis: false, storage: false }, cam: false },
-    { name: 'Martina Gómez', minor: true, guardianOk: true, consent: { recording: true, ai_analysis: true, storage: true } },
-    { name: 'Joaquín Castro', minor: true, guardianOk: false, consent: { recording: false, ai_analysis: false, storage: false }, mic: false },
+    { name: 'Valentina Ruiz', yes: true },
+    { name: 'Mateo Fernández', yes: true },
+    { name: 'Sofía Pereira', yes: true },
+    { name: 'Lucas Silva', yes: false, cam: false },
+    { name: 'Martina Gómez', minor: true, guardianOk: true, yes: true },
+    { name: 'Joaquín Castro', minor: true, guardianOk: false, yes: false, mic: false },
   ];
+  const allConsent = yes => ({ recording: !!yes, ai_analysis: !!yes, storage: !!yes });
   class DemoProvider extends LiveProvider {
     get kind() { return 'demo'; }
     async connect(o) {
       this.o = o;
-      const local = { id: 'local', isLocal: true, name: o.name, role: o.role, mic: !!o.mic, cam: !!o.cam, consent: o.consent, recorded: o.recorded, minor: o.minor, guardianOk: o.guardianOk, hand: false };
+      const local = { id: 'local', isLocal: true, name: o.name, role: o.role, mic: !!o.mic, cam: !!o.cam, consent: allConsent(o.recorded), recorded: !!o.recorded, minor: !!o.minor, guardianOk: !!o.guardianOk, hand: false };
       const others = DEMO_PEOPLE.map((p, i) => ({
-        id: 'sim-' + i, name: p.name, role: 'student', mic: p.mic !== false, cam: p.cam !== false, consent: p.consent,
-        recorded: !!p.consent.recording && (!p.minor || !!p.guardianOk), minor: !!p.minor, guardianOk: !!p.guardianOk, hand: false,
+        id: 'sim-' + i, name: p.name, role: 'student', mic: p.mic !== false, cam: p.cam !== false, consent: allConsent(p.yes),
+        recorded: !!p.yes && (!p.minor || !!p.guardianOk), minor: !!p.minor, guardianOk: !!p.guardianOk, hand: false,
       }));
-      if (o.role !== 'teacher') { others.splice(5); others.unshift({ id: 'sim-t', name: 'Prof. Laura Méndez', role: 'teacher', mic: true, cam: true, consent: { recording: true, ai_analysis: true, storage: true }, recorded: true, minor: false, guardianOk: false, hand: false }); }
+      if (o.role !== 'teacher') { others.splice(5); others.unshift({ id: 'sim-t', name: 'Prof. Laura Méndez', role: 'teacher', mic: true, cam: true, consent: allConsent(true), recorded: true, minor: false, guardianOk: false, hand: false }); }
       this._list = [local, ...others];
       this._speaker = null; this._hold = 0; this._t0 = Date.now();
       this._timers = [setInterval(() => this._tick(), 900)];
       this._later(7000, () => this.emit('chat', { from: 'sim-1', name: 'Mateo Fernández', text: o.role === 'teacher' ? 'Can you repeat the last example, please?' : 'Hi everyone!', ts: Date.now() }));
       this._later(11000, () => this._setHand('sim-2', true));
       this._later(26000, () => this._setHand('sim-2', false));
-      if (o.role !== 'teacher') this._later(3000, () => this.emit('recording', 'on'));
       if (o.role !== 'teacher') this._later(4000, () => this._startSimShare(o));
       await new Promise(r => setTimeout(r, 250)); // feels like a connection
       this.emit('participants', this._list);
@@ -193,7 +212,8 @@ Cierre y ticket de salida (5 min)
       const r = await fetch('/api/class/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (session?.access_token || '') },
-        body: JSON.stringify({ room: o.room, name: o.name, role: o.role, consent: o.consent, minor: o.minor, guardian: o.guardian }),
+        // consent is NOT sent: the server reads it from the database (my_consent) with this session
+        body: JSON.stringify({ room: o.room, name: o.name, role: o.role }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.token) throw new Error(j.error || 'Could not join the class.');
@@ -201,8 +221,13 @@ Cierre y ticket de salida (5 min)
       this.room = room;
       const E = LK.RoomEvent;
       const sync = () => this._sync();
+      this._rec = 'on'; // auto-recording: on from the start for everyone who consented
       room
-        .on(E.ParticipantConnected, sync)
+        .on(E.ParticipantConnected, () => {
+          sync();
+          // someone joined while the teacher had paused: tell them (the default for a newcomer is "on")
+          if (o.role === 'teacher' && this._rec !== 'on') this._send({ type: 'rec', state: this._rec }).catch(() => {});
+        })
         .on(E.ParticipantDisconnected, sync)
         .on(E.TrackSubscribed, (track) => {
           // remote voices must be attached to an <audio> element to be heard
@@ -287,8 +312,10 @@ Cierre y ticket de salida (5 min)
     async sendChat(text) { await this._send({ type: 'chat', text }); this.emit('chat', { from: 'local', name: this.o.name, text, ts: Date.now(), self: true }); }
     async setHandRaised(up) { (this._hands = this._hands || {}).local = up; await this._send({ type: 'hand', up }); this.emit('hand', { id: 'local', up }); this._sync(); }
     async setRecording(state) {
-      // TODO(live): POST /api/class/recording {room, state} → the recorder worker starts/pauses/stops
-      // capturing the audio tracks of participants whose metadata says recorded=true.
+      // Auto-recording: the recorder (docs/live-class.md) records from the start of the room every participant whose
+      // metadata says recorded=true; these {type:"rec"} messages only pause / resume it ('off' = class ended).
+      // TODO(live): also POST /api/class/recording {room, state} so the recorder doesn't depend on data messages.
+      this._rec = state;
       await this._send({ type: 'rec', state });
       this.emit('recording', state);
     }
@@ -427,8 +454,8 @@ Cierre y ticket de salida (5 min)
       <section class="lc-card lc-how" aria-labelledby="lc-how-h">
         <h2 id="lc-how-h">How it works</h2>
         <ol class="lc-steps">
-          <li><b>Lobby</b><span>Check your camera and microphone. Each person gives separate consent for recording, AI analysis and storage.</span></li>
-          <li><b>Class</b><span>Teach with your plan and activity timers beside the video. A red REC indicator is always visible and you can pause it.</span></li>
+          <li><b>Lobby</b><span>Check your camera and microphone. The first time, each person is asked once for consent to record their classes (audio only).</span></li>
+          <li><b>Class</b><span>Classes are recorded automatically, only for people who consented. The indicator is always visible and the teacher can pause it.</span></li>
           <li><b>Insights</b><span>After class: a recap, progress and feedback for each student, and an observation report for you.</span></li>
         </ol>
         <ul class="lc-privacy">
@@ -450,26 +477,161 @@ Cierre y ticket de salida (5 min)
       name: (currentUser && currentUser.name) || '', role: S.sessionRole || (isStaff ? 'teacher' : 'student'),
       camId: '', micId: '', stream: null, mediaError: '', mic: true, cam: true, level: 0,
       devices: { cams: [], mics: [] },
-      consent: { recording: false, ai_analysis: false, storage: false },
-      minor: false, guardian: { name: '', email: '', consent: false }, error: '',
+      // recording consent: 'loading' → 'ask' (one checkbox) or 'granted' (asked before, nothing to do)
+      cstate: 'loading', agree: false, recorded: false, minor: false, guardian: { name: '', email: '', consent: false }, error: '',
+      declineOpen: false,
     };
   }
-  const guardianOk = L => !!(L.guardian.name.trim() && EMAIL_RE.test(L.guardian.email.trim()) && L.guardian.consent);
-  const willBeRecorded = L => L.consent.recording && (!L.minor || guardianOk(L));
+  const guardianOk = G => !!(G.guardian.name.trim() && EMAIL_RE.test(G.guardian.email.trim()) && G.guardian.consent);
+  const willBeRecorded = L => L.cstate === 'granted' ? L.recorded : (L.cstate === 'ask' && L.agree && (!L.minor || guardianOk(L)) && !inViewAs());
+  const inViewAs = () => typeof viewAs !== 'undefined' && !!viewAs;
 
   function consentSummaryHtml(L) {
-    if (willBeRecorded(L)) {
-      const parts = [L.consent.ai_analysis ? '<span class="lc-chip lc-chip-ok">AI analysis ✓</span>' : '<span class="lc-chip">No AI analysis</span>',
-        L.consent.storage ? '<span class="lc-chip lc-chip-ok">Results stored ✓</span>' : '<span class="lc-chip">Results not stored</span>'];
-      return `<span class="lc-chip lc-chip-rec">● You will be recorded</span> ${parts.join(' ')}`;
-    }
-    if (L.consent.recording && L.minor) return '<span class="lc-chip lc-chip-warn">Waiting for guardian consent</span>';
+    if (L.cstate === 'loading') return '';
+    if (willBeRecorded(L)) return '<span class="lc-chip lc-chip-rec">● You will be recorded (audio only)</span>';
+    if (L.cstate === 'ask' && L.agree && L.minor) return '<span class="lc-chip lc-chip-warn">Waiting for guardian consent</span>';
     return '<span class="lc-chip lc-chip-off">You will join without being recorded</span>';
+  }
+
+  // ── recording consent (database: my_consent / grant / revoke / decline) ──────────────────────────────────
+  const CS = { data: null, uid: null, loading: null };
+  const rpcJson = async (fn, args) => {
+    const { data, error } = await sb.rpc(fn, args || {});
+    if (error) throw error;
+    let d = data; if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { /* keep */ } }
+    return d;
+  };
+  const consentOk = d => !!(d && d.granted === true && d.current_version === CONSENT_VERSION);
+  // the person's current consent; null when it can't be read (then we ask; not recorded unless they say yes)
+  async function loadConsent(force) {
+    if (inViewAs() || typeof sb === 'undefined' || !currentUser) return null;
+    const me = currentUser.id;
+    if (!force && CS.data && CS.uid === me) return CS.data;
+    if (!force && CS.loading) return CS.loading;
+    const p = (async () => {
+      try { const d = await rpcJson('my_consent'); if (currentUser?.id === me) { CS.data = d; CS.uid = me; } return d; }
+      catch (e) { console.warn('consent: could not read', e?.message || e); return null; }
+      finally { if (CS.loading === p) CS.loading = null; }
+    })();
+    CS.loading = p;
+    return p;
+  }
+  async function grantConsent(G) {
+    const d = await rpcJson('grant_recording_consent', { p_version: CONSENT_VERSION, p_minor: !!G.minor,
+      p_guardian_name: G.minor ? G.guardian.name.trim() : null, p_guardian_email: G.minor ? G.guardian.email.trim() : null,
+      p_guardian_consent: !!(G.minor && G.guardian.consent) });
+    CS.data = d; CS.uid = currentUser?.id; return d;
+  }
+  async function revokeConsent() { const d = await rpcJson('revoke_recording_consent'); CS.data = d; CS.uid = currentUser?.id; return d; }
+  async function declineConsent(sessionId, reason) {
+    const d = await rpcJson('decline_recording_consent', { p_session: sessionId || null, p_reason: reason });
+    CS.data = null; // a "no" is not stored as an answer: read it again next time
+    // email the admins (no-op on the server without RESEND_API_KEY); never blocks joining
+    try {
+      const { data: { session } = {} } = await sb.auth.getSession();
+      fetch('/api/notify/consent', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (session?.access_token || '') },
+        body: JSON.stringify({ lang: typeof uiLang !== 'undefined' && uiLang === 'en' ? 'en' : 'es' }) }).catch(() => {});
+    } catch (e) { /* ignore */ }
+    return d;
+  }
+  const dbMsg = e => { const m = String(e?.message || e || ''); return typeof dbErr === 'function' ? dbErr(m) : m; };
+
+  // one checkbox (+ under 18 → guardian), shared by the lobby and the profile dialog. P = id prefix.
+  function consentFieldsHtml(G, P, { ro = false } = {}) {
+    return `<label class="lc-check lc-consent-main"><input type="checkbox" id="${P}consent" ${G.agree ? 'checked' : ''} ${ro ? 'disabled' : ''}> <span>${esc(CONSENT_TEXT)}</span></label>
+      <details class="lc-more"><summary>More information</summary><ul>${CONSENT_MORE.map(t => `<li>${esc(t)}</li>`).join('')}</ul></details>
+      <label class="lc-check lc-minor"><input type="checkbox" id="${P}minor" ${G.minor ? 'checked' : ''} ${ro ? 'disabled' : ''}> <span><b>I'm under 18</b></span></label>
+      <div class="lc-guardian" id="${P}guardian" ${G.minor ? '' : 'hidden'}>
+        <p class="lc-guardian-note"><span aria-hidden="true">👪</span> <span>A parent or guardian must agree for participants under 18.</span></p>
+        <div class="lc-field"><label for="${P}g-name">Guardian's full name</label><input id="${P}g-name" type="text" maxlength="120" autocomplete="off" value="${esc(G.guardian.name)}" ${ro ? 'disabled' : ''}></div>
+        <div class="lc-field"><label for="${P}g-email">Guardian's email</label><input id="${P}g-email" type="email" maxlength="254" autocomplete="off" value="${esc(G.guardian.email)}" ${ro ? 'disabled' : ''}></div>
+        <label class="lc-check"><input type="checkbox" id="${P}g-consent" ${G.guardian.consent ? 'checked' : ''} ${ro ? 'disabled' : ''}> <span>I am the parent or guardian and I agree to the above.</span></label>
+      </div>`;
+  }
+  function consentBlockHtml(L) {
+    if (L.cstate === 'loading') return '<p class="lc-hint" id="lc-consent-loading">Checking your recording consent…</p>';
+    if (L.cstate === 'granted') return `<div class="lc-consent-ok" id="lc-consent-ok"><span aria-hidden="true">✓</span> <span>You already agreed: your classes are recorded (audio only). We won't ask you again.</span></div>
+      <p class="lc-fine">You can turn it off at any time from your profile menu (Recording of my classes).</p>`;
+    const ro = inViewAs();
+    return `<p class="lc-hint">We ask only once. If you don't agree, you can still join the class without being recorded.</p>
+      <div class="lc-consents" role="group" aria-labelledby="lc-consent-h">${consentFieldsHtml(L, 'lc-', { ro })}</div>
+      ${ro ? '<p class="lc-fine">View as is read-only: nothing is saved and you join without being recorded.</p>' : ''}`;
+  }
+  // the lobby asks the database whether this person already agreed (current text version)
+  async function initLobbyConsent(L) {
+    if (inViewAs()) { L.cstate = 'ask'; renderConsentBlock(); return; }
+    const d = await loadConsent(true);
+    if (S.lobby !== L) return;
+    if (consentOk(d)) { L.cstate = 'granted'; L.recorded = !!d.recorded; L.minor = !!d.minor; L.guardianOkDb = !!d.guardian_consent; }
+    else L.cstate = 'ask';
+    renderConsentBlock();
+  }
+  function renderConsentBlock() {
+    const L = S.lobby; const box = document.getElementById('lc-consent-box'); if (!L || !box) return;
+    box.innerHTML = consentBlockHtml(L);
+    syncConsentUi();
+  }
+  function declineModalHtml() {
+    // a native modal <dialog> (top layer: above the app's top bar, focus kept inside, the rest inert)
+    return `<dialog class="lc-dialog" id="lc-decline-modal" aria-labelledby="lc-decline-h" aria-describedby="lc-decline-p">
+      <div class="lc-modal">
+        <h2 id="lc-decline-h">Explain your answer</h2>
+        <p id="lc-decline-p">Tell us why you don't want your classes to be recorded. Your answer goes to your institution.</p>
+        <p class="lc-decline-ok"><span aria-hidden="true">✓</span> <span>You can still join the class without being recorded.</span></p>
+        <div class="lc-field"><label for="lc-decline-text">Your reason (required)</label>
+          <textarea id="lc-decline-text" rows="4" maxlength="1000" required aria-required="true" aria-describedby="lc-decline-min"></textarea>
+          <span class="lc-fine" id="lc-decline-min">At least 10 characters.</span></div>
+        <div class="lc-error" id="lc-decline-err" role="alert"></div>
+        <div class="lc-modal-actions">
+          <button type="button" class="lc-btn" data-lc="decline-back" id="lc-decline-back">← Back</button>
+          <button type="button" class="lc-btn lc-primary" data-lc="decline-send" id="lc-decline-send" disabled>Send and join without recording</button>
+        </div>
+      </div>
+    </dialog>`;
+  }
+  function openDecline() {
+    const L = S.lobby; const m = document.getElementById('lc-decline-modal'); if (!L || !m) return;
+    L.declineOpen = true; L.lastFocus = document.activeElement;
+    const ta = document.getElementById('lc-decline-text'); if (ta) ta.value = ''; // prefill nothing
+    const err = document.getElementById('lc-decline-err'); if (err) err.textContent = '';
+    syncDeclineUi();
+    if (!m.open) { try { m.showModal(); } catch (e) { m.setAttribute('open', ''); } }
+    m.oncancel = ev => { ev.preventDefault(); closeDecline(true); }; // Esc
+    setTimeout(() => document.getElementById('lc-decline-text')?.focus(), 20);
+  }
+  function closeDecline(focusCheckbox) {
+    const L = S.lobby; const m = document.getElementById('lc-decline-modal'); if (m && m.open) { try { m.close(); } catch (e) { m.removeAttribute('open'); } }
+    if (!L) return; L.declineOpen = false;
+    try { (focusCheckbox ? document.getElementById('lc-consent') : L.lastFocus)?.focus(); } catch (e) { /* ignore */ }
+  }
+  function syncDeclineUi() {
+    const ta = document.getElementById('lc-decline-text'); const b = document.getElementById('lc-decline-send');
+    const ok = !!ta && ta.value.trim().length >= DECLINE_MIN;
+    if (b) b.disabled = !ok;
+    document.getElementById('lc-decline-min')?.classList.toggle('ok', ok);
+  }
+  async function sendDecline(btn) {
+    const L = S.lobby; const ta = document.getElementById('lc-decline-text'); if (!L || !ta) return;
+    const text = ta.value.trim();
+    const err = document.getElementById('lc-decline-err');
+    if (text.length < DECLINE_MIN) { if (err) err.textContent = tr('Please write at least 10 characters.'); ta.focus(); return; }
+    if (btn) { btn.disabled = true; btn.textContent = tr('Sending…'); }
+    try { await declineConsent(S.sessionId, text); }
+    catch (e) {
+      const m = String(e?.message || '');
+      if (/mínimo 10|Ya diste/.test(m)) { if (err) err.textContent = dbMsg(e); if (btn) { btn.disabled = false; btn.textContent = tr('Send and join without recording'); } return; }
+      console.warn('consent decline not saved', e); toast('Your answer could not be saved. You join without being recorded.', 'err');
+    }
+    if (S.lobby !== L) return;
+    L.recorded = false; L.agree = false;
+    closeDecline();
+    const j = document.getElementById('lc-join'); if (j) { j.disabled = true; j.textContent = tr('Connecting…'); }
+    stopMeter();
+    try { await enterRoom(); } catch (e2) { console.warn(e2); setLobbyError('Could not join the class.'); if (j) { j.disabled = false; j.textContent = tr('Join class'); } }
   }
 
   function lobbyHtml() {
     const L = S.lobby;
-    const c = L.consent;
     return `<div class="lc-wrap lc-lobby">
       ${banner()}
       <button type="button" class="lc-link" data-lc="back-home">${studentBack() ? '← Back to my classes' : '← Back to live classes'}</button>
@@ -498,26 +660,14 @@ Cierre y ticket de salida (5 min)
             <label class="lc-radio"><input type="radio" name="lc-role" value="student" ${L.role === 'student' ? 'checked' : ''}> <span>Student</span></label>
           </fieldset>
           <h2 id="lc-consent-h">Recording and privacy</h2>
-          <p class="lc-hint">This class can be recorded to create learning insights. Each consent is separate and optional — you can join without any of them.</p>
-          <div class="lc-consents" role="group" aria-labelledby="lc-consent-h">
-            <label class="lc-check"><input type="checkbox" id="lc-c-recording" ${c.recording ? 'checked' : ''}> <span><b>Recording.</b> <span>I agree that my voice is recorded during this class.</span></span></label>
-            <label class="lc-check"><input type="checkbox" id="lc-c-ai" ${c.ai_analysis ? 'checked' : ''} ${c.recording ? '' : 'disabled'}> <span><b>AI analysis.</b> <span>I agree that AI transcribes and analyses my participation to create learning insights.</span></span></label>
-            <label class="lc-check"><input type="checkbox" id="lc-c-storage" ${c.storage ? 'checked' : ''} ${c.recording ? '' : 'disabled'}> <span><b>Storage.</b> <span>I agree that the results are kept in my TeroClass record. Raw audio is deleted after 30 days.</span></span></label>
-            <label class="lc-check lc-minor"><input type="checkbox" id="lc-minor" ${L.minor ? 'checked' : ''}> <span><b>I'm under 18</b></span></label>
-          </div>
-          <div class="lc-guardian" id="lc-guardian" ${L.minor ? '' : 'hidden'}>
-            <p class="lc-guardian-note"><span aria-hidden="true">👪</span> <span>A parent or guardian must give consent for participants under 18.</span></p>
-            <div class="lc-field"><label for="lc-g-name">Guardian's full name</label><input id="lc-g-name" type="text" maxlength="120" value="${esc(L.guardian.name)}"></div>
-            <div class="lc-field"><label for="lc-g-email">Guardian's email</label><input id="lc-g-email" type="email" maxlength="254" value="${esc(L.guardian.email)}"></div>
-            <label class="lc-check"><input type="checkbox" id="lc-g-consent" ${L.guardian.consent ? 'checked' : ''}> <span>I am the parent or guardian and I give the consents marked above.</span></label>
-            <p class="lc-fine">Demo: kept only in this browser tab, never sent.</p>
-          </div>
+          <div class="lc-consent-box" id="lc-consent-box">${consentBlockHtml(L)}</div>
           <div class="lc-consent-summary" id="lc-consent-summary" aria-live="polite">${consentSummaryHtml(L)}</div>
           <div class="lc-error" id="lc-lobby-err" role="alert">${L.error ? esc(tr(L.error)) : ''}</div>
           <button type="button" class="lc-btn lc-primary lc-join" data-lc="join" id="lc-join">Join class</button>
-          <p class="lc-fine">No emotion detection. Speakers are identified by their own microphone, never by voiceprint. You can stop being recorded at any time.</p>
+          <p class="lc-fine">No emotion detection. Speakers are identified by their own microphone, never by voiceprint. You can turn recording off at any time from your profile menu.</p>
         </section>
       </div>
+      ${declineModalHtml()}
     </div>`;
   }
 
@@ -611,17 +761,21 @@ Cierre y ticket de salida (5 min)
   }
   function stopMeter() { if (meter) { cancelAnimationFrame(meter.raf); try { meter.ctx.close(); } catch (e) { /* ignore */ } meter = null; } }
 
-  function afterLobbyRender() { startPreview(); }
+  function afterLobbyRender() { startPreview(); if (S.lobby && S.lobby.cstate === 'loading') initLobbyConsent(S.lobby); }
 
   function syncConsentUi() {
     const L = S.lobby; if (!L) return;
-    const ai = document.getElementById('lc-c-ai'), st = document.getElementById('lc-c-storage');
-    if (!L.consent.recording) { L.consent.ai_analysis = false; L.consent.storage = false; }
-    if (ai) { ai.disabled = !L.consent.recording; ai.checked = L.consent.ai_analysis; }
-    if (st) { st.disabled = !L.consent.recording; st.checked = L.consent.storage; }
     const g = document.getElementById('lc-guardian'); if (g) g.hidden = !L.minor;
     const sum = document.getElementById('lc-consent-summary'); if (sum) sum.innerHTML = consentSummaryHtml(L);
     const pi = document.getElementById('lc-preview-initials'); if (pi) { pi.textContent = initials(L.name || 'You'); pi.style.background = colorFor(L.name || 'you'); }
+  }
+  // under 18: name + valid email + confirmation, all required for the "yes" to count
+  function guardianError(G, P) {
+    if (!G.minor) return null;
+    if (!G.guardian.name.trim()) return { msg: "Please write the guardian's name.", focus: P + 'g-name' };
+    if (!EMAIL_RE.test(G.guardian.email.trim())) return { msg: 'Please write a valid guardian email.', focus: P + 'g-email' };
+    if (!G.guardian.consent) return { msg: 'The guardian must confirm the consent.', focus: P + 'g-consent' };
+    return null;
   }
   function setLobbyError(msg) {
     const L = S.lobby; if (L) L.error = msg;
@@ -632,12 +786,19 @@ Cierre y ticket de salida (5 min)
     const L = S.lobby;
     L.name = (document.getElementById('lc-name')?.value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
     if (!L.name) { setLobbyError('Please write your name.'); document.getElementById('lc-name')?.focus(); return; }
-    const anyConsent = L.consent.recording || L.consent.ai_analysis || L.consent.storage;
-    if (L.minor && anyConsent && !guardianOk(L)) {
-      if (!L.guardian.name.trim()) { setLobbyError("Please write the guardian's name."); document.getElementById('lc-g-name')?.focus(); return; }
-      if (!EMAIL_RE.test(L.guardian.email.trim())) { setLobbyError("Please write a valid guardian email."); document.getElementById('lc-g-email')?.focus(); return; }
-      setLobbyError('The guardian must confirm the consent.'); document.getElementById('lc-g-consent')?.focus(); return;
+    if (L.cstate === 'loading') { setLobbyError('Checking your recording consent…'); return; }
+    if (L.cstate === 'ask' && !inViewAs()) {
+      if (!L.agree) { setLobbyError(''); openDecline(); return; }   // a "no" needs a justification first
+      const gErr = guardianError(L, 'lc-');
+      if (gErr) { setLobbyError(gErr.msg); document.getElementById(gErr.focus)?.focus(); return; }
+      try {
+        const d = await grantConsent(L);
+        if (S.lobby !== L) return;
+        if (!consentOk(d)) throw new Error('Could not save your consent.');
+        L.cstate = 'granted'; L.recorded = !!d.recorded; L.guardianOkDb = !!d.guardian_consent;
+      } catch (e) { setLobbyError(dbMsg(e) || 'Could not save your consent.'); return; }
     }
+    if (inViewAs()) L.recorded = false;
     setLobbyError('');
     const btn = document.getElementById('lc-join'); if (btn) { btn.disabled = true; btn.textContent = tr('Connecting…'); }
     stopMeter();
@@ -657,12 +818,15 @@ Cierre y ticket de salida (5 min)
     const planText = (S.planning && S.planning.content) || (S.sampleKey === 'chemistry' ? SAMPLE_PLAN_ES : SAMPLE_PLAN_EN);
     const plan = parsePlanSections(planText, parseInt(S.planning?.params?.duration, 10) || 45);
     plan.sections.forEach(s => { s.elapsed = 0; });
-    const recorded = willBeRecorded(L);
+    // consent from the database (lobby): the LiveKit token reads it there too, never from this browser
+    const recorded = L.cstate === 'granted' && !!L.recorded && !inViewAs();
+    const minor = recorded && !!L.minor;
     const R = {
       kind, provider: null, role: L.role, name: L.name, stream: L.stream, screen: null,
       mic: L.mic && !!L.stream?.getAudioTracks().length, cam: L.cam && !!L.stream?.getVideoTracks().length,
-      consent: { ...L.consent }, recorded, minor: L.minor, guardianOk: guardianOk(L),
-      hand: false, rec: { state: 'off', secs: 0, everOn: false }, secs: 0, remoteScreens: [],
+      recorded, minor, guardianOk: minor && !!L.guardianOkDb,
+      // AUTO-RECORDING: on from the moment the room is live (only people who consented; audio only)
+      hand: false, rec: { state: 'on', secs: 0, resumeAt: 0 }, secs: 0, remoteScreens: [],
       chat: [], unread: 0, side: isNarrow() ? null : (L.role === 'teacher' ? 'plan' : 'chat'),
       speaking: new Set(), talk: { teacher: 0, students: 0 }, plan, running: -1, participants: [],
       // A calendar session → one room for its teacher and students. TODO(live): api/class/token.js grants
@@ -672,8 +836,7 @@ Cierre y ticket de salida (5 min)
       endOpen: false,
     };
     const connectOpts = provider => ({
-      room: R.roomName, name: R.name, role: R.role, consent: R.consent, recorded, minor: R.minor, guardianOk: R.guardianOk,
-      guardian: R.minor ? { name: L.guardian.name.trim(), email: L.guardian.email.trim(), consent: L.guardian.consent } : null,
+      room: R.roomName, name: R.name, role: R.role, recorded, minor: R.minor, guardianOk: R.guardianOk,
       localStream: R.stream, mic: R.mic, cam: R.cam, provider, title: S.sessionTitle,
     });
     let provider = createProvider(kind);
@@ -694,7 +857,7 @@ Cierre y ticket de salida (5 min)
     S.view = 'room';
     render();
     S.timers.push(setInterval(roomTick, 1000));
-    if (R.recorded === false && R.role !== 'teacher') toast('You joined without being recorded.', 'ok');
+    if (!R.recorded) toast('You joined without being recorded.', 'ok');
     // Attendance (public/attendance.js): a calendar class records who entered (students: present / late; the teacher too).
     // TODO(live): with real LiveKit, its webhook (participant_joined / left) also feeds attendance_record_external.
     if (S.sessionId && window.TCAttendance) { R.attendance = true; window.TCAttendance.roomJoin(S.sessionId); }
@@ -715,9 +878,11 @@ Cierre y ticket de salida (5 min)
       renderPeople(); updateTiles();
     });
     p.on('recording', state => {
-      const was = R.rec.state; R.rec.state = state; if (state === 'on') R.rec.everOn = true;
+      const was = R.rec.state; R.rec.state = state;
+      if (state === 'paused') { if (was !== 'paused' || !R.rec.resumeAt) R.rec.resumeAt = Date.now() + PAUSE_MAX_S * 1000; }
+      else R.rec.resumeAt = 0;
       if (S.room !== R) return;
-      if (R.role !== 'teacher' && was !== state) toast(state === 'on' ? (R.recorded ? 'The teacher started recording. You are being recorded.' : 'The teacher started recording. You are not being recorded.') : state === 'paused' ? 'Recording paused' : 'Recording stopped');
+      if (R.role !== 'teacher' && was !== state) toast(state === 'paused' ? 'The teacher paused the recording. It resumes automatically.' : state === 'on' ? 'Recording resumed' : 'Recording stopped');
       updateRoomUi();
     });
     p.on('screens', list => {
@@ -739,7 +904,7 @@ Cierre y ticket de salida (5 min)
     return `<div class="lc-room${R.side ? ' side-open' : ''}" id="lc-room">
       <div class="lc-room-top">
         <div class="lc-room-title">${demoChip()} <b data-no-i18n>${esc(S.sessionTitle)}</b> <span class="lc-chip" id="lc-provider-chip">${R.kind === 'livekit' ? 'LiveKit' : 'Simulated participants'}</span></div>
-        <div class="lc-rec" id="lc-rec" data-state="off"><span class="lc-rec-dot" aria-hidden="true"></span><span class="lc-rec-label" aria-live="polite">Not recording</span><span class="lc-rec-time" data-no-i18n id="lc-rec-time"></span></div>
+        <div class="lc-rec" id="lc-rec" data-state="${esc(R.rec.state)}" role="status"><span class="lc-rec-dot" aria-hidden="true"></span><span class="lc-rec-label" aria-live="polite">Recording — only people who gave consent</span><span class="lc-rec-time" data-no-i18n id="lc-rec-time"></span><span class="lc-rec-me" id="lc-rec-me"${R.recorded ? ' hidden' : ''}>You: not recorded</span></div>
         <div class="lc-talk" id="lc-talk" role="group" aria-label="${esc(tr('Talk time'))}">
           <span class="lc-talk-lb">Teacher</span> <b data-no-i18n id="lc-talk-t">0%</b>
           <div class="lc-talk-bar" aria-hidden="true"><span id="lc-talk-bar-t"></span></div>
@@ -785,14 +950,14 @@ Cierre y ticket de salida (5 min)
           ${S.sessionId && window.TCClassDoc ? ctl('doc', 'side', '📄', 'Document', 'data-side="doc"') : ''}
         </div>
         <div class="lc-ctl-group">
-          ${teacher ? ctl('rec', 'rec', '⏺', 'Record') + ctl('pause', 'rec-pause', '⏸', 'Pause') : ''}
+          ${teacher ? ctl('pause', 'rec-pause', '⏸', 'Pause recording') : ''}
           <button type="button" class="lc-ctl lc-end" id="lc-ctl-end" data-lc="${teacher ? 'end' : 'leave'}"><span class="lc-ctl-ic" aria-hidden="true">⏹</span><span class="lc-ctl-lb">${teacher ? 'End class' : 'Leave'}</span></button>
         </div>
       </div>
       <div class="lc-modal-bg" id="lc-end-modal" hidden>
         <div class="lc-modal" role="dialog" aria-modal="true" aria-labelledby="lc-end-h">
           <h2 id="lc-end-h">End the class for everyone?</h2>
-          <p>The call ends for all participants. If you recorded, insights are prepared next.</p>
+          <p>The call ends for all participants and the recording stops. Insights are prepared next.</p>
           <div class="lc-modal-actions">
             <button type="button" class="lc-btn" data-lc="end-cancel" id="lc-end-cancel">Cancel</button>
             <button type="button" class="lc-btn lc-danger" data-lc="end-confirm" id="lc-end-confirm">End class</button>
@@ -930,17 +1095,18 @@ Cierre y ticket de salida (5 min)
     document.getElementById('lc-ctl-hand')?.classList.toggle('on', R.hand);
     document.getElementById('lc-ctl-share')?.classList.toggle('on', !!R.screen);
     const st = R.rec.state;
-    setCtl('rec', st !== 'off', '⏺', st === 'off' ? 'Record' : 'Stop recording', false);
-    document.getElementById('lc-ctl-rec')?.classList.toggle('rec-on', st !== 'off');
     const pb = document.getElementById('lc-ctl-pause');
-    if (pb) { pb.hidden = st === 'off'; setCtl('pause', st === 'paused', st === 'paused' ? '▶' : '⏸', st === 'paused' ? 'Resume' : 'Pause', false); }
-    // REC indicator
+    if (pb) { pb.hidden = st === 'off'; setCtl('pause', st === 'paused', st === 'paused' ? '▶' : '⏸', st === 'paused' ? 'Resume' : 'Pause recording', false); pb.classList.toggle('rec-paused', st === 'paused'); }
+    // recording indicator: always visible to everyone (auto-recording)
     const rec = document.getElementById('lc-rec');
     if (rec) {
       rec.dataset.state = st;
-      const lb = rec.querySelector('.lc-rec-label'); const k = st === 'on' ? 'REC' : st === 'paused' ? 'REC paused' : 'Not recording';
+      const lb = rec.querySelector('.lc-rec-label');
+      const k = st === 'on' ? 'Recording — only people who gave consent' : st === 'paused' ? 'Recording paused — resumes automatically' : 'Not recording';
       if (lb.dataset.k !== k) { lb.dataset.k = k; lb.textContent = k; }
-      const t = document.getElementById('lc-rec-time'); if (t) t.textContent = st === 'off' && !R.rec.secs ? '' : mmss(R.rec.secs);
+      const t = document.getElementById('lc-rec-time');
+      if (t) t.textContent = st === 'paused' && R.rec.resumeAt ? mmss((R.rec.resumeAt - Date.now()) / 1000) : '';
+      const me = document.getElementById('lc-rec-me'); if (me) me.hidden = !!R.recorded || st === 'off';
     }
     // talk meter
     const tot = R.talk.teacher + R.talk.students;
@@ -965,6 +1131,12 @@ Cierre y ticket de salida (5 min)
     if (!currentUser) { teardownRoom(); S.view = 'home'; return; }
     R.secs++;
     if (R.rec.state === 'on') R.rec.secs++;
+    // a pause resumes by itself (the teacher's browser sends it to everyone)
+    if (R.rec.state === 'paused' && R.rec.resumeAt && Date.now() >= R.rec.resumeAt && R.role === 'teacher' && !R.resuming) {
+      R.resuming = true;
+      Promise.resolve(R.provider.setRecording('on')).catch(e => console.warn(e)).finally(() => { R.resuming = false; });
+      toast('Recording resumed automatically', 'ok');
+    }
     const speakers = R.participants.filter(p => R.speaking.has(p.id) && (p.isLocal ? R.mic : p.mic));
     if (speakers.some(p => p.role === 'teacher')) R.talk.teacher++;
     else if (speakers.length) R.talk.students++;
@@ -1007,19 +1179,14 @@ Cierre y ticket de salida (5 min)
     try { R.provider.stopScreenShare(); } catch (e) { /* ignore */ }
     renderGrid(); updateRoomUi();
   }
-  async function toggleRec() {
-    const R = S.room; if (R.role !== 'teacher') return;
-    const next = R.rec.state === 'off' ? 'on' : 'off';
-    await R.provider.setRecording(next);
-    const rc = R.participants.filter(p => p.recorded).length;
-    if (next === 'on') toast(`${tr('Recording started')} — ${rc}/${R.participants.length} ${tr('participants consented')}`, 'ok');
-    else toast('Recording stopped');
-    updateRoomUi();
-  }
+  // Teacher: pause for a private moment / resume. A pause resumes by itself after PAUSE_MAX_S (roomTick).
   async function togglePause() {
     const R = S.room; if (R.role !== 'teacher' || R.rec.state === 'off') return;
-    await R.provider.setRecording(R.rec.state === 'paused' ? 'on' : 'paused');
-    toast(R.rec.state === 'paused' ? 'Recording paused' : 'Recording resumed');
+    const next = R.rec.state === 'paused' ? 'on' : 'paused';
+    if (next === 'paused') R.rec.resumeAt = Date.now() + PAUSE_MAX_S * 1000;
+    await R.provider.setRecording(next);
+    R.rec.state = next; if (next === 'on') R.rec.resumeAt = 0;
+    toast(next === 'paused' ? 'Recording paused. It resumes automatically in 5 minutes.' : 'Recording resumed', 'ok');
     updateRoomUi();
   }
   function setSide(k) {
@@ -1071,7 +1238,7 @@ Cierre y ticket de salida (5 min)
   function endClass() {
     const R = S.room; if (!R) return;
     const summary = {
-      recorded: R.rec.everOn, recSecs: R.rec.secs, secs: R.secs, participants: R.participants.length,
+      recorded: R.rec.secs > 0 && R.participants.some(p => p.recorded), recSecs: R.rec.secs, secs: R.secs, participants: R.participants.length,
       recordedCount: R.participants.filter(p => p.recorded).length, talk: { ...R.talk }, role: R.role,
       plan: R.plan.sections.map(s => ({ title: s.generic ? '' : s.title, planned: s.minutes, actual: Math.round(s.elapsed / 60) })),
     };
@@ -1313,8 +1480,9 @@ Cierre y ticket de salida (5 min)
       case 'hand': if (R) { R.hand = !R.hand; await R.provider.setHandRaised(R.hand); updateRoomUi(); } break;
       case 'side': if (R) setSide(el.dataset.side); break;
       case 'side-close': if (R) { R.side = null; updateRoomUi(); } break;
-      case 'rec': if (R) toggleRec(); break;
       case 'rec-pause': if (R) togglePause(); break;
+      case 'decline-back': closeDecline(true); break;
+      case 'decline-send': sendDecline(el); break;
       case 'end': openEndModal(); break;
       case 'end-cancel': closeEndModal(); break;
       case 'end-confirm': case 'leave': endClass(); break;
@@ -1356,6 +1524,7 @@ Cierre y ticket de salida (5 min)
     const L = S.lobby;
     if (L) {
       if (L.error && /^lc-(name|g-name|g-email)$/.test(t.id)) setLobbyError('');
+      if (t.id === 'lc-decline-text') { const er = document.getElementById('lc-decline-err'); if (er) er.textContent = ''; syncDeclineUi(); return; }
       if (t.id === 'lc-name') { L.name = t.value; syncConsentUi(); }
       else if (t.id === 'lc-g-name') { L.guardian.name = t.value; syncConsentUi(); }
       else if (t.id === 'lc-g-email') { L.guardian.email = t.value; syncConsentUi(); }
@@ -1370,9 +1539,7 @@ Cierre y ticket de salida (5 min)
       if (t.id === 'lc-cam-select') { L.camId = t.value; startPreview(); return; }
       if (t.id === 'lc-mic-select') { L.micId = t.value; startPreview(); return; }
       if (t.name === 'lc-role') { L.role = t.value === 'student' ? 'student' : 'teacher'; return; }
-      if (t.id === 'lc-c-recording') L.consent.recording = t.checked;
-      if (t.id === 'lc-c-ai') L.consent.ai_analysis = t.checked;
-      if (t.id === 'lc-c-storage') L.consent.storage = t.checked;
+      if (t.id === 'lc-consent') L.agree = t.checked;
       if (t.id === 'lc-minor') L.minor = t.checked;
       if (t.id === 'lc-g-consent') L.guardian.consent = t.checked;
       if (L.error) setLobbyError('');
@@ -1389,6 +1556,15 @@ Cierre y ticket de salida (5 min)
     R.provider.sendChat(text).catch(err => { console.warn(err); toast('Message not sent.', 'err'); });
   }
   function onKey(e) {
+    if (S.lobby && S.lobby.declineOpen) {
+      if (e.key === 'Escape') { e.preventDefault(); closeDecline(true); return; }
+      if (e.key === 'Tab') {
+        const f = ['lc-decline-text', 'lc-decline-back', 'lc-decline-send'].map(id => document.getElementById(id)).filter(x => x && !x.disabled);
+        const idx = f.indexOf(document.activeElement);
+        e.preventDefault(); f[(idx + (e.shiftKey ? -1 : 1) + f.length) % f.length]?.focus();
+      }
+      return;
+    }
     if (!S.room || !S.room.endOpen) return;
     if (e.key === 'Escape') { e.preventDefault(); closeEndModal(); return; }
     if (e.key === 'Tab') {
@@ -1417,13 +1593,100 @@ Cierre y ticket de salida (5 min)
       if (typeof currentUser !== 'undefined' && !currentUser && (S.room || S.lobby)) { teardownRoom(); teardownLobby(); S.lobby = null; S.view = 'home'; }
     }, 1500);
     window.addEventListener('pagehide', () => { teardownRoom(); teardownLobby(); });
+    // profile: "Recording of my classes" (account menu) — status refreshed every time the menu opens
+    const um = document.getElementById('user-menu');
+    if (um && window.MutationObserver) new MutationObserver(() => { if (um.classList.contains('open')) refreshProfileConsent(true); }).observe(um, { attributes: true, attributeFilter: ['class'] });
+    document.getElementById('um-consent')?.addEventListener('click', openConsentSettings);
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  // PROFILE: "Recording of my classes: On / Off" in the account menu (index.html #um-consent)
+  // Off → confirmation, revoke (asked again at the next class). On → the same single checkbox (+ guardian for minors).
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  const PM = { G: null };
+  async function refreshProfileConsent(force) {
+    const b = document.getElementById('um-consent'); if (!b) return;
+    if (!currentUser) { b.style.display = 'none'; return; }
+    b.style.display = '';
+    const st = document.getElementById('um-consent-state');
+    if (inViewAs()) { b.dataset.on = '0'; b.setAttribute('aria-disabled', 'true'); if (st) st.textContent = tr('Off'); return; }
+    b.removeAttribute('aria-disabled');
+    const d = await loadConsent(!!force);
+    const on = consentOk(d);
+    b.dataset.on = on ? '1' : '0';
+    if (st) { st.textContent = tr(on ? 'On' : 'Off'); st.className = on ? 'um-on' : 'um-off'; }
+  }
+  function profileModal(html) {
+    let bg = document.getElementById('lc-pmodal');
+    if (!bg) {
+      bg = document.createElement('div'); bg.id = 'lc-pmodal'; bg.className = 'lc-modal-bg lc-fixed lc-global'; bg.hidden = true;
+      bg.addEventListener('click', onProfileClick); bg.addEventListener('change', onProfileChange); bg.addEventListener('input', onProfileChange);
+      bg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeProfileModal(); } });
+      document.body.appendChild(bg);
+    }
+    bg.innerHTML = `<div class="lc-modal" role="dialog" aria-modal="true" aria-labelledby="lc-pm-h">${html}</div>`;
+    bg.hidden = false; PM.lastFocus = document.activeElement;
+    setTimeout(() => bg.querySelector('input:not([disabled]),button.lc-btn')?.focus(), 20);
+  }
+  function closeProfileModal() {
+    const bg = document.getElementById('lc-pmodal'); if (bg) { bg.hidden = true; bg.innerHTML = ''; }
+    PM.G = null; try { PM.lastFocus?.focus(); } catch (e) { /* ignore */ }
+  }
+  async function openConsentSettings() {
+    if (typeof closeUserMenu === 'function') closeUserMenu();
+    if (inViewAs()) { if (typeof vaBlocked === 'function') vaBlocked(); return; }
+    const d = await loadConsent(true);
+    if (consentOk(d)) {
+      profileModal(`<h2 id="lc-pm-h">Turn off the recording of your classes?</h2>
+        <p>From now on your classes are not recorded and you don't get new insights from them. We'll ask you again at your next class.</p>
+        <div class="lc-error" id="lc-pm-err" role="alert"></div>
+        <div class="lc-modal-actions"><button type="button" class="lc-btn" data-pm="cancel">Cancel</button><button type="button" class="lc-btn lc-danger" data-pm="revoke" id="lc-pm-revoke">Turn off recording</button></div>`);
+    } else {
+      PM.G = { agree: false, minor: false, guardian: { name: '', email: '', consent: false } };
+      profileModal(`<h2 id="lc-pm-h">Recording of my classes</h2>
+        <p>${esc(tr(d && d.status === 'revoked' ? 'You turned it off. Your classes are not recorded.' : 'Your classes are not recorded.'))}</p>
+        <div class="lc-consents">${consentFieldsHtml(PM.G, 'lc-p-')}</div>
+        <div class="lc-error" id="lc-pm-err" role="alert"></div>
+        <div class="lc-modal-actions"><button type="button" class="lc-btn" data-pm="cancel">Cancel</button><button type="button" class="lc-btn lc-primary" data-pm="grant" id="lc-pm-grant">Turn on recording</button></div>`);
+    }
+  }
+  async function onProfileClick(e) {
+    if (e.target.id === 'lc-pmodal') { closeProfileModal(); return; }
+    const b = e.target.closest('[data-pm]'); if (!b) return;
+    const err = document.getElementById('lc-pm-err'); const setErr = m => { if (err) err.textContent = m ? tr(m) : ''; };
+    if (b.dataset.pm === 'cancel') { closeProfileModal(); return; }
+    if (b.dataset.pm === 'revoke') {
+      b.disabled = true;
+      try { await revokeConsent(); closeProfileModal(); toast("Recording turned off. We'll ask you again at your next class.", 'ok'); }
+      catch (x) { setErr(dbMsg(x)); b.disabled = false; }
+      refreshProfileConsent();
+      return;
+    }
+    if (b.dataset.pm === 'grant') {
+      const G = PM.G; if (!G) return;
+      if (!G.agree) { setErr('Check the box to turn on recording.'); document.getElementById('lc-p-consent')?.focus(); return; }
+      const ge = guardianError(G, 'lc-p-'); if (ge) { setErr(ge.msg); document.getElementById(ge.focus)?.focus(); return; }
+      b.disabled = true;
+      try { const d = await grantConsent(G); if (!consentOk(d)) throw new Error('Could not save your consent.'); closeProfileModal(); toast('Recording turned on ✓', 'ok'); }
+      catch (x) { setErr(dbMsg(x)); b.disabled = false; }
+      refreshProfileConsent();
+    }
+  }
+  function onProfileChange(e) {
+    const G = PM.G; const t = e.target; if (!G) return;
+    if (t.id === 'lc-p-consent') G.agree = t.checked;
+    if (t.id === 'lc-p-minor') { G.minor = t.checked; const g = document.getElementById('lc-p-guardian'); if (g) g.hidden = !G.minor; }
+    if (t.id === 'lc-p-g-name') G.guardian.name = t.value;
+    if (t.id === 'lc-p-g-email') G.guardian.email = t.value;
+    if (t.id === 'lc-p-g-consent') G.guardian.consent = t.checked;
+    const err = document.getElementById('lc-pm-err'); if (err && e.type === 'change') err.textContent = '';
   }
 
   // Leave any lobby/room and go back to the live-class home (used when "View as" starts or ends).
   function reset() { teardownRoom(); teardownLobby(); S.lobby = null; S.view = 'home'; }
 
   window.LiveClass = {
-    open: openLiveClass, openFromDoc, openSession, onDocShown, reset,
+    open: openLiveClass, openFromDoc, openSession, onDocShown, reset, openConsentSettings, refreshProfileConsent,
     providers: { LiveProvider, DemoProvider, LiveKitProvider }, detectProviderKind,
     parsePlanSections, pickSampleKey, SAMPLES, LK_CDN, CONSENT_VERSION,
     get state() { return S; },
@@ -1514,6 +1777,63 @@ Cierre y ticket de salida (5 min)
     'Demo: the message was not sent. In the real classroom the student sees it with their insights.': 'Demo: el mensaje no se envió. En el aula real el estudiante lo ve junto con sus insights.',
     'Reflection saved in this browser tab (demo).': 'Reflexión guardada en esta pestaña (demo).',
     'Demo insights saved for this class.': 'Se guardaron insights de demo para esta clase.', 'Open in Insights': 'Abrir en Insights',
+    // recording consent (one checkbox) + auto-recording
+    'Check your camera and microphone. The first time, each person is asked once for consent to record their classes (audio only).': 'Probá tu cámara y micrófono. La primera vez, a cada persona se le pide una sola vez el consentimiento para grabar sus clases (solo audio).',
+    'Classes are recorded automatically, only for people who consented. The indicator is always visible and the teacher can pause it.': 'Las clases se graban automáticamente, solo a quienes dieron su consentimiento. El indicador siempre está visible y el/la docente lo puede pausar.',
+    [CONSENT_TEXT]: 'Acepto que mis clases en TeroClass se graben (solo audio) y que la IA las analice para generar mis insights y mejorar las clases.',
+    'More information': 'Más información',
+    [CONSENT_MORE[0]]: 'Solo se graba tu voz (audio), nunca video, y solo de quienes aceptaron.',
+    [CONSENT_MORE[1]]: 'La IA genera tus insights de aprendizaje (resumen, progreso y devolución) y el informe de observación del/la docente, para mejorar las clases.',
+    [CONSENT_MORE[2]]: 'El audio original se borra a los 30 días; los insights quedan en tu registro de TeroClass.',
+    [CONSENT_MORE[3]]: 'Cada persona se identifica por su propio micrófono, nunca por huella de voz. Sin detección de emociones.',
+    [CONSENT_MORE[4]]: 'Lo podés desactivar cuando quieras desde el menú de tu perfil (Grabación de mis clases).',
+    [CONSENT_MORE[5]]: 'Menores de 18: tiene que aceptar su madre, padre o tutor/a.',
+    'A parent or guardian must agree for participants under 18.': 'Para menores de 18, tiene que aceptar su madre, padre o tutor/a.',
+    'I am the parent or guardian and I agree to the above.': 'Soy la madre, el padre o tutor/a y acepto lo de arriba.',
+    "We ask only once. If you don't agree, you can still join the class without being recorded.": 'Te lo preguntamos una sola vez. Si no aceptás, podés entrar igual a la clase sin que te graben.',
+    'Checking your recording consent…': 'Revisando tu consentimiento de grabación…',
+    "You already agreed: your classes are recorded (audio only). We won't ask you again.": 'Ya aceptaste: tus clases se graban (solo audio). No te lo vamos a volver a preguntar.',
+    'You can turn it off at any time from your profile menu (Recording of my classes).': 'Lo podés desactivar cuando quieras desde el menú de tu perfil (Grabación de mis clases).',
+    'View as is read-only: nothing is saved and you join without being recorded.': '"Ver como" es de solo lectura: no se guarda nada y entrás sin ser grabado/a.',
+    '● You will be recorded (audio only)': '● Te vamos a grabar (solo audio)',
+    'No emotion detection. Speakers are identified by their own microphone, never by voiceprint. You can turn recording off at any time from your profile menu.': 'Sin detección de emociones. Cada persona se identifica por su propio micrófono, nunca por huella de voz. Podés desactivar la grabación cuando quieras desde el menú de tu perfil.',
+    'Explain your answer': 'Justificá tu respuesta',
+    "Tell us why you don't want your classes to be recorded. Your answer goes to your institution.": 'Contanos por qué no querés que se graben tus clases. Tu respuesta le llega a la institución.',
+    'You can still join the class without being recorded.': 'Podés entrar igual a la clase sin que te graben.',
+    'Your reason (required)': 'Tu motivo (obligatorio)', 'At least 10 characters.': 'Mínimo 10 caracteres.', '← Back': '← Volver',
+    'Send and join without recording': 'Enviar y entrar sin grabar', 'Sending…': 'Enviando…',
+    'Please write at least 10 characters.': 'Escribí al menos 10 caracteres.',
+    'Your answer could not be saved. You join without being recorded.': 'No se pudo guardar tu respuesta. Entrás sin que te graben.',
+    'Could not save your consent.': 'No se pudo guardar tu consentimiento.',
+    'Recording — only people who gave consent': 'Grabando — solo quienes dieron su consentimiento',
+    'Recording paused — resumes automatically': 'Grabación en pausa — se reanuda sola',
+    'You: not recorded': 'A vos no te graban', 'Pause recording': 'Pausar grabación',
+    'Recording paused. It resumes automatically in 5 minutes.': 'Grabación en pausa. Se reanuda sola en 5 minutos.',
+    'Recording resumed automatically': 'La grabación se reanudó sola',
+    'The teacher paused the recording. It resumes automatically.': 'El/la docente pausó la grabación. Se reanuda sola.',
+    'The call ends for all participants and the recording stops. Insights are prepared next.': 'La llamada termina para todos y se detiene la grabación. A continuación se preparan los insights.',
+    // profile
+    'Recording of my classes': 'Grabación de mis clases', 'Recording of my classes:': 'Grabación de mis clases:', 'On': 'Activada', 'Off': 'Desactivada',
+    'Turn off the recording of your classes?': '¿Desactivar la grabación de tus clases?',
+    "From now on your classes are not recorded and you don't get new insights from them. We'll ask you again at your next class.": 'Desde ahora tus clases no se graban y no vas a recibir insights nuevos de ellas. Te lo vamos a volver a preguntar en tu próxima clase.',
+    'Turn off recording': 'Desactivar grabación', 'Turn on recording': 'Activar grabación',
+    'You turned it off. Your classes are not recorded.': 'La desactivaste. Tus clases no se graban.', 'Your classes are not recorded.': 'Tus clases no se graban.',
+    "Recording turned off. We'll ask you again at your next class.": 'Grabación desactivada. Te lo vamos a volver a preguntar en tu próxima clase.',
+    'Recording consent': 'Consentimiento de grabación',
+    'Recording turned on ✓': 'Grabación activada ✓', 'Check the box to turn on recording.': 'Marcá la casilla para activar la grabación.',
+  });
+  if (typeof DB_ERRORS !== 'undefined') DB_ERRORS.unshift(
+    [/La justificación es obligatoria \(mínimo 10 caracteres\)/, 'Please write at least 10 characters.'],
+    [/Ya diste tu consentimiento/, 'You already agreed to the recording.'],
+    [/El texto del consentimiento cambió: recargá la página/, 'The consent text changed: please reload the page.'],
+    [/Menores de 18: falta el nombre del tutor\/a/, "Please write the guardian's name."],
+    [/Menores de 18: email del tutor\/a inválido/, 'Please write a valid guardian email.'],
+    [/Menores de 18: el tutor\/a tiene que confirmar el consentimiento/, 'The guardian must confirm the consent.'],
+    [/Demasiadas respuestas hoy: probá mañana/, 'Too many answers today: try again tomorrow.']
+  );
+  if (typeof I18N_ES === 'object' && I18N_ES) Object.assign(I18N_ES, {
+    'You already agreed to the recording.': 'Ya aceptaste la grabación.', 'The consent text changed: please reload the page.': 'El texto del consentimiento cambió: recargá la página.',
+    'Too many answers today: try again tomorrow.': 'Demasiadas respuestas por hoy: probá mañana.',
   });
 
   init();

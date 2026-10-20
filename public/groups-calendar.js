@@ -2,7 +2,9 @@
  * ------------------------------------------------------------------------------------------
  *  · Institution admins: "Groups" panel (Institution group of the sidebar) for the unit chosen in the
  *    switcher and everything below it: groups (1 teacher + optional substitute), students (manual or CSV
- *    import with preview), move / remove, reassign teachers, read-only calendar of the unit.
+ *    import with preview), move / remove, reassign teachers, read-only calendar of the unit, and
+ *    "Consents" (recording consent of each person + the justifications of the ones who said no; filters, CSV;
+ *    a badge on the Groups nav counts new justifications: consent_overview / consent_new_declines).
  *  · Teachers / substitutes: "Calendar" panel (Teaching group): week view + agenda (mobile), weekly series
  *    and one-off classes (for a group or ad hoc by email), edit / cancel one class or the whole series,
  *    "Join" → the live class demo (public/live-class.js) for that session.
@@ -753,14 +755,15 @@
   // ════════════════════════════════════════════════════════════════════════════════════════════
   // GROUPS (institution admins, unit chosen in the switcher + subtree)
   // ════════════════════════════════════════════════════════════════════════════════════════════
-  const GR = { unit: null, tab: 'groups', groups: [], students: [], open: {}, members: {}, teachers: null, q: '', seq: 0, cal: [], imp: null };
+  const GR = { unit: null, tab: 'groups', groups: [], students: [], open: {}, members: {}, teachers: null, q: '', seq: 0, cal: [], imp: null,
+    cons: null, cf: { status: 'all', kind: 'all', q: '' }, badge: 0 };
   const grUnit = () => (inViewAs() ? viewAs.unitId : (typeof currentOrgId !== 'undefined' && currentOrgId) || currentUser?.orgId || null);
   const unitName = id => (typeof orgsCache !== 'undefined' && orgsCache[id]?.name) || '';
 
   function renderGroups() {
     const root = $('gc-groups-root'); if (!root) return;
     const unit = grUnit();
-    if (GR.unit !== unit) { GR.unit = unit; GR.open = {}; GR.members = {}; GR.teachers = null; GR.groups = []; GR.students = []; GR.cal = []; }
+    if (GR.unit !== unit) { GR.unit = unit; GR.open = {}; GR.members = {}; GR.teachers = null; GR.groups = []; GR.students = []; GR.cal = []; GR.cons = null; }
     if (!unit) { root.innerHTML = '<div class="gc-wrap"><div class="notice-card">Choose a unit in the switcher at the top.</div></div>'; return; }
     root.innerHTML = `<div class="gc-wrap">
       <header class="gc-head">
@@ -774,14 +777,23 @@
         </div>
       </header>
       <div class="gc-toolbar"><div class="in-seg" role="tablist" aria-label="${esc(tr('Sections'))}">
-        ${[['groups', 'Groups'], ['students', 'Students'], ['calendar', 'Calendar']].map(([k, l]) => `<button type="button" role="tab" data-gc="gtab" data-t="${k}" class="${GR.tab === k ? 'active' : ''}" aria-selected="${GR.tab === k}">${l}</button>`).join('')}
+        ${[['groups', 'Groups'], ['students', 'Students'], ['calendar', 'Calendar'], ['consents', 'Consents']].map(([k, l]) => `<button type="button" role="tab" data-gc="gtab" data-t="${k}" id="gc-tab-${k}" class="${GR.tab === k ? 'active' : ''}" aria-selected="${GR.tab === k}"><span>${l}</span>${k === 'consents' && GR.badge ? ` <span class="gc-tab-badge" data-no-i18n>${GR.badge > 99 ? '99+' : GR.badge}</span>` : ''}</button>`).join('')}
       </div>${GR.tab === 'students' ? `<input type="search" class="settings-input gc-search" id="gc-st-search" placeholder="Search by name, email or group" value="${esc(GR.q)}" autocomplete="off">` : ''}</div>
       <div id="gc-groups-body"><div class="in-loading">Loading…</div></div>
     </div>`;
     loadGroups();
+    refreshConsentBadge();
   }
   async function loadGroups() {
     const unit = GR.unit; const seq = ++GR.seq;
+    if (GR.tab === 'consents') {
+      const c = await rpc('consent_overview', { p_unit: unit });
+      if (seq !== GR.seq) return;
+      if (c.error) { errToast(c.error); GR.cons = { people: [], declines: [] }; } else GR.cons = c.data || { people: [], declines: [] };
+      markConsentsSeen(unit);
+      renderGroupsBody();
+      return;
+    }
     const [g, s] = await Promise.all([rpc('list_groups', { p_unit: unit }), rpc('list_students', { p_unit: unit })]);
     if (seq !== GR.seq) return;
     if (g.error || s.error) { errToast(g.error || s.error); GR.groups = []; GR.students = []; }
@@ -803,6 +815,7 @@
   function renderGroupsBody() {
     const body = $('gc-groups-body'); if (!body) return;
     if (GR.tab === 'students') { body.innerHTML = studentsHtml(); return; }
+    if (GR.tab === 'consents') { body.innerHTML = consentsHtml(); return; }
     if (GR.tab === 'calendar') { body.innerHTML = `<div class="gc-hint gc-ro">👁 <span>Read-only: the classes of this unit's groups for the next 4 weeks. Teachers schedule them in their Calendar.</span></div>${agendaHtml(GR.cal, { emptyText: 'No classes scheduled in the next 4 weeks.' })}`; return; }
     if (!GR.groups.length) {
       body.innerHTML = `<div class="bl-empty gc-empty-big"><div class="gs-empty-ico" aria-hidden="true">👥</div><b>No groups yet</b><p>Create a group (for example "English B1 – Tue/Thu"), assign its teacher and add students — one by one or from a CSV file.</p>
@@ -863,6 +876,96 @@
           <button type="button" class="tree-btn danger" data-gc="s-remove" data-e="${esc(s.id)}">Remove</button></td></tr>`).join('') || `<tr><td colspan="5" class="muted-cell">${esc(tr('No students match your search.'))}</td></tr>`}
       </tbody></table></div>`;
   }
+  // ── Consents (recording consent: one checkbox per person; 001_base.sql consent_overview) ──
+  const CST = { granted: ['Granted', 'ok'], declined: ['Declined', 'err'], revoked: ['Revoked', 'warn'], pending: ['Pending', ''] };
+  const seenKey = unit => 'tc-cons-seen:' + unit;
+  function markConsentsSeen(unit) {
+    try { localStorage.setItem(seenKey(unit), new Date().toISOString()); } catch (e) { /* private mode: the badge just stays */ }
+    GR.badge = 0; setNavBadge(0);
+    const t = $('gc-tab-consents')?.querySelector('.gc-tab-badge'); if (t) t.remove();
+  }
+  function setNavBadge(n) {
+    const nav = $('nav-groups'); if (!nav) return;
+    let b = nav.querySelector('.sib-badge');
+    if (n > 0) {
+      if (!b) { b = document.createElement('span'); b.className = 'sib-badge'; b.setAttribute('data-no-i18n', ''); nav.appendChild(b); }
+      b.textContent = n > 99 ? '99+' : String(n);
+      b.title = `${n} ${tr(n === 1 ? 'new justification (recording consent)' : 'new justifications (recording consent)')}`;
+    } else if (b) b.remove();
+  }
+  // new "no" justifications since the admin last opened Consents (per unit, remembered in this browser)
+  let badgeSeq = 0;
+  async function refreshConsentBadge() {
+    const nav = $('nav-groups'); if (!nav) return;
+    const u = typeof currentUser !== 'undefined' ? currentUser : null;
+    const unit = grUnit(); const seq = ++badgeSeq;
+    if (!u || !(u.isOrgAdmin || u.isSuperAdmin) || !unit || nav.style.display === 'none') { GR.badge = 0; setNavBadge(0); return; }
+    let since = null; try { since = localStorage.getItem(seenKey(unit)); } catch (e) { since = null; }
+    const r = await rpc('consent_new_declines', { p_unit: unit, p_since: since });
+    if (seq !== badgeSeq) return;
+    const n = r.error ? 0 : Number(r.data) || 0;
+    if (isActive('groups') && GR.tab === 'consents' && GR.unit === unit) { markConsentsSeen(unit); return; }
+    GR.badge = n; setNavBadge(n);
+    const tab = $('gc-tab-consents');
+    if (tab) { let t = tab.querySelector('.gc-tab-badge'); if (n > 0) { if (!t) { t = document.createElement('span'); t.className = 'gc-tab-badge'; t.setAttribute('data-no-i18n', ''); tab.append(' ', t); } t.textContent = n > 99 ? '99+' : String(n); } else if (t) t.remove(); }
+  }
+  function consFiltered() {
+    const d = GR.cons || { people: [], declines: [] }; const f = GR.cf; const q = normTxt(f.q || '').trim();
+    const people = (d.people || []).filter(p => (f.status === 'all' || p.status === f.status) && (f.kind === 'all' || p.kind === f.kind)
+      && (!q || normTxt([p.name, p.email, p.unit_name].join(' ')).includes(q)));
+    const declines = (d.declines || []).filter(x => (f.kind === 'all' || x.role === f.kind) && (f.status === 'all' || f.status === 'declined')
+      && (!q || normTxt([x.name, x.email, x.reason, x.class_title, x.unit_name].join(' ')).includes(q)));
+    return { people, declines };
+  }
+  const consDate = d => (d ? `${fDay(d)} ${fTime(d)}` : '');
+  const unitBadge = x => (x.unit_id && x.unit_id !== GR.unit && x.unit_name ? ` <span class="lvl-badge lvl-3" data-no-i18n>${esc(x.unit_name)}</span>` : '');
+  function consentsHtml() {
+    const d = GR.cons; if (!d) return '<div class="in-loading">Loading…</div>';
+    const f = GR.cf;
+    const opt = (v, l, cur) => `<option value="${v}"${cur === v ? ' selected' : ''}>${esc(tr(l))}</option>`;
+    return `<div class="gc-hint">🎙️ <span>One consent per person: recording (audio only), AI analysis and storage. Each person is asked once; a "no" is asked again at their next class. Only this institution sees the people it loaded and the justifications addressed to it.</span></div>
+      <div class="gc-cons-filters" role="group" aria-label="${esc(tr('Filters'))}">
+        <label class="gc-cons-f"><span>Status</span><select id="gc-cons-status" class="member-role">${opt('all', 'All statuses', f.status)}${opt('granted', 'Granted', f.status)}${opt('declined', 'Declined', f.status)}${opt('revoked', 'Revoked', f.status)}${opt('pending', 'Pending', f.status)}</select></label>
+        <label class="gc-cons-f"><span>Role</span><select id="gc-cons-kind" class="member-role">${opt('all', 'Everyone', f.kind)}${opt('student', 'Students', f.kind)}${opt('teacher', 'Teachers', f.kind)}</select></label>
+        <input type="search" class="settings-input gc-search" id="gc-cons-search" placeholder="Search by name, email or class" value="${esc(f.q)}" autocomplete="off" aria-label="${esc(tr('Search by name, email or class'))}">
+        <button type="button" class="tree-btn" data-gc="cons-csv">⬇ <span>Export CSV</span></button>
+      </div>
+      <div id="gc-cons-results">${consResultsHtml()}</div>`;
+  }
+  function consResultsHtml() {
+    const d = GR.cons || { people: [] }; const f = GR.cf; const { people, declines } = consFiltered();
+    const counts = { granted: 0, declined: 0, revoked: 0, pending: 0 }; (d.people || []).forEach(p => { counts[p.status] = (counts[p.status] || 0) + 1; });
+    const stats = `<div class="gc-cons-sum">${Object.keys(CST).map(k => `<button type="button" class="gc-cons-stat ${k}${f.status === k ? ' active' : ''}" data-gc="cons-stat" data-s="${k}" aria-pressed="${f.status === k}"><b data-no-i18n>${counts[k] || 0}</b><span>${CST[k][0]}</span></button>`).join('')}</div>`;
+    const rows = people.map(p => `<tr>
+        <td><span data-no-i18n>${esc(p.name || '—')}</span>${unitBadge(p)}</td><td data-no-i18n class="gc-mail">${esc(p.email || '')}</td>
+        <td><span class="gc-chip">${p.kind === 'teacher' ? 'Teacher' : 'Student'}</span></td>
+        <td><span class="gc-chip ${CST[p.status]?.[1] || ''}">${CST[p.status]?.[0] || 'Pending'}</span>${p.minor ? ` <span class="gc-chip" title="${esc(tr('Under 18: the guardian gave consent'))}">👪 <span>Under 18 · guardian ✓</span></span>` : ''}${!p.linked ? ' <span class="gc-muted">(<span>not signed in yet</span>)</span>' : ''}</td>
+        <td data-no-i18n class="gc-cons-date">${esc(consDate(p.status_at))}</td></tr>`).join('');
+    const people_ = `<h2 class="gc-cons-h"><span>People</span> <span class="gc-muted" data-no-i18n>(${people.length})</span></h2>
+      ${(d.people || []).length ? `<div class="admin-card gc-tablecard"><table class="teachers-table gc-cons-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Date</th></tr></thead><tbody>
+        ${rows || `<tr><td colspan="5" class="muted-cell">${esc(tr('No one matches these filters.'))}</td></tr>`}</tbody></table></div>` : '<div class="bl-empty">No people loaded in this unit yet.</div>'}`;
+    const decl = `<h2 class="gc-cons-h"><span>Justifications</span> <span class="gc-muted" data-no-i18n>(${declines.length})</span></h2>
+      ${declines.length ? `<ul class="gc-cons-decl">${declines.map(x => `<li class="gc-cons-item">
+          <div class="gc-cons-top"><b data-no-i18n>${esc(x.name || '—')}</b> <span class="gc-chip">${x.role === 'teacher' ? 'Teacher' : 'Student'}</span>${unitBadge(x)} <span class="gc-muted gc-cons-when" data-no-i18n>${esc(consDate(x.created_at))}</span></div>
+          ${x.class_title ? `<div class="gc-cons-class"><span>Class:</span> <span data-no-i18n>${esc(x.class_title)}${x.class_starts_at ? ' · ' + esc(fDay(x.class_starts_at)) : ''}</span></div>` : ''}
+          <blockquote class="gc-cons-reason" data-no-i18n>${esc(x.reason)}</blockquote></li>`).join('')}</ul>`
+        : `<div class="bl-empty">${esc(tr('No justifications yet.'))}</div>`}`;
+    return stats + people_ + decl;
+  }
+  function consentsCsv() {
+    const d = GR.cons; if (!d) return;
+    const es = uiLang === 'es'; const sep = es ? ';' : ',';
+    const q = v => { const x = String(v ?? ''); return /[",;\n\r]/.test(x) || /^[=+\-@\t]/.test(x) ? '"' + (/^[=+\-@\t]/.test(x) ? "'" : '') + x.replace(/"/g, '""') + '"' : x; };
+    const { people } = consFiltered();
+    const latest = p => (d.declines || []).filter(x => x.unit_id === p.unit_id && String(x.email || '').toLowerCase() === String(p.email || '').toLowerCase())[0];
+    const head = ['Name', 'Email', 'Role', 'Unit', 'Status', 'Date', 'Under 18', 'Latest justification', 'Class'].map(tr);
+    const rows = people.map(p => { const l = latest(p); return [p.name, p.email, tr(p.kind === 'teacher' ? 'Teacher' : 'Student'), p.unit_name, tr(CST[p.status]?.[0] || 'Pending'),
+      p.status_at ? new Date(p.status_at).toISOString().slice(0, 16).replace('T', ' ') : '', p.minor ? tr('Yes') : '', l ? l.reason : '', l ? (l.class_title || '') : '']; });
+    const csv = '\ufeff' + [head, ...rows].map(r => r.map(q).join(sep)).join('\r\n') + '\r\n';
+    download((es ? 'consentimientos-' : 'consents-') + String(unitName(GR.unit) || 'unidad').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) + '-' + ymd(new Date()) + '.csv', csv, 'text/csv;charset=utf-8');
+  }
+  function rerenderConsResults() { const r = $('gc-cons-results'); if (r) r.innerHTML = consResultsHtml(); }
+
   // teachers this admin can assign (teachers + admins of the same main institution that they manage)
   async function loadTeachers(unit) {
     if (GR.teachers) return GR.teachers;
@@ -1258,6 +1361,8 @@
       case 'copy-invite': { const s = findRow(id); if (s) copyText(invitationText(s)).then(ok => showToast(ok ? 'Invitation copied ✓ Paste it in an email or WhatsApp.' : 'Could not copy.', ok ? 'ok' : 'err')); break; }
       // groups
       case 'gtab': GR.tab = el.dataset.t; renderGroups(); break;
+      case 'cons-stat': GR.cf.status = GR.cf.status === el.dataset.s ? 'all' : el.dataset.s; { const sel = $('gc-cons-status'); if (sel) sel.value = GR.cf.status; } rerenderConsResults(); break;
+      case 'cons-csv': consentsCsv(); break;
       case 'new-group': groupForm(null); break;
       case 'g-edit': groupForm(id); break;
       case 'g-del': deleteGroup(id, el); break;
@@ -1290,10 +1395,13 @@
       r.readAsText(file, 'utf-8');
     }
     if (e.target?.id === 'gc-imp-create' && GR.imp) { GR.imp.create = e.target.checked; renderImportPreview(); }
+    if (e.target?.id === 'gc-cons-status') { GR.cf.status = e.target.value; rerenderConsResults(); }
+    if (e.target?.id === 'gc-cons-kind') { GR.cf.kind = e.target.value; rerenderConsResults(); }
     if (e.target?.dataset?.newfor) { const inp = $(e.target.dataset.newfor); if (inp) { inp.hidden = e.target.value !== '__new'; if (!inp.hidden) inp.focus(); } }
   });
   document.addEventListener('input', e => {
     if (e.target?.id === 'gc-st-search') { GR.q = e.target.value; const body = $('gc-groups-body'); if (body) body.innerHTML = studentsHtml(); }
+    if (e.target?.id === 'gc-cons-search') { GR.cf.q = e.target.value; rerenderConsResults(); }
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && $('modal-gc')?.classList.contains('active')) closeGc();
@@ -1301,7 +1409,13 @@
     if ((e.key === 'Enter' || e.key === ' ') && e.target?.matches?.('div[role="button"][data-gc]')) { e.preventDefault(); e.target.click(); }
   });
 
-  window.GC = { onEnter, afterEnter, render, onLang, enterStudentMode, leaveStudentMode, isStudentMode, backFromLive, modal, close: closeGc,
+  // badge on the Groups nav (admins): when the nav shows / the unit changes, and every minute
+  { const nav = $('nav-groups'); let t = 0;
+    const kick = () => { clearTimeout(t); t = setTimeout(refreshConsentBadge, 300); };
+    if (nav && window.MutationObserver) new MutationObserver(kick).observe(nav, { attributes: true, attributeFilter: ['style'] });
+    setInterval(() => { if (!document.hidden) refreshConsentBadge(); }, 60000); }
+
+  window.GC = { onEnter, afterEnter, render, onLang, refreshConsentBadge, enterStudentMode, leaveStudentMode, isStudentMode, backFromLive, modal, close: closeGc,
     vaLoadStudentPick, vaLoadStudents, vaStartStudent, _test: { csvToRows, parseCsv, joinState, startsIn, opensAt, isStaffRow, sessionIcs, googleUrl, CAL, GR, ST } };
   window.handleStudentLink = handleStudentLink;
 
@@ -1335,6 +1449,18 @@
     [/^Opens at (.+)$/, 'Abre a las $1'], [/^Opens (.+) at (.+)$/, 'Abre el $1 a las $2']
   );
   if (typeof I18N_ES === 'object' && I18N_ES) Object.assign(I18N_ES, {
+    // Consents (recording consent)
+    'Consents': 'Consentimientos', 'Status': 'Estado', 'Role': 'Rol', 'All statuses': 'Todos los estados', 'Granted': 'Aceptó', 'Declined': 'No aceptó',
+    'Revoked': 'Lo revocó', 'Pending': 'Pendiente', 'Everyone': 'Todos', 'Teachers': 'Docentes', 'Filters': 'Filtros',
+    'PH:Search by name, email or class': 'Buscar por nombre, email o clase', 'Search by name, email or class': 'Buscar por nombre, email o clase',
+    'Export CSV': 'Exportar CSV', 'People': 'Personas', 'Justifications': 'Justificaciones', 'Name': 'Nombre', 'Email': 'Email', 'Date': 'Fecha',
+    'Under 18 · guardian ✓': 'Menor de 18 · tutor/a ✓', 'Under 18: the guardian gave consent': 'Menor de 18: el tutor/a dio su consentimiento',
+    'not signed in yet': 'todavía no entró', 'No one matches these filters.': 'Nadie coincide con estos filtros.',
+    'No people loaded in this unit yet.': 'Todavía no hay personas cargadas en esta unidad.', 'No justifications yet.': 'Todavía no hay justificaciones.',
+    'Class:': 'Clase:', 'Unit': 'Unidad', 'Under 18': 'Menor de 18', 'Latest justification': 'Última justificación', 'Yes': 'Sí',
+    'One consent per person: recording (audio only), AI analysis and storage. Each person is asked once; a "no" is asked again at their next class. Only this institution sees the people it loaded and the justifications addressed to it.':
+      'Un solo consentimiento por persona: grabación (solo audio), análisis con IA y almacenamiento. A cada persona se le pregunta una vez; si dice que no, se le vuelve a preguntar en su próxima clase. Solo esta institución ve a las personas que cargó y las justificaciones dirigidas a ella.',
+    'new justification (recording consent)': 'justificación nueva (consentimiento de grabación)', 'new justifications (recording consent)': 'justificaciones nuevas (consentimiento de grabación)',
     // login (students)
     "I'm a student → get a link by email": 'Soy estudiante → recibí un link por email', 'Student access': 'Acceso para estudiantes',
     "Write the email your school or teacher loaded. We'll send you a link to sign in — no password needed.": 'Escribí el email que cargó tu institución o tu docente. Te mandamos un link para entrar, sin contraseña.',

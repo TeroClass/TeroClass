@@ -4,14 +4,20 @@
 //   (the app then stays in Demo mode and spends nothing)
 // - 200 {configured:true, url, token, identity, room, recorded} otherwise
 //
+// Recording consent is NEVER taken from the request body: it is read from the database with the caller's own
+// session (my_consent(), 001_base.sql: one checkbox per person, minors need a guardian). recorded / consent /
+// minor / guardian_consent in the token metadata come only from there; if it can't be read, the person joins
+// NOT recorded (fail closed). Guardian name/email never go into the metadata (everyone in the room can read it).
+//
 // Token format follows LiveKit's AccessToken (HS256 JWT): iss = API key, sub = identity,
 // nbf/exp, name, metadata (string) and the "video" grant.
 import { livekitEnv, signJwt, getUser, getProfile, bearer, SUPABASE_URL, SUPABASE_KEY } from '../_lib/livekit.js';
 
 export const TOKEN_TTL_S = 2 * 60 * 60;     // a class plus margin
-export const CONSENT_VERSION = '2026-10';   // bump when the consent text changes
+// = tc_consent_version() in 001_base.sql and CONSENT_VERSION in public/live-class.js (tests/api-consent.test.mjs checks
+// they match). Bump all three when the consent text changes: everyone is asked again.
+export const CONSENT_VERSION = '2026-10';
 const ROOM_RE = /^[A-Za-z0-9_-]{3,64}$/;
-const EMAIL_RE = /^[^\s@<>"']{1,64}@[^\s@<>"']{1,190}\.[A-Za-z]{2,24}$/;
 const STAFF_ROLES = new Set(['teacher', 'org_admin', 'superadmin']);
 
 // Rooms are created by a teacher as "<ownerKey>-<random>"; only that teacher gets roomAdmin.
@@ -38,6 +44,30 @@ async function liveRoomRole(token, sessionId) {
     return typeof d === 'string' ? d : null;
   } finally { clearTimeout(timer); }
 }
+// The caller's recording consent, read with THEIR session. null = could not be read (→ not recorded).
+export async function myConsent(token) {
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/my_consent`, {
+      method: 'POST', signal: controller.signal,
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    if (!r.ok) return null;
+    const t = await r.text(); let d = null; try { d = t ? JSON.parse(t) : null; } catch { return null; }
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return null; } }
+    return d && typeof d === 'object' ? d : null;
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+// Token metadata flags from the database answer only. A consent given to another text version does not count.
+export function consentFlags(c) {
+  const ok = !!(c && c.granted === true && c.current_version === CONSENT_VERSION && c.version === CONSENT_VERSION);
+  const minor = !!(c && c.minor === true);
+  const guardianOk = minor && c.guardian_consent === true;
+  const recorded = ok && c.recorded === true && (!minor || guardianOk);
+  return { recorded, minor: ok ? minor : false, guardianOk: ok ? guardianOk : false,
+    consent: { recording: recorded, ai_analysis: recorded, storage: recorded } };
+}
 export const ownerKey = userId => String(userId || '').replace(/-/g, '').slice(0, 12).toLowerCase();
 
 function cleanName(v, fallback) {
@@ -51,17 +81,8 @@ export function validateBody(body) {
   if (!ROOM_RE.test(room)) return { error: 'Invalid room name.' };
   const role = b.role === 'teacher' ? 'teacher' : b.role === 'student' ? 'student' : null;
   if (!role) return { error: 'Invalid role.' };
-  const c = b.consent && typeof b.consent === 'object' ? b.consent : {};
-  const minor = b.minor === true;
-  const g = b.guardian && typeof b.guardian === 'object' ? b.guardian : null;
-  const guardianOk = !!(g && cleanName(g.name, '') && EMAIL_RE.test(String(g.email || '').trim()) && g.consent === true);
-  if (minor && (c.recording || c.ai_analysis || c.storage) && !guardianOk) {
-    return { error: 'A guardian must consent for participants under 18.' };
-  }
-  // AI analysis and storage only make sense on top of a recording consent.
-  const recording = c.recording === true;
-  const consent = { recording, ai_analysis: recording && c.ai_analysis === true, storage: recording && c.storage === true };
-  return { room, role, minor, consent, guardianOk, name: b.name };
+  // consent / minor / guardian fields in the body are ignored on purpose (see myConsent)
+  return { room, role, name: b.name };
 }
 
 export default async function handler(req, res) {
@@ -102,14 +123,15 @@ export default async function handler(req, res) {
   const now = Math.floor(Date.now() / 1000);
   const identity = user.id;
   const name = cleanName(v.name, cleanName(user.user_metadata?.name, 'Participant'));
-  // Metadata is visible to everyone in the room: flags only, never guardian name/email.
-  const recorded = v.consent.recording && (!v.minor || v.guardianOk);
+  // Consent from the database (never from the body). Metadata is visible to everyone in the room: flags only.
+  const f = consentFlags(await myConsent(token));
+  const recorded = f.recorded;
   const metadata = JSON.stringify({
     role: v.role,
-    consent: v.consent,
+    consent: f.consent,
     recorded,
-    minor: v.minor,
-    guardian_consent: v.minor ? v.guardianOk : null,
+    minor: f.minor,
+    guardian_consent: f.minor ? f.guardianOk : null,
     consent_version: CONSENT_VERSION,
   });
   const claims = {
@@ -129,7 +151,7 @@ export default async function handler(req, res) {
       ...(isAdmin ? { roomAdmin: true } : {}),
     },
   };
-  // TODO(live): insert session_participants + consents rows (service role) for the audit trail.
+  // TODO(live): insert session_participants + consents rows (service role, copied from user_consents) for the audit trail.
   return res.status(200).json({
     configured: true,
     url: env.url,

@@ -9,24 +9,26 @@ en Vercel (más el grabador y la transcripción, para tener insights reales).
 
 | Archivo | Qué hace |
 |---|---|
-| `public/live-class.js` | Toda la pantalla: inicio (sesiones), sala de espera con cámara real y consentimientos, sala con video, plan con temporizadores, chat, REC, procesamiento e insights. Textos en español en un bloque `Object.assign(I18N_ES, …)`. |
+| `public/live-class.js` | Toda la pantalla: inicio (sesiones), sala de espera con cámara real y el consentimiento (una casilla, se pide una sola vez; "Justificá tu respuesta" si no acepta), sala con video, plan con temporizadores, chat, indicador de grabación automática con pausa del docente, procesamiento e insights; y en el menú del perfil "Grabación de mis clases". Textos en español en un bloque `Object.assign(I18N_ES, …)`. |
 | `public/live-class.css` | Estilos (sin librerías). Funciona desde 768 px de ancho. |
 | `api/class/config.js` | `GET` → `{configured: true/false}`. Nunca devuelve claves. |
-| `api/class/token.js` | `POST` → token de LiveKit (JWT HS256 firmado con `node:crypto`). Verifica la sesión de Supabase. Devuelve **501** mientras falten las variables. |
+| `api/class/token.js` | `POST` → token de LiveKit (JWT HS256 firmado con `node:crypto`). Verifica la sesión de Supabase. Lee el consentimiento de la base (`my_consent()` con la sesión del usuario; **nunca** lo que manda el navegador) y pone `recorded` / `consent` / `minor` / `guardian_consent` en la metadata. Devuelve **501** mientras falten las variables. |
+| `api/notify/consent.js` | `POST` → avisa por email a los admins cuando alguien no acepta la grabación (solo con `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY`; si no, no hace nada). |
 | `api/livekit/webhook.js` | Recibe los eventos de LiveKit y verifica la firma. Por ahora solo registra (TODOs para el grabador y Supabase). |
 | `api/_lib/livekit.js` | Firma/verificación de JWT y consulta de usuario en Supabase (compartido). |
-| `supabase/migrations/002_live_class.sql` | Tablas y permisos (RLS). **No ejecutar todavía.** |
-| `tests/e2e-live.cjs`, `tests/api-live.test.mjs`, `tests/sql/002_live_class_rls.sql` | Pruebas. |
+| `supabase/migrations/001_base.sql` | Consentimiento único por persona (`user_consents`, `consent_declines`, `my_consent`, …): ver README → *Recording consent*. |
+| `supabase/migrations/002_live_class.sql` | Tablas y permisos (RLS) de las llamadas. **No ejecutar todavía.** Su tabla `consents` es ahora un registro de auditoría por llamada que escribe solo el servidor a partir de `user_consents`. |
+| `tests/e2e-live.cjs`, `tests/e2e-consent.cjs`, `tests/api-live.test.mjs`, `tests/api-consent.test.mjs`, `tests/sql/002_live_class_rls.sql`, `tests/sql/consent.sql` | Pruebas. |
 
 ### Cómo se elige Demo o LiveKit
 
 `public/live-class.js` define una interfaz `LiveProvider` y dos implementaciones:
 
 - **`DemoProvider`** (la que se usa hoy): participantes simulados, quién habla, mano levantada,
-  chat local y REC simulado. Nada sale del navegador.
+  chat local y grabación simulada. Nada sale del navegador.
 - **`LiveKitProvider`**: se conecta con `livekit-client` (`Room`, `connect(url, token)`,
   publica cámara y micrófono, escucha participantes remotos, quién habla y mensajes de datos
-  para chat / mano / REC).
+  para chat / mano / pausa de la grabación).
 
 Al entrar a la sala, la app llama a `GET /api/class/config`:
 
@@ -61,8 +63,8 @@ Vercel → Project → Settings → Environment Variables (Production), luego **
 | `LIVEKIT_API_SECRET` | (secreto) |
 
 Comprobar: `https://<tu-app>/api/class/config` debe responder `{"configured":true}`.
-Desde ese momento las videollamadas son reales (sin grabación todavía: el botón REC solo
-avisa a los participantes).
+Desde ese momento las videollamadas son reales (sin grabación todavía: el indicador "Grabando" y la
+pausa del docente se muestran, pero hasta que exista el grabador no se guarda ningún audio).
 
 > Si el webhook responde "checksum does not match" en el primer deploy, agregar también
 > `NODEJS_HELPERS=0` (hace que Vercel entregue el cuerpo crudo para verificar la firma).
@@ -70,7 +72,7 @@ avisa a los participantes).
 ### 3. Base de datos
 
 Supabase → SQL Editor → pegar y ejecutar `supabase/migrations/002_live_class.sql`
-(después de `001_base.sql`; se puede volver a ejecutar sin riesgo).
+(después del `001_base.sql` actual, que trae el consentimiento único; se puede volver a ejecutar sin riesgo).
 
 ### 4. Grabador (Azure Container Apps) — esquema
 
@@ -79,11 +81,16 @@ Un servicio pequeño, en la misma región que el almacenamiento (Brazil South):
 1. El webhook (`track_published`) le avisa qué sala y qué pista grabar.
 2. Entra a la sala como participante oculto (token con `hidden: true`, `canSubscribe: true`,
    `canPublish: false`) usando el SDK de servidor de LiveKit.
-3. Se suscribe **solo** a las pistas de audio de quienes tienen `recorded: true` en su metadata
-   (lo pone `api/class/token.js` según los consentimientos). Nunca graba video.
-4. Respeta REC / pausa (mensajes `{type:"rec"}` del docente) y guarda solo los tramos con voz
-   (detección de actividad de voz), un archivo por micrófono, en Azure Blob Storage.
-5. Inserta una fila en `recordings` con `retention_until = now() + 30 días`.
+3. **Graba automáticamente desde que la sala está en vivo** (no hay botón REC): se suscribe **solo**
+   a las pistas de audio de quienes tienen `recorded: true` en su metadata (lo pone `api/class/token.js`
+   leyendo `my_consent()` de la base; un "no" o un consentimiento revocado o de otra versión → `false`).
+   Nunca graba video.
+4. Respeta la **pausa** del docente: mensajes de datos `{type:"rec", state:"paused"}` y `{type:"rec", state:"on"}`
+   (solo cuenta los del participante con `role: "teacher"` en la metadata). El navegador del docente reanuda solo
+   a los 5 minutos y le reenvía el estado a quien entra durante una pausa; `state:"off"` = terminó la clase.
+   Guarda solo los tramos con voz (detección de actividad de voz), un archivo por micrófono, en Azure Blob Storage.
+5. Inserta una fila en `recordings` con `retention_until = now() + 30 días` y, por participante, las filas de
+   auditoría en `consents` (002) copiadas del `user_consents` vigente (`user_consent_id`).
 
 Alternativa sin código propio: *Track Egress* de LiveKit (audio por pista directo a Azure Blob),
 con menos control sobre pausas y recorte de silencios.
@@ -123,15 +130,15 @@ Hoy, en modo Demo: **US$ 0**.
 
 ## Privacidad — checklist antes de activar
 
-- [ ] Texto de consentimiento revisado por un abogado (Uruguay: Ley 18.331; España: RGPD/LOPDGDD) y versión cargada en `CONSENT_VERSION` (`api/class/token.js` y `live-class.js`).
-- [ ] Tres consentimientos separados y opcionales: grabación, análisis con IA, almacenamiento. Sin consentimiento se participa igual, sin grabar.
-- [ ] Menores de 18: consentimiento de madre/padre/tutor (nombre y email) — la base lo exige (`consents_guard`).
-- [ ] Indicador REC rojo siempre visible para todos; el docente puede pausar y detener.
+- [ ] Texto de consentimiento revisado por un abogado (Uruguay: Ley 18.331; España: RGPD/LOPDGDD) y versión cargada en `CONSENT_VERSION` (`api/class/token.js`, `live-class.js`) y `tc_consent_version()` (`001_base.sql`).
+- [ ] Decisión del producto (2026-10): **un solo consentimiento** (grabación + análisis con IA + almacenamiento), se pide una vez y un "sí" queda guardado; un "no" pide justificación obligatoria (va a la institución) y se vuelve a preguntar en la próxima clase. Sin consentimiento se participa igual, sin grabar. Confirmar con el abogado que agrupar los tres fines en una casilla es válido.
+- [ ] Menores de 18: consentimiento de madre/padre/tutor (nombre, email y confirmación) — la base lo exige (`user_consents_minor_guardian`; en 002, `consents_guard`).
+- [ ] Indicador "● Grabando — solo quienes dieron su consentimiento" siempre visible para todos; el docente puede pausar (se reanuda sola a los 5 min).
 - [ ] Se identifica a cada persona por su micrófono, nunca por huella de voz. Sin detección de emociones.
 - [ ] Solo se graba audio con voz de quienes consintieron; nunca video.
 - [ ] Audio original borrado a los 30 días (tarea diaria activa y probada).
 - [ ] Datos en la región (LiveKit con región fijada si el plan lo permite; Azure en Brazil South).
-- [ ] Revocar consentimiento (`revoke_consent`) detiene la grabación de esa persona.
+- [ ] Revocar desde el perfil (`revoke_recording_consent`, o `revoke_consent` en 002) detiene la grabación de esa persona (hoy: desde la próxima clase; el grabador tiene que reaccionar también dentro de la sala).
 - [ ] Insights del docente privados (solo docente y admins de su institución); cada estudiante ve solo los suyos y el mensaje del docente cuando lo publica (ya aplicado en 001_base.sql).
 - [ ] Acceso del tutor/a a los insights publicados del menor (hoy no existe: definirlo antes de grabar).
 - [ ] Contrato de encargado de tratamiento con LiveKit y Microsoft.
@@ -140,7 +147,8 @@ Hoy, en modo Demo: **US$ 0**.
 
 ```bash
 NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-live.cjs        # navegador, modo demo (+ camino LiveKit)
-node --no-warnings --test tests/api-live.test.mjs                     # token / config / webhook
+NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-consent.cjs     # consentimiento, justificación, perfil, admin
+node --no-warnings --test tests/api-live.test.mjs tests/api-consent.test.mjs   # token (consentimiento desde la base) / config / webhook / aviso
 psql -v ON_ERROR_STOP=1 -f stub.sql -f supabase/migrations/001_base.sql \
      -f supabase/migrations/002_live_class.sql -f tests/sql/002_live_class_rls.sql   # RLS en Postgres 16 local
 ```

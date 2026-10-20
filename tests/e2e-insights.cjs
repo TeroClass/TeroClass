@@ -216,6 +216,7 @@ function generateAs(user, s) {
     await page.waitForSelector('.gc-nextcard [data-gc="join"]');
     await page.click('.gc-nextcard [data-gc="join"]');
     await page.waitForSelector('#lc-join');
+    await page.check('#lc-consent'); // first class room: the single recording consent (asked once)
     await page.click('#lc-join');
     await page.waitForSelector('#lc-room');
     await page.click('#lc-ctl-end'); await page.click('#lc-end-confirm');

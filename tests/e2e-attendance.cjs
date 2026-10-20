@@ -119,6 +119,7 @@ function seed({ history = false } = {}) {
     await S.page.click('.gs-enter .gc-join');
     await S.page.waitForSelector('#panel-live.active #lc-name');
     await S.page.fill('#lc-name', 'Ana Pérez');
+    await S.page.check('#lc-consent'); // first class room: the single recording consent (asked once)
     await S.page.click('#lc-join');
     await S.page.waitForSelector('#lc-room');
     await S.page.waitForFunction(() => window.TCAttendance.room.sid);

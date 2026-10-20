@@ -22,17 +22,17 @@ AI-powered didactic planning platform for teachers.
 | `AZURE_OPENAI_DEPLOYMENT` | `gpt-4o` |
 | `AZURE_OPENAI_API_VERSION` | `2024-12-01-preview` |
 | `SUPABASE_SERVICE_ROLE_KEY` | (secret) Supabase → Project Settings → API Keys → `service_role` (or a new `sb_secret_…` key). Server only: turns on AI token limits and usage recording. Without it the app works without token limits and Platform shows a warning. |
-| `RESEND_API_KEY` | (secret, **optional**) Turns on class invitation / update / cancellation emails with the event attached ([resend.com](https://resend.com)). Without it nothing is sent and the app offers "Copy invitation link". |
+| `RESEND_API_KEY` | (secret, **optional**) Turns on class invitation / update / cancellation emails with the event attached ([resend.com](https://resend.com)), and the email to the institution admins when someone does not agree to be recorded (that one also needs `SUPABASE_SERVICE_ROLE_KEY`, to read the admins' emails on the server). Without it nothing is sent: the app offers "Copy invitation link" and the justifications are only in Groups → Consents. |
 | `NOTIFY_FROM` | (optional) Sender of those emails, e.g. `TeroClass <clases@teroclass.com>` (the domain must be verified in Resend). Default `TeroClass <no-reply@teroclass.com>`. |
 | `APP_URL` | (optional) Public https origin used in links inside calendar events, e.g. `https://teroclass.com`. Default: the request's host. |
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with the class document
-and attendance (`class_docs`, `class_doc_updates`, `class_doc_versions`, `class_doc_presence`, `session_attendance`, their
-functions and the Realtime policies on `realtime.messages`): run it again** (it upgrades the previous version in place and
-keeps all data; tested from git c198c60 and d063eb0 with data, then twice). `002_live_class.sql` is still **not** needed
-(see *Class insights*); it still applies after the new `001`.
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with the recording
+consent (`user_consents`, `consent_declines` and their functions, see *Recording consent*): run it again** (it upgrades the
+previous version in place and keeps all data; tested from git 9993462 — and c198c60, d063eb0 — with data, then twice).
+`002_live_class.sql` is still **not** needed; it changed too (its per-call `consents` table is now an audit log written only by
+the server from `user_consents`) and it still applies after the new `001` (it now requires it).
 
 ### Platform owner (super admin)
 
@@ -236,10 +236,9 @@ and offers *Copy invitation link*.
 
 **View as → Student** (super admin): pick a unit, then a group, optionally a student — the student dashboard, read-only.
 
-**Minors and consent.** Many students are under 18. Nothing is recorded today, so there is no consent flow yet.
-`institutions.consent_managed_by_institution` (default false) is reserved for institutions that collect parental consent
-themselves. **TODO before activating recording:** ask the parent/guardian's consent (the live-class lobby already has the
-UI) or rely on that flag, and document it in the privacy policy.
+**Minors and consent.** Many students are under 18: their "yes" to recording counts only with a parent/guardian's name,
+email and confirmation (see *Recording consent*). `institutions.consent_managed_by_institution` (default false) stays reserved
+for institutions that collect parental consent themselves (not used yet).
 
 **Limitations.** A CSV import creates only future classes (past dates in the file are skipped); a CSV never replaces a
 group's current teacher (only fills an empty or pending one); one imported schedule per group (one start time for all its
@@ -330,22 +329,72 @@ teacher-only private note for the teacher guide was not built.
 joins by another channel is absent unless the teacher corrects it); minutes are counted with a one-minute heartbeat; one-off
 classes appear in the class detail but not in a group report; the late threshold has no screen yet (SQL / RPC only).
 
+## Recording consent (Consentimiento de grabación)
+
+**One checkbox, asked once.** The first time a person enters any class room (students **and teachers**: the teacher's voice is
+needed for the observation report) the lobby shows a single checkbox: *"Acepto que mis clases en TeroClass se graben (solo audio)
+y que la IA las analice para generar mis insights y mejorar las clases."* It covers recording + AI analysis + storage (original
+audio deleted after 30 days) and has a short *Más información* note. A **yes** is stored per person in the database and is
+permanent: the next classes don't ask again while it is valid and the text version matches. When the text changes, bump
+`CONSENT_VERSION` in `public/live-class.js`, `api/class/token.js` **and** `tc_consent_version()` in `001_base.sql` (a test checks
+they match): everyone is asked again.
+- **Under 18** ("Soy menor de 18 años", same step): guardian's name + email + the guardian's checkbox are required for the yes to
+  count (also enforced by the table).
+- **No** → a pop-up **"Justificá tu respuesta"** (required, at least 10 characters, neutral wording, and "Podés entrar igual a la
+  clase sin que te graben" always visible). After sending, the person joins **not recorded**. A no is not stored as an answer: they
+  are asked again at their next class (nothing prefilled). The justification goes to the admins of that person's institution —
+  students: the unit(s) that loaded them for the class being entered; teachers: their unit — and they get an email when
+  `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY` exist (`api/notify/consent.js`; otherwise nothing is sent).
+- **Revoke** — account menu → *Grabación de mis clases: Activada / Desactivada*. Turning it off asks for confirmation and sets
+  `revoked_at`; the person is asked again at the next class, and can turn it back on from the same menu (same checkbox; guardian
+  fields for minors).
+- **Admins** — Institution → *Groups* → **Consentimientos** (unit chosen in the switcher and below): each person's status
+  (accepted + date, did not accept + date, revoked + date, pending — also "not signed in yet"), the minor flag ("Menor de 18 ·
+  tutor/a ✓", never the guardian's name or email), the justifications with date and class, filters (status, role, search),
+  **CSV export** (`;` in Spanish). A red badge on *Groups* counts the justifications that arrived since the admin last opened the
+  tab (remembered per browser). *View as* shows it read-only.
+- **Métricas** (super admin): a *Recording consent* tile with totals only (accepted / did not accept / pending), no names.
+- **Server-side truth:** `api/class/token.js` ignores any consent sent by the browser; it reads `my_consent()` with the user's own
+  session and puts `recorded`, `consent`, `minor`, `guardian_consent` in the LiveKit metadata from there (never guardian data). If it
+  can't be read, the person joins not recorded.
+
+**Database (`001_base.sql`).** `user_consents` (user, version, granted_at, revoked_at + reason, minor + guardian name/email/consent;
+one active row per person) and `consent_declines` (user, institution, class, role, version, text, notified_at). RLS: each person
+reads only their own rows; justifications also by the admins of that unit's subtree (and the super admin); nobody writes directly.
+Functions: `my_consent`, `grant_recording_consent`, `revoke_recording_consent`, `decline_recording_consent`, `consent_overview`
+(admin), `consent_new_declines` (badge), `platform_consent_counts` (super admin, totals), `consent_decline_notify_payload`
+(service role only: the admins' emails never reach the browser). Privacy: an institution sees only the people it loaded (names
+and emails as it loaded them) and the justifications addressed to it; classmates and teachers see nothing; the owner never appears.
+**Reconciliation with `002_live_class.sql`:** its `consents` table (per call and participant) stays as an audit log: the server
+(service role) copies the current `user_consents` row into it when a call is recorded (`consents.user_consent_id`); the browser can
+no longer insert there, and `revoke_consent()` there also revokes the person's `user_consents`.
+
+**Limitations (recording consent).** The recorder itself doesn't exist yet (classes are "recorded" only in the UI: indicator,
+badges, pause); revoking while already inside a room takes effect from the next class; a pause resumes after 5 minutes counted in
+the teacher's browser; the "new" badge is remembered per browser (another device shows the same justifications as new); the
+email goes to the admins of the unit and the units above it (not the super admin); a student loaded by two institutions has one
+consent, and each institution sees its status but only its own justifications; a guardian has no account or access of their own.
+
 ## Tests
 
-`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Metrics), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile), `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room), `tests/e2e-insights.cjs` (class insights per role, demo generation, reflection, publish a message, student privacy, admin subtree, View as, mobile, Métricas), `tests/e2e-classdoc.cjs` (two browsers editing the same class document through a simulated Realtime broadcast, lock, paste a class without answers, admin read-only, live room tab, polling fallback, history/restore, export, mobile) and `tests/e2e-attendance.cjs` (join → present for the teacher, corrections, admin group report + CSV, student summary, mobile) run the app in a headless browser
+`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Metrics), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile), `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room), `tests/e2e-insights.cjs` (class insights per role, demo generation, reflection, publish a message, student privacy, admin subtree, View as, mobile, Métricas), `tests/e2e-classdoc.cjs` (two browsers editing the same class document through a simulated Realtime broadcast, lock, paste a class without answers, admin read-only, live room tab, polling fallback, history/restore, export, mobile) `tests/e2e-attendance.cjs` (join → present for the teacher, corrections, admin group report + CSV, student summary, mobile) and `tests/e2e-consent.cjs` (one checkbox asked once, decline + required justification → admin Consentimientos + badge + CSV, profile revoke / turn on, minor + guardian, auto-recording + pause, View as, Métricas, mobile; `SHOTS=<dir>` saves `cons-*.png`) run the app in a headless browser
 against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/<file>`).
 
 `tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage, insights, students & calendar privacy, and the upgrade path from the previous `001`) on a local
 Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql`, `class_insights.sql`,
 `classdoc_attendance.sql` (class document access matrix, lock, versions/restore, Realtime policies; attendance privacy, late
-rule, overrides, report), the upgrades from git fabb1c7, c198c60 and d063eb0 with data, and `002_live_class.sql` + its RLS
-suite after the current `001`).
+rule, overrides, report), `consent.sql` (recording consent: privacy, grant / revoke / version, minors, justifications visibility,
+admin overview, Métricas, notification payload), the upgrades from git fabb1c7, c198c60, d063eb0 and 9993462 with data, and
+`002_live_class.sql` + its RLS suite after the current `001`).
 CSV parser unit tests: `node --no-warnings --test tests/unit-*.test.mjs`.
-API: `node --no-warnings --test tests/api-*.test.mjs` (billing, live class, AI metadata, calendar feed + notifications).
+API: `node --no-warnings --test tests/api-*.test.mjs` (billing, live class, recording consent in the token + admin emails, AI metadata, calendar feed + notifications).
 
 ## Live class (Aula en vivo)
 
-In-app video classroom, currently in **Demo mode** (simulated participants, sample insights, no cost). Ending a class opened from the
+In-app video classroom, currently in **Demo mode** (simulated participants, sample insights, no cost). Classes are **recorded
+automatically** (audio only, only people who consented — see *Recording consent*): an indicator "● Grabando — solo quienes dieron
+su consentimiento" is always visible and the teacher can *Pausar grabación / Reanudar* (a pause resumes by itself after 5 minutes);
+there is no REC button any more. Ending a class opened from the
 Calendar (teacher / substitute) stores demo insights for that class (see *Class insights*). A class opened from the Calendar has a
 *Documento* side tab (the class document) and records attendance (see *Attendance*). The insights renderers are shared:
 `public/insights-view.js` / `.css` (live-class demo + Insights panels), panels in `public/insights-panel.js`.

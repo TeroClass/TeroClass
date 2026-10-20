@@ -94,12 +94,15 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.click('#lc-lobby-cam');
   });
 
-  await step('Consentimiento: IA/almacenamiento dependen de grabación; menor exige tutor', async () => {
-    if (!(await page.isDisabled('#lc-c-ai'))) throw new Error('IA habilitado sin grabación');
+  await step('Consentimiento (primera vez): UNA sola casilla; menor exige tutor', async () => {
+    await page.waitForSelector('#lc-consent');
+    if (await page.$('#lc-c-recording, #lc-c-ai, #lc-c-storage')) throw new Error('siguen las 3 casillas viejas');
+    if ((await page.$$('#lc-consent-box input[type=checkbox]')).length !== 3) throw new Error('consentimiento + menor + tutor');
+    if (!/recorded \(audio only\) and that AI analyses them/.test(await text('.lc-consent-main'))) throw new Error('texto: ' + await text('.lc-consent-main'));
     if (!/without being recorded/.test(await text('#lc-consent-summary'))) throw new Error('resumen inicial');
-    await page.check('#lc-c-recording');
-    if (await page.isDisabled('#lc-c-ai')) throw new Error('IA sigue deshabilitado');
-    await page.check('#lc-c-ai'); await page.check('#lc-c-storage');
+    await page.click('.lc-more summary');
+    if (!/deleted after 30 days/.test(await text('.lc-more'))) throw new Error('más información');
+    await page.check('#lc-consent');
     if (!/You will be recorded/.test(await text('#lc-consent-summary'))) throw new Error('no avisa que graba');
     await page.check('#lc-minor');
     await page.waitForSelector('#lc-guardian', { state: 'visible' });
@@ -115,9 +118,8 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     if (!/must confirm/.test(await text('#lc-lobby-err'))) throw new Error('sin error de confirmación');
     await page.check('#lc-g-consent');
     if (!/You will be recorded/.test(await text('#lc-consent-summary'))) throw new Error('con tutor debería grabar');
-    await page.uncheck('#lc-c-recording');
-    if (await page.isChecked('#lc-c-ai')) throw new Error('IA quedó marcado sin grabación');
-    await page.check('#lc-c-recording'); await page.check('#lc-c-ai');
+    await page.uncheck('#lc-minor'); // the full minor path is in tests/e2e-consent.cjs; Ana joins as an adult
+    if (M.consent.calls.grant.length) throw new Error('guardó el consentimiento antes de entrar');
     await page.fill('#lc-name', '');
     await page.click('#lc-join');
     if (!/write your name/.test(await text('#lc-lobby-err'))) throw new Error('nombre vacío aceptado');
@@ -125,16 +127,19 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
   });
   await shot('2-lobby');
 
-  await step('Entrar: sala con cámara local + participantes simulados y badges de consentimiento', async () => {
+  await step('Entrar: el "sí" se guarda en la base; sala con cámara local + participantes simulados y badges de consentimiento', async () => {
     await page.click('#lc-join');
     await page.waitForSelector('#lc-room');
+    if (M.consent.calls.grant.length !== 1 || M.consent.calls.grant[0].minor) throw new Error('consentimiento: ' + JSON.stringify(M.consent.calls.grant));
     if (net.config < 1) throw new Error('no consultó /api/class/config');
     if (net.livekitCdn || net.token) throw new Error('cargó LiveKit sin estar configurado');
     const tiles = await page.$$('.lc-tile[data-pid]'); if (tiles.length < 6 || tiles.length > 9) throw new Error('tiles: ' + tiles.length);
     await page.waitForFunction(() => { const v = document.getElementById('lc-local-video'); return v && v.srcObject && v.srcObject.getVideoTracks()[0].readyState === 'live'; });
-    const localBadge = await text('.lc-tile[data-pid="local"] .lc-tile-top'); if (!/Recorded/.test(localBadge) || !/Guardian/.test(localBadge)) throw new Error('badge local: ' + localBadge);
+    const localBadge = await text('.lc-tile[data-pid="local"] .lc-tile-top'); if (!/Recorded/.test(localBadge)) throw new Error('badge local: ' + localBadge);
     if (!(await page.$('.lc-tile[data-pid^="sim-"] .lc-badge.off'))) throw new Error('falta participante "Not recorded"');
-    if (!/Not recording/.test(await text('#lc-rec'))) throw new Error('REC inicial');
+    if (await page.$eval('#lc-rec', e => e.dataset.state) !== 'on') throw new Error('la grabación no arranca sola');
+    if (!/Recording — only people who gave consent/.test(await text('#lc-rec'))) throw new Error('indicador: ' + await text('#lc-rec'));
+    if (await page.isVisible('#lc-rec-me')) throw new Error('"no te graban" visible para alguien que aceptó');
     if (!/Simulated participants/.test(await text('#lc-provider-chip'))) throw new Error('proveedor');
     if (await page.evaluate(() => LiveClass.state.room.kind) !== 'demo') throw new Error('no es demo');
     const tracks = await page.evaluate(() => LiveClass.state.room.stream.getTracks().length); if (tracks !== 2) throw new Error('tracks ' + tracks);
@@ -197,24 +202,25 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     } else console.log('   (getDisplayMedia no disponible en headless: se mostró el aviso)');
   });
 
-  await step('REC: encender → contador; pausar congela; reanudar; detener', async () => {
-    await page.click('#lc-ctl-rec');
+  await step('Grabación automática: sin botón REC; el docente pausa (cuenta regresiva), reanuda, y la pausa se reanuda sola', async () => {
+    if (await page.$('#lc-ctl-rec')) throw new Error('sigue el botón REC');
     await page.waitForSelector('#lc-rec[data-state="on"]');
-    if (!(await page.isVisible('#lc-ctl-pause'))) throw new Error('falta pausa');
-    if (!/REC/.test(await text('#lc-rec .lc-rec-label'))) throw new Error('etiqueta REC');
-    await page.waitForFunction(() => document.getElementById('lc-rec-time').textContent >= '00:02', null, { timeout: 5000 });
+    if (await text('#lc-ctl-pause .lc-ctl-lb') !== 'Pause recording') throw new Error('etiqueta pausar');
     await page.click('#lc-ctl-pause');
     await page.waitForSelector('#lc-rec[data-state="paused"]');
-    const t1 = await text('#lc-rec-time'); await sleep(1600); const t2 = await text('#lc-rec-time');
-    if (t1 !== t2) throw new Error('el contador sigue en pausa ' + t1 + ' ' + t2);
+    if (!/Recording paused — resumes automatically/.test(await text('#lc-rec'))) throw new Error('indicador en pausa: ' + await text('#lc-rec'));
+    await page.waitForFunction(() => /^0[45]:\d\d$/.test(document.getElementById('lc-rec-time').textContent), null, { timeout: 4000 });
+    const t1 = await text('#lc-rec-time'); await sleep(2100); const t2 = await text('#lc-rec-time');
+    if (t1 === t2) throw new Error('la cuenta regresiva no corre ' + t1);
     if (await text('#lc-ctl-pause .lc-ctl-lb') !== 'Resume') throw new Error('etiqueta reanudar');
     await page.click('#lc-ctl-pause');
     await page.waitForSelector('#lc-rec[data-state="on"]');
-    await page.click('#lc-ctl-rec');
-    await page.waitForSelector('#lc-rec[data-state="off"]');
-    if (await page.isVisible('#lc-ctl-pause')) throw new Error('pausa visible con REC apagado');
-    await page.click('#lc-ctl-rec'); // keep recording for the processing summary
-    await page.waitForSelector('#lc-rec[data-state="on"]');
+    // a pause that is not resumed by hand comes back by itself
+    await page.click('#lc-ctl-pause');
+    await page.waitForSelector('#lc-rec[data-state="paused"]');
+    await page.evaluate(() => { LiveClass.state.room.rec.resumeAt = Date.now() - 1; });
+    await page.waitForSelector('#lc-rec[data-state="on"]', { timeout: 4000 });
+    await page.waitForFunction(() => /resumed automatically/.test(document.getElementById('toast').textContent), null, { timeout: 3000 });
   });
 
   await step('Plan de clase con temporizador por actividad', async () => {
@@ -293,25 +299,28 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
   });
   await shot('6-teacher-insights');
 
-  await step('Desde una clase guardada: "▶ Start live class" → lobby con su planificación', async () => {
+  await step('Desde una clase guardada: "▶ Start live class" → lobby con su planificación; el consentimiento NO se vuelve a pedir', async () => {
     await page.click('#nav-home');
     await page.click('.class-card');
     await page.waitForSelector('#btn-live-class');
     await page.click('#btn-live-class');
     await page.waitForSelector('#panel-live.active .lc-lobby');
+    await page.waitForSelector('#lc-consent-ok');
+    if (await page.$('#lc-consent')) throw new Error('volvió a pedir el consentimiento');
     if (!(await text('.lc-lobby .lc-sub')).includes('Reacciones químicas 3°B <script>')) throw new Error('título');
     if (await page.evaluate(() => LiveClass.state.sampleKey) !== 'chemistry') throw new Error('materia → muestra de química');
   });
 
-  await step('Estudiante sin consentimiento: entra "no grabado"; REC del docente visible; plan parseado y escapado', async () => {
+  await step('Como estudiante: indicador de grabación visible, sin control de pausa; plan parseado y escapado', async () => {
     await page.check('input[name="lc-role"][value="student"]');
-    if (!/without being recorded/.test(await text('#lc-consent-summary'))) throw new Error('resumen');
+    if (!/You will be recorded/.test(await text('#lc-consent-summary'))) throw new Error('resumen');
     await page.click('#lc-join');
     await page.waitForSelector('#lc-room');
-    if (await page.$('#lc-ctl-rec')) throw new Error('el estudiante ve el botón REC');
-    if (!/Not recorded/.test(await text('.lc-tile[data-pid="local"] .lc-tile-top'))) throw new Error('badge no grabado');
+    if (await page.$('#lc-ctl-rec, #lc-ctl-pause')) throw new Error('el estudiante ve controles de grabación');
+    if (!/Recorded/.test(await text('.lc-tile[data-pid="local"] .lc-tile-top'))) throw new Error('badge grabado');
     if (!/Leave/.test(await text('#lc-ctl-end'))) throw new Error('botón salir');
-    await page.waitForSelector('#lc-rec[data-state="on"]', { timeout: 6000 });
+    await page.waitForSelector('#lc-rec[data-state="on"]', { timeout: 1000 });
+    if (!/only people who gave consent/.test(await text('#lc-rec'))) throw new Error('indicador estudiante');
     // the (simulated) teacher shares a slide: students see it as a large tile with a live video track
     await page.waitForSelector('.lc-share-tile.remote[data-pid="screen-sim-t"] video', { timeout: 8000 });
     await page.waitForFunction(() => { const v = document.querySelector('.lc-share-tile.remote video'); return v && v.srcObject && v.srcObject.getVideoTracks()[0]?.readyState === 'live'; });
@@ -348,7 +357,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.evaluate(() => { navigator.mediaDevices.getUserMedia = window.__gum; });
   });
 
-  await step('Accesibilidad: controles son botones/inputs enfocables; teclado activa REC', async () => {
+  await step('Accesibilidad: controles son botones/inputs enfocables; teclado pausa y reanuda la grabación', async () => {
     await page.click('[data-lc="back-home"]');
     await page.click('#lc-start-btn');
     await page.click('#lc-join');
@@ -357,10 +366,10 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     if (bad.length) throw new Error('no enfocables: ' + bad.join(' | '));
     const noName = await page.$$eval('#lc-root button', els => els.filter(e => e.offsetParent && !(e.innerText.trim() || e.getAttribute('aria-label'))).map(e => e.id || e.className));
     if (noName.length) throw new Error('botones sin nombre: ' + noName);
-    await page.focus('#lc-ctl-rec'); await page.keyboard.press('Enter');
+    await page.focus('#lc-ctl-pause'); await page.keyboard.press('Enter');
+    await page.waitForSelector('#lc-rec[data-state="paused"]');
+    await page.focus('#lc-ctl-pause'); await page.keyboard.press('Space');
     await page.waitForSelector('#lc-rec[data-state="on"]');
-    await page.focus('#lc-ctl-rec'); await page.keyboard.press('Space');
-    await page.waitForSelector('#lc-rec[data-state="off"]');
   });
 
   await step('Responsive a 768px: sin scroll horizontal en sala, inicio, lobby e insights', async () => {
@@ -404,10 +413,15 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     if (!/Aula en vivo/.test(await text('#lc-root h1'))) throw new Error('h1');
     if (!/Datos de demostración/.test(await text('.lc-banner'))) throw new Error('banner');
     await check('inicio');
+    // Ana revoked her consent (from another device): the lobby asks again
+    M.db.user_consents.filter(c => !c.revoked_at).forEach(c => { c.revoked_at = new Date().toISOString(); c.revoked_reason = 'user'; });
     await page.click('[data-lc="join-upcoming"][data-i="1"]');
     await page.waitForSelector('.lc-lobby');
     if (!/Entrar a la clase/.test(await text('#lc-join'))) throw new Error('botón entrar');
-    await page.check('#lc-c-recording'); await page.check('#lc-minor');
+    await page.waitForSelector('#lc-consent');
+    if (!/Acepto que mis clases en TeroClass se graben \(solo audio\)/.test(await text('.lc-consent-main'))) throw new Error('texto ES: ' + await text('.lc-consent-main'));
+    await page.click('.lc-more summary');
+    await page.check('#lc-consent'); await page.check('#lc-minor');
     await check('lobby');
     await page.click('#lc-join');
     await page.waitForFunction(() => /tutor/.test(document.getElementById('lc-lobby-err').textContent));
@@ -415,8 +429,12 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.click('#lc-join');
     await page.waitForSelector('#lc-room');
     { const ml = await text('#lc-ctl-mic .lc-ctl-lb'); if (ml !== 'Silenciar') throw new Error('control mic: ' + ml); }
-    await page.click('#lc-ctl-rec');
-    await page.waitForFunction(() => document.querySelector('#lc-ctl-rec .lc-ctl-lb').textContent === 'Detener grabación');
+    if (!/Grabando — solo quienes dieron su consentimiento/.test(await text('#lc-rec'))) throw new Error('indicador ES: ' + await text('#lc-rec'));
+    { const pl = await text('#lc-ctl-pause .lc-ctl-lb'); if (pl !== 'Pausar grabación') throw new Error('pausar ES: ' + pl); }
+    await page.click('#lc-ctl-pause');
+    await page.waitForFunction(() => document.querySelector('#lc-ctl-pause .lc-ctl-lb').textContent === 'Reanudar');
+    if (!/Grabación en pausa — se reanuda sola/.test(await text('#lc-rec'))) throw new Error('pausa ES');
+    await page.click('#lc-ctl-pause');
     await page.click('#lc-ctl-plan'); await check('sala (plan)');
     await page.click('#lc-ctl-people'); await check('sala (personas)');
     await page.click('#lc-ctl-chat'); await check('sala (chat)');
@@ -472,13 +490,14 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await p2.click('#nav-live');
     await p2.click('#lc-start-btn');
     await p2.waitForSelector('.lc-lobby');
-    await p2.check('#lc-c-recording');
+    await p2.waitForSelector('#lc-consent-ok'); // Ana already agreed (database): not asked again
     await p2.click('#lc-join');
     await p2.waitForSelector('#lc-room', { timeout: 30000 });
     if (!seen.cdn.includes('livekit-client@2.22.3/dist/livekit-client.umd.js')) throw new Error('CDN: ' + seen.cdn);
     if (!seen.token || !/^Bearer tok-/.test(seen.token.auth || '')) throw new Error('token sin sesión');
     const b = seen.token.body;
-    if (b.role !== 'teacher' || b.consent.recording !== true || !/^[a-z0-9]{12}-[A-Za-z0-9]+$/.test(b.room)) throw new Error('cuerpo del token: ' + JSON.stringify(b));
+    // consent is never sent by the browser: the server reads it from the database (api/class/token.js → my_consent)
+    if (b.role !== 'teacher' || 'consent' in b || 'guardian' in b || 'minor' in b || !/^[a-z0-9]{12}-[A-Za-z0-9]+$/.test(b.room)) throw new Error('cuerpo del token: ' + JSON.stringify(b));
     if (await p2.evaluate(() => LiveClass.state.room.kind) !== 'demo') throw new Error('no volvió a la demo');
     if (errs2.length) throw new Error(errs2.join(' | '));
     console.log('   (SDK: ' + (process.env.LK_UMD ? 'livekit-client real' : 'stub') + ')');

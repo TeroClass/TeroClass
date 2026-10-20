@@ -18,6 +18,9 @@
 # Class document + attendance (classdoc_attendance.sql: access matrix, lock, versions/restore, Realtime policies, attendance
 # privacy, late rule, overrides, report) run with the other suites, after the c198c60 upgrade, and after an upgrade from git
 # d063eb0 (class insights, before the class document) with data (+ the current 001 twice; the data must survive).
+# Recording consent (consent.sql: one checkbox per person, grant/revoke/version, minors + guardian, declines visibility,
+# admin overview, Métricas totals, notification payload) runs with the other suites and after an upgrade from git 9993462
+# (before the consent) with data (+ the current 001 twice; the data must survive; then 002 still applies).
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -27,7 +30,7 @@ trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null' EXIT
 $PSQL -d $DB -f tests/sql/supabase-stub.sql >/dev/null 2>&1
 for i in 1 2; do $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; done
 fail=0
-for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance; do
+for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance consent; do
   out=$($PSQL -d $DB -f tests/sql/$t.sql 2>&1)
   echo "$out" | grep -E '\*\*FAIL\*\*' || true
   sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
@@ -147,5 +150,28 @@ if git cat-file -e d063eb0:supabase/migrations/001_base.sql 2>/dev/null; then
       [[ "$sum" =~ \|\ +0$ ]] || fail=1
     else echo "upgrade: **FAIL** could not upgrade from d063eb0"; fail=1; fi
   else echo "upgrade: **FAIL** could not load d063eb0 + data"; fail=1; fi
+fi
+# Upgrade from 9993462 (class document + attendance, before the recording consent) with data, then the current 001 twice
+if git cat-file -e 9993462:supabase/migrations/001_base.sql 2>/dev/null; then
+  UP5=${DB}_up5
+  $PSQL -d postgres -c "create database $UP5" >/dev/null
+  trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up2" >/dev/null; $PSQL -d postgres -c "drop database if exists $LV" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up3" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up4" >/dev/null; $PSQL -d postgres -c "drop database if exists $UP5" >/dev/null' EXIT
+  $PSQL -d $UP5 -f tests/sql/supabase-stub.sql >/dev/null 2>&1
+  DATA="select (select count(*) from public.class_groups)||'/'||(select count(*) from public.student_enrollments)||'/'||(select count(*) from public.group_members)||'/'||(select count(*) from public.class_sessions)||'/'||(select count(*) from public.profiles)||'/'||(select count(*) from public.teacher_insights)||'/'||(select count(*) from public.student_insights)||'/'||(select count(*) from public.class_docs)||'/'||(select count(*) from public.class_doc_versions)||'/'||(select count(*) from public.session_attendance)"
+  if git show 9993462:supabase/migrations/001_base.sql | $PSQL -d $UP5 >/dev/null 2>&1 \
+     && git show 9993462:tests/sql/students.sql | $PSQL -d $UP5 >/dev/null 2>&1 && git show 9993462:tests/sql/class_insights.sql | $PSQL -d $UP5 >/dev/null 2>&1 \
+     && git show 9993462:tests/sql/classdoc_attendance.sql | $PSQL -d $UP5 >/dev/null 2>&1; then
+    before=$($PSQL -At -d $UP5 -c "$DATA")
+    if $PSQL -d $UP5 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP5 -f supabase/migrations/001_base.sql >/dev/null 2>&1 \
+       && $PSQL -d $UP5 -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
+      after=$($PSQL -At -d $UP5 -c "$DATA")
+      if [[ "$before" == "$after" && "$before" != *"/0/0/0" ]]; then echo "upgrade (9993462 + data → current 001 ×2 → 002): data kept ($after)"; else echo "upgrade: **FAIL** 9993462 before=$before after=$after"; fail=1; fi
+      out=$($PSQL -d $UP5 -f tests/sql/consent.sql 2>&1)
+      echo "$out" | grep -E '\*\*FAIL\*\*' || true
+      sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
+      echo "upgrade (9993462 → current ×2) + consent: passed | failed = $sum"
+      [[ "$sum" =~ \|\ +0$ ]] || fail=1
+    else echo "upgrade: **FAIL** could not upgrade from 9993462"; fail=1; fi
+  else echo "upgrade: **FAIL** could not load 9993462 + data"; fail=1; fi
 fi
 exit $fail

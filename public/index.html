@@ -589,6 +589,10 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 .va-persp label{display:flex;align-items:center;gap:6px;cursor:pointer}
 .va-hint{font-size:11px;color:var(--ink-muted);margin-top:4px}
 .va-gen-note{padding:6px 14px;background:#fff7ed;border-top:1px solid #fed7aa;font-size:11px;color:#9a3412}
+.um-consent{width:100%;padding:8px;border:1.5px solid var(--border);border-radius:8px;background:var(--white);font-size:12px;font-weight:500;color:var(--ink);cursor:pointer;font-family:'Inter',sans-serif;text-align:left;margin-bottom:6px;line-height:1.4}
+.um-consent:hover{border-color:var(--brand-primary,#7c5cbf)}
+.um-consent[aria-disabled="true"]{opacity:.6;cursor:not-allowed}
+.um-consent .um-on{color:#1f6b3a}.um-consent .um-off{color:#b42318}
 .va-menu-btn{width:100%;padding:8px;border:1.5px solid var(--border);border-radius:8px;background:var(--white);font-size:12px;font-weight:600;color:#9a3412;cursor:pointer;font-family:'Inter',sans-serif;text-align:left;margin-bottom:6px}
 .va-menu-btn:hover{border-color:#c2410c}
 
@@ -759,6 +763,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
           <div class="user-menu-sep"></div>
           <button class="va-menu-btn" id="um-viewas" type="button" style="display:none" onclick="openViewAs()">👁 View as…</button>
           <button class="va-menu-btn" id="um-viewas-exit" type="button" style="display:none" onclick="exitViewAs()">✕ Exit View as</button>
+          <button class="um-consent" id="um-consent" type="button" style="display:none" title="Recording of my classes"><span aria-hidden="true">🎙️</span> <span>Recording of my classes:</span> <b id="um-consent-state">…</b></button>
           <button class="user-menu-btn" onclick="handleLogout()">↪ Sign out</button>
         </div>
       </div>
@@ -4175,7 +4180,8 @@ function vaBlocked(){if(!viewAs)return false;showToast(VA_RO,'err');return true;
     'list_groups','list_students','list_group_members','unit_calendar','session_people','student_view', // groups + calendar: reads only
     'list_insight_sessions','get_session_insights','my_insights','my_insight', // class insights: reads only
     'classdoc_open','classdoc_pull','classdoc_versions','classdoc_version','group_sessions', // class document: reads only (the owner is read-only there anyway)
-    'session_attendance','attendance_report']); // attendance: reads only
+    'session_attendance','attendance_report', // attendance: reads only
+    'consent_overview','consent_new_declines']); // recording consent (Groups → Consents): reads only
 
   const roResult=()=>({data:null,error:{message:VA_RO,code:'viewas'},status:403,statusText:'View as',count:null});
   const roChain=()=>{const r=roResult();let p;p=new Proxy(function(){},{get(_,k){
@@ -4521,11 +4527,12 @@ async function renderInsights(){
   inFilters();
   const unit=inUnit();const key=[IN.days,unit||'',IN.excl].join('|');const seq=++IN.seq;
   if(!IN.data||IN.key!==key)box.innerHTML='<div class="in-loading">Loading…</div>';
-  const [res,st]=await Promise.all([sb.rpc('platform_insights',{p_days:IN.days,p_unit:unit,p_exclude_self:IN.excl}),IN.status===undefined?loadBillingStatus():Promise.resolve(IN.status)]);
+  const [res,st,cons]=await Promise.all([sb.rpc('platform_insights',{p_days:IN.days,p_unit:unit,p_exclude_self:IN.excl}),IN.status===undefined?loadBillingStatus():Promise.resolve(IN.status),
+    sb.rpc('platform_consent_counts',{p_unit:unit}).then(r=>r.error?null:blJson(r.data),()=>null)]); // recording consent: totals only
   if(seq!==IN.seq||!currentUser||!isActivePanel('metrics'))return;
   IN.status=st;
   if(res.error){box.innerHTML=`<div class="admin-card in-empty">${esc(dbErr(res.error.message))}</div>`;return;}
-  IN.data=blJson(res.data);IN.key=key;
+  IN.data=blJson(res.data);IN.key=key;IN.consent=cons||null;
   renderInsightsHtml();
 }
 function inTile(label,value,sub,id){return `<div class="metric-card"${id?` id="${id}"`:''}><div class="metric-label">${label}</div><div class="metric-value" data-no-i18n>${value}</div>${sub?`<div class="metric-sub">${sub}</div>`:''}</div>`;}
@@ -4574,7 +4581,8 @@ function renderInsightsHtml(){
   const bars=(c.bars||[]).map(b=>{const m=METHODOLOGIES.find(x=>x.key===b.key);const label=m?m.label:customLabel(b.key);return {label,value:b.avg,shown:String(b.avg),noI18n:!m,title:label+' · '+trText('average of')+' '+b.count};});
   const content=`<div class="in-section" id="in-content"><div class="in-section-title">Content <span>Based on the classes generated in the period</span></div>
     <div class="in-tiles">${inTile('Institutions with a playbook',`${fmtInt(c.playbook_institutions)} / ${fmtInt(c.institutions)}`,'Units with at least one playbook','in-t-playbook')}
-      ${d.students?inTile('Loaded students',fmtInt(d.students.total),'Totals only: no names or emails.','in-t-students')+inTile('Signed in with their link',fmtInt(d.students.linked),`<span>Loaded students</span> <span data-no-i18n>${pct(d.students.linked,d.students.total)}</span>`,'in-t-linked')+inTile('Had classes in the period',fmtInt(d.students.active),`<span>Groups · classes held</span> <span data-no-i18n>${fmtInt(d.students.groups)} · ${fmtInt(d.students.sessions)}</span>`,'in-t-active-students')+inTile('Classes with insights',fmtInt(d.students.insight_sessions||0),'Teacher report generated (demo included)','in-t-insight-sessions'):''}</div>
+      ${d.students?inTile('Loaded students',fmtInt(d.students.total),'Totals only: no names or emails.','in-t-students')+inTile('Signed in with their link',fmtInt(d.students.linked),`<span>Loaded students</span> <span data-no-i18n>${pct(d.students.linked,d.students.total)}</span>`,'in-t-linked')+inTile('Had classes in the period',fmtInt(d.students.active),`<span>Groups · classes held</span> <span data-no-i18n>${fmtInt(d.students.groups)} · ${fmtInt(d.students.sessions)}</span>`,'in-t-active-students')+inTile('Classes with insights',fmtInt(d.students.insight_sessions||0),'Teacher report generated (demo included)','in-t-insight-sessions'):''}
+      ${IN.consent?inTile('Recording consent',`${fmtInt(IN.consent.granted)} / ${fmtInt(IN.consent.people)}`,`<span>Granted</span> <b data-no-i18n>${fmtInt(IN.consent.granted)}</b> · <span>Declined</span> <b data-no-i18n>${fmtInt(IN.consent.declined)}</b> · <span>Pending</span> <b data-no-i18n>${fmtInt(IN.consent.pending)}</b>`,'in-t-consent'):''}</div>
     <div class="in-grid">
       <div class="admin-card"><div class="admin-card-title">Top subjects <span>Top 10</span></div>${inBars((c.subjects||[]).map(r=>({label:r.name,value:r.count,noI18n:true})))}</div>
       <div class="admin-card"><div class="admin-card-title">Teaching languages</div>${inBars((c.languages||[]).map(r=>({label:r.name,value:r.count})))}</div>

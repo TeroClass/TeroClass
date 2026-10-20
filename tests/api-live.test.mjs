@@ -14,7 +14,9 @@ const USER = { id: '1a2b3c4d-5e6f-4a1b-9c8d-000000000001', email: 'profe@tec.com
 const ENV = { LIVEKIT_URL: 'wss://teroclass-br.livekit.cloud', LIVEKIT_API_KEY: 'APIdemoKey123', LIVEKIT_API_SECRET: 'super-secret-value-for-tests-0123456789' };
 
 function setEnv(on) { for (const [k, v] of Object.entries(ENV)) { if (on) process.env[k] = v; else delete process.env[k]; } }
-function mockFetch({ user = USER, role = 'teacher', liveRole = null, liveFail = false } = {}) {
+// my_consent (001_base.sql): the token reads the caller's consent from the database (never from the body)
+const GRANTED = { current_version: '2026-10', status: 'granted', granted: true, recorded: true, version: '2026-10', minor: false, guardian_consent: null };
+function mockFetch({ user = USER, role = 'teacher', liveRole = null, liveFail = false, consent = GRANTED } = {}) {
   const calls = [];
   globalThis.fetch = async (url, opts) => {
     calls.push({ url: String(url), opts });
@@ -22,6 +24,7 @@ function mockFetch({ user = USER, role = 'teacher', liveRole = null, liveFail = 
     const ok = user && auth === 'Bearer good-token';
     if (String(url).endsWith('/auth/v1/user')) return new Response(JSON.stringify(ok ? user : { msg: 'bad jwt' }), { status: ok ? 200 : 401 });
     if (String(url).endsWith('/rest/v1/rpc/live_room_role')) return liveFail ? new Response('{}', { status: 500 }) : new Response(JSON.stringify(ok ? liveRole : null), { status: ok ? 200 : 401 });
+    if (String(url).endsWith('/rest/v1/rpc/my_consent')) return new Response(JSON.stringify(ok ? consent : { message: 'JWT' }), { status: ok ? 200 : 401 });
     if (String(url).includes('/rest/v1/profiles')) return new Response(JSON.stringify(ok ? [{ role, institution_id: null }] : []), { status: 200 });
     return new Response('{}', { status: 404 });
   };
@@ -90,7 +93,7 @@ test('token: valid LiveKit JWT (structure, claims, HS256 signature)', async () =
   assert.deepEqual(c.video, { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, roomAdmin: true });
   const md = JSON.parse(c.metadata);
   assert.equal(md.role, 'teacher');
-  assert.deepEqual(md.consent, { recording: true, ai_analysis: true, storage: false });
+  assert.deepEqual(md.consent, { recording: true, ai_analysis: true, storage: true }); // one consent covers all three (from the DB)
   assert.equal(md.recorded, true);
   assert.ok(!r.body.token.includes(ENV.LIVEKIT_API_SECRET));
   // also verifies with the shared verifier
@@ -109,23 +112,15 @@ test('token: students get no roomAdmin; teachers only in their own rooms', async
   setEnv(false);
 });
 
-test('token: input validation, minor needs guardian, metadata has no guardian PII', async () => {
+test('token: input validation; consent fields of the body are ignored (see tests/api-consent.test.mjs)', async () => {
   setEnv(true); mockFetch();
   const call = async body => { const r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body }, r); return r; };
   assert.equal((await call({ ...goodBody, room: 'bad room!' })).statusCode, 400);
   assert.equal((await call({ ...goodBody, role: 'admin' })).statusCode, 400);
-  assert.equal((await call({ ...goodBody, role: 'student', minor: true })).statusCode, 400);
-  const ok = await call({ ...goodBody, role: 'student', minor: true, guardian: { name: 'Laura Pérez', email: 'laura@example.com', consent: true } });
-  assert.equal(ok.statusCode, 200);
-  const c = b64d(ok.body.token.split('.')[1]);
-  assert.ok(!c.metadata.includes('laura'));
-  assert.equal(JSON.parse(c.metadata).guardian_consent, true);
-  // minor without any consent may join, not recorded
-  const nr = await call({ ...goodBody, role: 'student', minor: true, consent: {} });
-  assert.equal(nr.statusCode, 200); assert.equal(nr.body.recorded, false);
-  // AI analysis without recording is dropped
-  const v = tokenMod.validateBody({ room, role: 'student', consent: { ai_analysis: true, storage: true } });
-  assert.deepEqual(v.consent, { recording: false, ai_analysis: false, storage: false });
+  // the old client-side "minor without guardian" check is gone: the database decides (a minor's "yes" needs a guardian there)
+  assert.equal((await call({ ...goodBody, role: 'student', minor: true })).statusCode, 200);
+  const v = tokenMod.validateBody({ room, role: 'student', consent: { recording: true }, minor: true, guardian: { name: 'x' } });
+  assert.deepEqual(v, { room, role: 'student', name: undefined });
   setEnv(false);
 });
 

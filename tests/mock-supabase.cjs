@@ -10,6 +10,8 @@
 // Class document + attendance (tests/mock-classdoc.cjs) and Realtime broadcast (tests/mock-realtime.cjs, routeWebSocket).
 // Class insights (tests/mock-insights.cjs): generate_demo_insights, list_insight_sessions, get_session_insights,
 // save_teacher_reflection, save_insight_message, my_insights, my_insight (+ insights in student_view).
+// Recording consent (tests/mock-consent.cjs): my_consent, grant / revoke / decline_recording_consent, consent_overview,
+// consent_new_declines, platform_consent_counts.
 const fs = require('fs');
 const path = require('path');
 
@@ -43,7 +45,8 @@ const SUPERADMIN_EMAIL = 'owner@teroclass.test';
 const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [],
   class_groups: [], student_enrollments: [], group_members: [], session_series: [], class_sessions: [], session_invitees: [], calendar_tokens: [],
   teacher_insights: [], student_insights: [],
-  class_docs: [], class_doc_updates: [], class_doc_versions: [], class_doc_presence: [], session_attendance: [] };
+  class_docs: [], class_doc_updates: [], class_doc_versions: [], class_doc_presence: [], session_attendance: [],
+  user_consents: [], consent_declines: [] };
 const calls = { rpc: [], inserts: {}, otp: [] };
 // billing state (same rules as the SQL functions, simplified): accounts[rootId] = {seats, monthly_tokens, extra}; usage[rootId] = used this month
 const BILL_DEFAULTS = () => ({ settings: { pack_tokens: 2000000, pack_price: 11.99, currency: 'USD', personal_monthly_tokens: 200000, default_seats: 10, default_monthly_tokens: 2000000, ai_price_input: 2.5, ai_price_output: 10 }, accounts: {}, usage: {}, requests: [], log: [] });
@@ -261,6 +264,7 @@ async function handleSupabase(route) {
       const pr = db.profiles.find(x => x.id === body.p_user); if (!pr) return json(400, { message: 'invalid' });
       pr.institution_id = null; pr.role = 'teacher'; return json(200, null);
     }
+    { const r = consent.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classInsights.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classDoc.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = students.handle(fn, body, me);
@@ -304,7 +308,8 @@ function inviteMember(inst, email, role) {
 }
 const classInsights = require('./mock-insights.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
 const classDoc = require('./mock-classdoc.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
+const consent = require('./mock-consent.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
 const realtime = require('./mock-realtime.cjs')({ tokUser, canRealtime: classDoc.canRealtime, publicTopicOk: classDoc.publicTopicOk });
 const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0),
   insightSummaries: (eids, me) => classInsights.summaries(eids, 5, me) });
-module.exports = { students, classInsights, classDoc, realtime, serveVendor, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+module.exports = { consent, students, classInsights, classDoc, realtime, serveVendor, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

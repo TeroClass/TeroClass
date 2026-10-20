@@ -91,39 +91,46 @@ select expect_denied($$insert into public.student_insights(session_id, enrollmen
   ('99999999-0000-4000-8000-000000000001', 'ffffffff-0000-4000-8000-000000000051', gen_random_uuid())$$, 'participant_id must be a real participant (FK)');
 select expect((select retention_until::date from public.recordings limit 1) = (now() + interval '30 days')::date, 'raw audio retention defaults to 30 days');
 
--- ── consents ──
+-- ── consents: per-call AUDIT rows written by the server from the single per-person consent (001: user_consents) ──
 set role authenticated;
 select as_user('00000000-0000-4000-8000-000000000051');
+select expect_denied($$insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id)
+  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000051', 'recording', true, '2026-10', auth.uid())$$,
+  'the browser cannot insert consents any more (server only, from user_consents)');
+select expect((public.grant_recording_consent(public.tc_consent_version())->>'recorded')::boolean, 'student gives the single consent (001)');
+select as_user('00000000-0000-4000-8000-000000000052');
+select expect((public.grant_recording_consent(public.tc_consent_version(), true, 'Laura Pérez', 'guardian@x.com', true)->>'recorded')::boolean, 'minor gives it with guardian name + email + confirmation');
+reset role;
+insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id, user_consent_id)
+  select 'dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000051', 'recording', true, c.version, c.user_id, c.id
+    from public.user_consents c where c.user_id = '00000000-0000-4000-8000-000000000051' and c.revoked_at is null;
+select expect_denied($$insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id)
+  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000052', 'recording', true, '2026-10', '00000000-0000-4000-8000-000000000052')$$,
+  'server cannot record a minor''s "yes" as self-given');
+select expect_denied($$insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by, given_by_user_id)
+  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000052', 'recording', true, '2026-10', 'guardian', '00000000-0000-4000-8000-000000000062')$$,
+  'guardian consent requires guardian name and email');
 insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id)
-  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000051', 'recording', true, '2026-10', auth.uid());
-select expect_denied($$insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id)
-  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000052', 'recording', true, '2026-10', auth.uid())$$,
-  'student cannot consent for someone else');
-select expect_denied($$insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id)
-  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-0000000000a1', 'recording', true, '2026-10', auth.uid())$$,
-  'student cannot consent for an adult participant either (RLS)');
+  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000052', 'recording', false, '2026-10', '00000000-0000-4000-8000-000000000052');
+insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by, given_by_user_id, guardian_name, guardian_email, user_consent_id)
+  select 'dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000052', 'recording', true, c.version, 'guardian',
+         '00000000-0000-4000-8000-000000000062', c.guardian_name, c.guardian_email, c.id
+    from public.user_consents c where c.user_id = '00000000-0000-4000-8000-000000000052' and c.revoked_at is null;
+select expect((select count(*) from public.consents where user_consent_id is not null) = 2, 'audit rows point to the single consent they come from');
+
+set role authenticated;
+select as_user('00000000-0000-4000-8000-000000000051');
 select expect_denied($$update public.consents set granted = false$$, 'consents are append-only (no update)');
 select expect_denied($$delete from public.consents$$, 'consents are append-only (no delete)');
-
-select as_user('00000000-0000-4000-8000-000000000052');
-select expect_denied($$insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id)
-  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000052', 'recording', true, '2026-10', auth.uid())$$,
-  'minor cannot self-consent');
-insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id)
-  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000052', 'recording', false, '2026-10', auth.uid());
-select expect(true, 'minor can record a refusal (granted=false)');
+select expect((select count(*) from public.consents) = 1, 'student sees only their own audit row');
 
 select as_user('00000000-0000-4000-8000-000000000062');
-select expect_denied($$insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by, given_by_user_id)
-  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000052', 'recording', true, '2026-10', 'guardian', auth.uid())$$,
-  'guardian consent requires guardian name and email');
-insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by, given_by_user_id, guardian_name, guardian_email)
-  values ('dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000052', 'recording', true, '2026-10', 'guardian', auth.uid(), 'Laura Pérez', 'guardian@x.com');
-select expect(true, 'guardian can consent for the minor');
 select expect_denied($$select count(*) from public.student_insights$$, 'guardian: no direct access to insights');
 select expect((select count(*) from public.transcript_segments) = 1, 'guardian sees only the minor''s transcript');
 select public.revoke_consent((select id from public.consents where given_by = 'guardian'));
 select expect((select revoked_at is not null from public.consents where given_by = 'guardian'), 'guardian can revoke via revoke_consent()');
+select as_user('00000000-0000-4000-8000-000000000052');
+select expect(public.my_consent()->>'status' = 'revoked', 'revoking in a call also revokes the person''s single consent (asked again next class)');
 
 -- ── visibility ──
 select as_user('00000000-0000-4000-8000-000000000051');
