@@ -332,8 +332,11 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 .btn-modal-save{padding:8px 18px;background:var(--black);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;transition:opacity .15s}
 .btn-modal-save:hover{opacity:.85}
 
-.toast{position:fixed;bottom:18px;right:18px;background:var(--black);color:#fff;padding:9px 16px;border-radius:8px;font-size:12px;font-weight:500;z-index:9999;transform:translateY(50px);opacity:0;transition:all .25s}
-.toast.show{transform:translateY(0);opacity:1}
+.toast{position:fixed;bottom:18px;right:18px;background:var(--black);color:#fff;padding:9px 16px;border-radius:8px;font-size:12px;font-weight:500;z-index:9999;transform:translateY(50px);opacity:0;transition:transform .25s,opacity .25s,visibility 0s linear .25s;visibility:hidden;pointer-events:none}
+/* P-01: a hidden toast never takes clicks (it used to cover the Generate button and the room controls) */
+.toast.show{transform:translateY(0);opacity:1;visibility:visible;pointer-events:auto;transition:transform .25s,opacity .25s,visibility 0s}
+.toast.warn{background:#fff;color:#1a1a1a;border:1.5px solid #f0d9a8;box-shadow:0 10px 30px rgba(0,0,0,.14);max-width:min(380px,calc(100vw - 36px))}
+@media(max-width:768px){.toast{top:12px;bottom:auto;right:auto;left:50%;transform:translate(-50%,-70px)}.toast.show{transform:translate(-50%,0)}}
 .toast.ok{background:#276749}
 .toast.err{background:#fff;color:#1a1a1a;border:1.5px solid #f3c7c7;box-shadow:0 10px 30px rgba(0,0,0,.18);display:flex;align-items:center;gap:12px;max-width:min(380px,calc(100vw - 36px));padding:12px 16px 12px 10px;cursor:pointer}
 .tero-err-bird{flex:0 0 64px;width:64px;height:64px}
@@ -3360,8 +3363,14 @@ let toastTimer=null;
 // Error toast: animated tero (flapping wings) + apology in the UI language + the actual error
 const TERO_ERR_SVG='<svg class="tero-err-bird" viewBox="0 0 100 100" aria-hidden="true"><path class="tero-wing-far" d="M24 66 C40 54 52 45 63 45 C71 45 71 56 63 62 C53 68 39 68 24 66 Z" fill="#dcdcdc" stroke="#111" stroke-width="2.5" stroke-linejoin="round"/><path d="M50 74 L47 93 L54 93 M58 74 L61 93 L68 93" fill="none" stroke="#111" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 71 C28 61 44 49 58 45 L61 35 C59 25 65 18 73 19 C81 20 85 27 82 34 C79 41 80 50 76 60 C70 72 55 77 40 75 C29 74 19 73 10 71 Z" fill="#fff" stroke="#111" stroke-width="3" stroke-linejoin="round"/><path d="M55 17 C62 22 68 21 74 19" fill="none" stroke="#111" stroke-width="3" stroke-linecap="round"/><path d="M82 26 L95 28.5 L82 31" fill="#111" stroke="#111" stroke-width="2" stroke-linejoin="round"/><circle cx="75.5" cy="25.5" r="2.4" fill="#111"/><path class="tero-wing" d="M20 69 C37 57 51 47 63 47 C72 47 72 58 64 64 C54 70 37 71 20 69 Z" fill="#b5b5b5" stroke="#111" stroke-width="3" stroke-linejoin="round"/></svg>';
 function teroErrTitle(){return uiLang==='es'?'Perdón… nuestro tero está trabajando para encontrar una solución.':'Sorry… our tero is working to find a solution.';}
+// P-15: the tero ("we're working on it") is only for real failures; a validation message ("Enter a topic first")
+// is a plain notice. Technical texts ("upstream") are translated into something a person understands.
+const SYSTEM_ERR_RE=/could ?n[o']t|no se pudo|no pudimos|error|failed|fall[óo]|took too long|tard[óo]|not available|no est[áa] disponible|no connection|sin conexi[óo]n|session expired|sesi[óo]n expir|unexpected|inesperad|server|servidor|upstream|timeout|network|HTTP \d|something went wrong|algo sali[óo] mal|try again in a moment|not reach|conectar/i;
+function isSystemError(msg){return SYSTEM_ERR_RE.test(String(msg||''));}
 function showToast(msg,type='',ms=3200){
   const t=document.getElementById('toast');
+  if(/^(Error: )?upstream$/i.test(String(msg||'')))msg='The AI did not answer. Try again in a moment.';
+  if(type==='err'&&!isSystemError(msg)&&!isSystemError(trText(String(msg||''))))type='warn';
   if(type==='err'){
     const detail=trText(dbErr(msg));
     t.innerHTML=TERO_ERR_SVG+'<div class="tero-err-txt"><div class="tero-err-title" data-no-i18n>'+esc(teroErrTitle())+'</div>'+(detail?'<div class="tero-err-detail">'+esc(detail)+'</div>':'')+'</div>';
@@ -4649,6 +4658,11 @@ const I18N_ES_NAV={
 'Loading…':'Cargando…'
 };
 Object.assign(I18N_ES,I18N_ES_NAV);
+// ══ Fix sprint (2026-10): Spanish for the strings added by the audit fixes ══
+const I18N_ES_FIX={
+'The AI did not answer. Try again in a moment.':'La IA no respondió. Probá de nuevo en un momento.',
+};
+Object.assign(I18N_ES,I18N_ES_FIX);
 </script>
 <script src="/insights-view.js"></script>
 <script src="/live-class.js"></script>
