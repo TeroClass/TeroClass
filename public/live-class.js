@@ -695,6 +695,9 @@ Cierre y ticket de salida (5 min)
     render();
     S.timers.push(setInterval(roomTick, 1000));
     if (R.recorded === false && R.role !== 'teacher') toast('You joined without being recorded.', 'ok');
+    // Attendance (public/attendance.js): a calendar class records who entered (students: present / late; the teacher too).
+    // TODO(live): with real LiveKit, its webhook (participant_joined / left) also feeds attendance_record_external.
+    if (S.sessionId && window.TCAttendance) { R.attendance = true; window.TCAttendance.roomJoin(S.sessionId); }
   }
 
   function wireProvider(p, R) {
@@ -752,6 +755,7 @@ Cierre y ticket de salida (5 min)
             <button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="plan" id="lc-tab-plan">Class plan</button>
             <button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="chat" id="lc-tab-chat">Chat</button>
             <button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="people" id="lc-tab-people">People</button>
+            ${S.sessionId && window.TCClassDoc ? '<button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="doc" id="lc-tab-doc">Document</button>' : ''}
             <button type="button" class="lc-side-close" data-lc="side-close" aria-label="${esc(tr('Close panel'))}">✕</button>
           </div>
           <div class="lc-side-body" id="lc-side-plan" role="tabpanel" aria-labelledby="lc-tab-plan">${planPanelHtml()}</div>
@@ -764,6 +768,7 @@ Cierre y ticket de salida (5 min)
             </form>
           </div>
           <div class="lc-side-body" id="lc-side-people" role="tabpanel" aria-labelledby="lc-tab-people"><ul class="lc-people" id="lc-people-list"></ul></div>
+          ${S.sessionId && window.TCClassDoc ? '<div class="lc-side-body lc-doc-body" id="lc-side-doc" role="tabpanel" aria-labelledby="lc-tab-doc" hidden></div>' : ''}
         </aside>
       </div>
       <div class="lc-controls" role="toolbar" aria-label="${esc(tr('Class controls'))}">
@@ -777,6 +782,7 @@ Cierre y ticket de salida (5 min)
           ${ctl('plan', 'side', '📋', 'Plan', 'data-side="plan"')}
           ${ctl('chat', 'side', '💬', 'Chat', 'data-side="chat"')}
           ${ctl('people', 'side', '👥', 'People', 'data-side="people"')}
+          ${S.sessionId && window.TCClassDoc ? ctl('doc', 'side', '📄', 'Document', 'data-side="doc"') : ''}
         </div>
         <div class="lc-ctl-group">
           ${teacher ? ctl('rec', 'rec', '⏺', 'Record') + ctl('pause', 'rec-pause', '⏸', 'Pause') : ''}
@@ -896,8 +902,9 @@ Cierre y ticket de salida (5 min)
     const R = S.room; if (!R || S.view !== 'room') return;
     const room = document.getElementById('lc-room'); if (!room) return;
     room.classList.toggle('side-open', !!R.side);
+    room.classList.toggle('doc-open', R.side === 'doc');
     // side panel tabs
-    ['plan', 'chat', 'people'].forEach(k => {
+    ['plan', 'chat', 'people', 'doc'].forEach(k => {
       const tab = document.getElementById('lc-tab-' + k); const body = document.getElementById('lc-side-' + k); const c = document.getElementById('lc-ctl-' + k);
       if (tab) { tab.setAttribute('aria-selected', String(R.side === k)); tab.classList.toggle('active', R.side === k); tab.tabIndex = R.side === k ? 0 : -1; }
       if (body) body.hidden = R.side !== k;
@@ -1019,6 +1026,11 @@ Cierre y ticket de salida (5 min)
     const R = S.room; R.side = R.side === k && document.activeElement?.closest('.lc-controls') ? null : k;
     if (R.side === 'chat') { R.unread = 0; renderChat(); setTimeout(() => document.getElementById('lc-chat-input')?.focus(), 30); }
     updateRoomUi();
+    // the shared class document (public/class-doc.js), mounted the first time the tab opens; it keeps syncing while in the room
+    if (R.side === 'doc' && !R.doc && S.sessionId && window.TCClassDoc) {
+      const host = document.getElementById('lc-side-doc');
+      if (host) { R.doc = 'loading'; window.TCClassDoc.mount(host, S.sessionId).then(v => { if (S.room === R) R.doc = v; else if (v) v.destroy(); }); }
+    }
   }
   function secToggle(i) {
     const R = S.room; R.running = R.running === i ? -1 : i; updateRoomUi();
@@ -1044,6 +1056,8 @@ Cierre y ticket de salida (5 min)
 
   function teardownRoom() {
     const R = S.room; if (!R) return;
+    if (R.doc && R.doc !== 'loading') { try { R.doc.close(); } catch (e) { /* ignore */ } }
+    if (window.TCAttendance && R.attendance) window.TCAttendance.roomLeave();
     clearViewTimers();
     stopStream(R.stream); stopStream(R.screen);
     try { R.provider && R.provider.disconnect(); } catch (e) { /* ignore */ }
@@ -1063,6 +1077,8 @@ Cierre y ticket de salida (5 min)
     };
     const sess = S.sessionId && R.role === 'teacher' && S.sessionRole !== 'student' ? { id: S.sessionId, title: S.sessionTitle, group: S.sessionGroup } : null;
     teardownRoom();
+    // the class document keeps a "class end" version (teacher / substitute; nothing is created if nobody wrote)
+    if (sess && typeof sb !== 'undefined') sb.rpc('classdoc_add_version', { p_session: sess.id, p_label: 'class_end' }).then(() => {}, () => {});
     S.processing = summary;
     S.insights = { tab: 'student', student: 0, sub: 'overview', role: summary.role, live: summary, liveSample: S.sampleKey, saved: null, saving: !!sess };
     S.view = 'processing'; render(); runProcessing();
@@ -1462,7 +1478,7 @@ Cierre y ticket de salida (5 min)
     'Could not join the class.': 'No se pudo entrar a la clase.',
     // room
     'Simulated participants': 'Participantes simulados', 'LiveKit': 'LiveKit', 'Not recording': 'Sin grabar', 'REC': 'REC', 'REC paused': 'REC en pausa',
-    'Talk time': 'Tiempo de habla', 'Class time': 'Tiempo de clase', 'Side panel': 'Panel lateral', 'Chat': 'Chat', 'People': 'Personas', 'Close panel': 'Cerrar panel',
+    'Document': 'Documento', 'Talk time': 'Tiempo de habla', 'Class time': 'Tiempo de clase', 'Side panel': 'Panel lateral', 'Chat': 'Chat', 'People': 'Personas', 'Close panel': 'Cerrar panel',
     'Message': 'Mensaje', 'PH:Write a message…': 'Escribí un mensaje…', 'Send': 'Enviar', 'Class controls': 'Controles de la clase',
     'Mute': 'Silenciar', 'Unmute': 'Activar micrófono', 'Stop video': 'Apagar video', 'Start video': 'Encender video', 'Share screen': 'Compartir pantalla', 'Stop sharing': 'Dejar de compartir',
     'Raise hand': 'Levantar la mano', 'Lower hand': 'Bajar la mano', 'Plan': 'Plan', 'Record': 'Grabar', 'Stop recording': 'Detener grabación', 'Pause': 'Pausar', 'Resume': 'Reanudar',

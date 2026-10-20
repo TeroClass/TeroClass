@@ -18,3 +18,10 @@ grant usage on schema public to anon, authenticated, service_role;
 -- auth.jwt() as in Supabase (claims of the current request; tests set request.jwt.claims, e.g. {"amr":[{"method":"otp"}]})
 create function auth.jwt() returns jsonb language sql stable as $$ select coalesce(nullif(current_setting('request.jwt.claim', true), ''), nullif(current_setting('request.jwt.claims', true), ''))::jsonb $$;
 grant execute on function auth.jwt() to anon, authenticated;
+-- Realtime as in Supabase (Broadcast authorization): policies on realtime.messages; realtime.topic() = the channel being checked
+create schema realtime;
+create table realtime.messages(id bigserial primary key, topic text not null, extension text not null default 'broadcast', event text, payload jsonb, private boolean default true, inserted_at timestamptz default now());
+create function realtime.topic() returns text language sql stable as $$ select nullif(current_setting('realtime.topic', true), '') $$;
+alter table realtime.messages enable row level security;
+grant usage on schema realtime to anon, authenticated; grant select, insert on realtime.messages to anon, authenticated; grant usage on sequence realtime.messages_id_seq to anon, authenticated;
+grant execute on function realtime.topic() to anon, authenticated;

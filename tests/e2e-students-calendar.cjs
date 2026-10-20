@@ -1,5 +1,5 @@
 // Groups + Students + Calendar: admin groups + CSV import (preview, errors, idempotent), teacher weekly series in
-// the week view (detail, students, invite fallback, .ics, edit), student magic link (only 3 sections, join window,
+// the week view (detail, students, invite fallback, .ics, edit), student magic link (only their sections: enter, calendar, insights, attendance, class documents, join window,
 // no classmates' emails, Spanish), student without classes, View as → Student, mobile layout, calendar feed dialog.
 // Usage: NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-students-calendar.cjs   (SHOTS=<dir> saves stu-*.png)
 const { chromium } = require('playwright');
@@ -284,7 +284,7 @@ async function magicLink(page, email) {
     if (p.role !== 'student' || p.institution_id) throw new Error('profile: ' + JSON.stringify(p));
     if (!db.student_enrollments.filter(e => e.user_id === p.id).length === 2) throw new Error('enrollments not claimed');
     const sections = await page.$$eval('#gc-student-root .gs-card h2', h => h.map(x => x.textContent.replace(/\s+/g, ' ').trim()));
-    if (JSON.stringify(sections) !== '["▶️ Enter class","📅 Calendar","💡 My insights"]') throw new Error('sections: ' + JSON.stringify(sections));
+    if (JSON.stringify(sections) !== '["▶️ Enter class","📅 Calendar","✅ My attendance","💡 My insights","📄 Class documents"]') throw new Error('sections: ' + JSON.stringify(sections));
     for (const sel of ['.icon-sidebar', '#nav-ai', '.btn-new-class', '#mode-switch', '#inst-switch', '#sliders-container', '.btn-invite'])
       if (await page.isVisible(sel)) throw new Error(sel + ' visible to a student');
     await page.evaluate(() => showPanel('ai'));

@@ -7,6 +7,7 @@
 // update_ai_prices (+ ai_price_input / ai_price_output in the platform settings).
 // Groups + students + calendar (tests/mock-students.cjs): list_groups, import_students, my_calendar, student_view,
 // claim_enrollments, calendar tokens/feed…; magic link sign-in (POST /auth/v1/otp; via:"student_link" → role student).
+// Class document + attendance (tests/mock-classdoc.cjs) and Realtime broadcast (tests/mock-realtime.cjs, routeWebSocket).
 // Class insights (tests/mock-insights.cjs): generate_demo_insights, list_insight_sessions, get_session_insights,
 // save_teacher_reflection, save_insight_message, my_insights, my_insight (+ insights in student_view).
 const fs = require('fs');
@@ -25,7 +26,14 @@ const HTML = RAW_HTML
   .replace('<script src="/insights-panel.js"></script>', () => `<script>${asset('insights-panel.js')}</script>`)
   .replace('<link rel="stylesheet" href="/groups-calendar.css">', () => `<style>${asset('groups-calendar.css')}</style>`)
   .replace('<script src="/csv-import.js"></script>', () => `<script>${asset('csv-import.js')}</script>`)
-  .replace('<script src="/groups-calendar.js"></script>', () => `<script>${asset('groups-calendar.js')}</script>`);
+  .replace('<script src="/groups-calendar.js"></script>', () => `<script>${asset('groups-calendar.js')}</script>`)
+  .replace('<link rel="stylesheet" href="/class-doc.css">', () => `<style>${asset('class-doc.css')}</style>`)
+  .replace('<script src="/attendance.js"></script>', () => `<script>${asset('attendance.js')}</script>`)
+  .replace('<script src="/class-doc.js"></script>', () => `<script>${asset('class-doc.js')}</script>`);
+// The class-document editor is an ES module loaded on demand (import('/vendor/classdoc-editor.js')): tests that open a
+// document serve it with serveVendor(route) (production: public/vendor/, see vercel.json).
+const VENDOR_EDITOR = fs.readFileSync(path.join(ROOT, 'public/vendor/classdoc-editor.js'), 'utf8');
+const serveVendor = route => route.fulfill({ contentType: 'application/javascript; charset=utf-8', body: VENDOR_EDITOR });
 const SB_JS = fs.readFileSync(process.env.SB_JS || '/tmp/package/dist/umd/supabase.js', 'utf8');
 const SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
 // Test-only platform owner (placeholder). The real system never promotes by email: the mock simply
@@ -34,7 +42,8 @@ const SUPERADMIN_EMAIL = 'owner@teroclass.test';
 
 const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [],
   class_groups: [], student_enrollments: [], group_members: [], session_series: [], class_sessions: [], session_invitees: [], calendar_tokens: [],
-  teacher_insights: [], student_insights: [] };
+  teacher_insights: [], student_insights: [],
+  class_docs: [], class_doc_updates: [], class_doc_versions: [], class_doc_presence: [], session_attendance: [] };
 const calls = { rpc: [], inserts: {}, otp: [] };
 // billing state (same rules as the SQL functions, simplified): accounts[rootId] = {seats, monthly_tokens, extra}; usage[rootId] = used this month
 const BILL_DEFAULTS = () => ({ settings: { pack_tokens: 2000000, pack_price: 11.99, currency: 'USD', personal_monthly_tokens: 200000, default_seats: 10, default_monthly_tokens: 2000000, ai_price_input: 2.5, ai_price_output: 10 }, accounts: {}, usage: {}, requests: [], log: [] });
@@ -42,7 +51,7 @@ const bill = BILL_DEFAULTS();
 let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
 const insights = { fixture: null }; // tests may set insights.fixture = (body) => json
-function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; calls.rpc = []; calls.inserts = {}; calls.otp = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; }
+function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; if (typeof realtime !== 'undefined') realtime.reset(); calls.rpc = []; calls.inserts = {}; calls.otp = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; }
 // Default insights: deterministic sample data shaped like public.platform_insights (smaller numbers for a unit)
 function insightsData(body) {
   const days = Math.min(Math.max(Number(body.p_days) || 30, 1), 366); const unit = body.p_unit ? instById(body.p_unit) : null;
@@ -253,7 +262,13 @@ async function handleSupabase(route) {
       pr.institution_id = null; pr.role = 'teacher'; return json(200, null);
     }
     { const r = classInsights.handle(fn, body, me); if (r) return json(r.status, r.data); }
-    { const r = students.handle(fn, body, me); if (r) return json(r.status, r.data); }
+    { const r = classDoc.handle(fn, body, me); if (r) return json(r.status, r.data); }
+    { const r = students.handle(fn, body, me);
+      if (r && fn === 'student_view' && r.status === 200) { // + attendance summary and the documents of past classes (own enrollments only)
+        const eids = body.p_enrollment ? [body.p_enrollment] : (!body.p_group && me ? db.student_enrollments.filter(e => e.user_id === me.id).map(e => e.id) : []);
+        Object.assign(r.data, classDoc.studentExtras(eids));
+      }
+      if (r) return json(r.status, r.data); }
     if (fn === 'get_document_content') {
       const d = db.institution_documents.find(x => x.id === body.p_id); return d ? json(200, d.content) : json(400, { message: 'not found' });
     }
@@ -288,6 +303,8 @@ function inviteMember(inst, email, role) {
   db.invitations.push({ id: uid(), email, institution_id: inst, role, created_at: new Date().toISOString() }); return 'invited';
 }
 const classInsights = require('./mock-insights.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
+const classDoc = require('./mock-classdoc.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
+const realtime = require('./mock-realtime.cjs')({ tokUser, canRealtime: classDoc.canRealtime, publicTopicOk: classDoc.publicTopicOk });
 const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0),
   insightSummaries: (eids, me) => classInsights.summaries(eids, 5, me) });
-module.exports = { students, classInsights, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+module.exports = { students, classInsights, classDoc, realtime, serveVendor, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

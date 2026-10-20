@@ -15,6 +15,9 @@
 # again after an upgrade from git c198c60 (before class insights) with data. 002_live_class.sql must still apply
 # (twice) after the current 001 and pass its RLS suite; 001 must re-run after 002; and a database where the OLD
 # 002 (insights tied to live_sessions) had been run with data upgrades cleanly (old tables kept as *_live_legacy).
+# Class document + attendance (classdoc_attendance.sql: access matrix, lock, versions/restore, Realtime policies, attendance
+# privacy, late rule, overrides, report) run with the other suites, after the c198c60 upgrade, and after an upgrade from git
+# d063eb0 (class insights, before the class document) with data (+ the current 001 twice; the data must survive).
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -24,7 +27,7 @@ trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null' EXIT
 $PSQL -d $DB -f tests/sql/supabase-stub.sql >/dev/null 2>&1
 for i in 1 2; do $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; done
 fail=0
-for t in security hierarchy billing insights students csv_schedule class_insights; do
+for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance; do
   out=$($PSQL -d $DB -f tests/sql/$t.sql 2>&1)
   echo "$out" | grep -E '\*\*FAIL\*\*' || true
   sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
@@ -114,7 +117,35 @@ if git cat-file -e c198c60:supabase/migrations/001_base.sql 2>/dev/null; then
       sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
       echo "upgrade (c198c60 → current ×2) + class_insights: passed | failed = $sum"
       [[ "$sum" =~ \|\ +0$ ]] || fail=1
+      out=$($PSQL -d $UP3 -f tests/sql/classdoc_attendance.sql 2>&1)
+      echo "$out" | grep -E '\*\*FAIL\*\*' || true
+      sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
+      echo "upgrade (c198c60 → current ×2) + classdoc_attendance: passed | failed = $sum"
+      [[ "$sum" =~ \|\ +0$ ]] || fail=1
     else echo "upgrade: **FAIL** could not upgrade from c198c60"; fail=1; fi
   else echo "upgrade: **FAIL** could not load c198c60 + data"; fail=1; fi
+fi
+# Upgrade from d063eb0 (class insights, before the class document + attendance) with data, then the current 001 twice
+if git cat-file -e d063eb0:supabase/migrations/001_base.sql 2>/dev/null; then
+  UP4=${DB}_up4
+  $PSQL -d postgres -c "create database $UP4" >/dev/null
+  trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up2" >/dev/null; $PSQL -d postgres -c "drop database if exists $LV" >/dev/null; $PSQL -d postgres -c "drop database if exists ${DB}_up3" >/dev/null; $PSQL -d postgres -c "drop database if exists $UP4" >/dev/null' EXIT
+  $PSQL -d $UP4 -f tests/sql/supabase-stub.sql >/dev/null 2>&1
+  DATA="select (select count(*) from public.class_groups)||'/'||(select count(*) from public.student_enrollments)||'/'||(select count(*) from public.group_members)||'/'||(select count(*) from public.class_sessions)||'/'||(select count(*) from public.session_series)||'/'||(select count(*) from public.profiles)||'/'||(select count(*) from public.teacher_insights)||'/'||(select count(*) from public.student_insights)"
+  if git show d063eb0:supabase/migrations/001_base.sql | $PSQL -d $UP4 >/dev/null 2>&1 \
+     && $PSQL -d $UP4 -f tests/sql/students.sql >/dev/null 2>&1 && $PSQL -d $UP4 -f tests/sql/csv_schedule.sql >/dev/null 2>&1 \
+     && git show d063eb0:tests/sql/class_insights.sql | $PSQL -d $UP4 >/dev/null 2>&1; then
+    before=$($PSQL -At -d $UP4 -c "$DATA")
+    if $PSQL -d $UP4 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP4 -f supabase/migrations/001_base.sql >/dev/null 2>&1 \
+       && $PSQL -d $UP4 -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
+      after=$($PSQL -At -d $UP4 -c "$DATA")
+      if [[ "$before" == "$after" && "$before" != *"/0/0" ]]; then echo "upgrade (d063eb0 + data → current 001 ×2 → 002): data kept ($after)"; else echo "upgrade: **FAIL** d063eb0 before=$before after=$after"; fail=1; fi
+      out=$($PSQL -d $UP4 -f tests/sql/classdoc_attendance.sql 2>&1)
+      echo "$out" | grep -E '\*\*FAIL\*\*' || true
+      sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
+      echo "upgrade (d063eb0 → current ×2) + classdoc_attendance: passed | failed = $sum"
+      [[ "$sum" =~ \|\ +0$ ]] || fail=1
+    else echo "upgrade: **FAIL** could not upgrade from d063eb0"; fail=1; fi
+  else echo "upgrade: **FAIL** could not load d063eb0 + data"; fail=1; fi
 fi
 exit $fail

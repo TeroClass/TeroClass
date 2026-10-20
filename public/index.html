@@ -686,6 +686,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 <link rel="stylesheet" href="/live-class.css">
 <link rel="stylesheet" href="/insights-view.css">
 <link rel="stylesheet" href="/groups-calendar.css">
+<link rel="stylesheet" href="/class-doc.css">
 </head>
 <body>
 
@@ -4172,7 +4173,9 @@ function vaBlocked(){if(!viewAs)return false;showToast(VA_RO,'err');return true;
 (function vaGuardClient(){
   const READ_RPC=new Set(['get_effective_config','get_billing_summary','get_seat_status','list_purchase_requests','get_document_content','get_org_branding','get_ai_quota','platform_stats','platform_billing_overview',
     'list_groups','list_students','list_group_members','unit_calendar','session_people','student_view', // groups + calendar: reads only
-    'list_insight_sessions','get_session_insights','my_insights','my_insight']); // class insights: reads only
+    'list_insight_sessions','get_session_insights','my_insights','my_insight', // class insights: reads only
+    'classdoc_open','classdoc_pull','classdoc_versions','classdoc_version','group_sessions', // class document: reads only (the owner is read-only there anyway)
+    'session_attendance','attendance_report']); // attendance: reads only
 
   const roResult=()=>({data:null,error:{message:VA_RO,code:'viewas'},status:403,statusText:'View as',count:null});
   const roChain=()=>{const r=roResult();let p;p=new Proxy(function(){},{get(_,k){
@@ -4644,5 +4647,7 @@ Object.assign(I18N_ES,I18N_ES_NAV);
 <script src="/csv-import.js"></script>
 <script src="/groups-calendar.js"></script>
 <script src="/insights-panel.js"></script>
+<script src="/attendance.js"></script>
+<script src="/class-doc.js"></script>
 </body>
 </html>

@@ -46,6 +46,22 @@
       "destination": "/public/groups-calendar.css"
     },
     {
+      "source": "/class-doc.js",
+      "destination": "/public/class-doc.js"
+    },
+    {
+      "source": "/class-doc.css",
+      "destination": "/public/class-doc.css"
+    },
+    {
+      "source": "/attendance.js",
+      "destination": "/public/attendance.js"
+    },
+    {
+      "source": "/vendor/(.*)",
+      "destination": "/public/vendor/$1"
+    },
+    {
       "source": "/(.*)",
       "destination": "/public/index.html"
     }

@@ -9,6 +9,9 @@ AI-powered didactic planning platform for teachers.
 - Vercel serverless API (`api/generate.js`) that calls Azure OpenAI (gpt-4o). The Azure key lives only on the server.
 - Groups, students and calendar: `public/groups-calendar.js` / `.css`, `public/csv-import.js` (CSV parser, also unit-tested in node), `api/calendar/feed.js` (calendar subscription),
   `api/notify/session.js` (email invitations, optional), `api/_lib/ics.js`.
+- Class document + attendance: `public/class-doc.js` / `.css`, `public/attendance.js`, and the vendored editor
+  `public/vendor/classdoc-editor.js` (Yjs 13.6.32 + TipTap 2.27.2, one pinned ES module loaded on demand; no build step —
+  it is rebuilt only when upgrading, with `scripts/vendor/build-classdoc.sh`).
 
 ## Environment variables (Vercel → Settings → Environment Variables)
 
@@ -25,9 +28,11 @@ AI-powered didactic planning platform for teachers.
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with class insights
-(`student_insights`, `teacher_insights` and their functions): run it again** (it upgrades the previous version in place and
-keeps all data; tested from git c198c60 with data, twice). `002_live_class.sql` is still **not** needed (see *Class insights*).
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with the class document
+and attendance (`class_docs`, `class_doc_updates`, `class_doc_versions`, `class_doc_presence`, `session_attendance`, their
+functions and the Realtime policies on `realtime.messages`): run it again** (it upgrades the previous version in place and
+keeps all data; tested from git c198c60 and d063eb0 with data, then twice). `002_live_class.sql` is still **not** needed
+(see *Class insights*); it still applies after the new `001`.
 
 ### Platform owner (super admin)
 
@@ -245,21 +250,104 @@ zone doesn't move classes already scheduled; a one-off class's invitees are set 
 the demo (real video needs LiveKit and a session-aware token: `api/class/token.js`); a student who changes their account
 email keeps the classes already linked.
 
+## Class document (Documento de la clase)
+
+One shared document per calendar class, like a Google Doc: everyone in the class reads and types at the same time, the
+teacher can paste the class there, and it stays as a record afterwards.
+- **Who:** the class's teacher and substitute (or whoever created a one-off class) and its students (group members and
+  invited emails) read and edit live. Institution admins of that unit (and above) and the super admin: **read-only**
+  (Groups → group card → *Classes & documents* → *Read document*). Nobody else (checked in the database on every read
+  and write). View as is read-only.
+- **Lock:** the teacher locks it (students read only) and unlocks it. After the class it stays open for editing unless
+  locked.
+- **Where:** the class detail in the Calendar (*Open class document*), the *Documento* tab inside the live room, the student
+  dashboard (*Class document* on the next class, 📄 on each class, and *Class documents* = their past classes, 90 days), the
+  admin's group card.
+- **Editor:** headings, bold / italic / strike, bulleted and numbered lists, quotes, tables (add/remove rows and columns),
+  links (http/https/mailto only), undo/redo; names, colours and cursors of the people in the document.
+- **Paste a class (teacher):** inserts the **student handout** of one of their saved classes (cleaned again with the same
+  filter that removes answer keys, "Answer: …" lines and teacher timings). The teacher guide is never inserted; a class
+  without a handout yet is shown disabled. (The optional private teacher-only note was skipped.)
+- **History:** a version every 10 minutes while people write, one at the end of the class (when the teacher ends the class
+  in the live room, or before the first change made after the class ended), the ones the teacher saves, and one before
+  every restore; max 20 per document (the end-of-class one is kept). Everyone with access can open them; **only the teacher
+  restores** (everyone's open document reloads on the restored version).
+- **Export:** Print / PDF (the browser prints only the document), HTML and Markdown downloads.
+
+**How it syncs.** Editor = TipTap 2 + Yjs (CRDT). Every local change is sent to `classdoc_push` (a Yjs update, base64; the
+database checks access, the lock and the size, and numbers changes in order); everyone reads new changes with
+`classdoc_pull`; an editor sends a compact snapshot now and then (`classdoc_snapshot`) and older changes are deleted.
+**Realtime only carries "there are changes, read them" pokes and cursor positions, never the document content**, on the
+*private* channel `classdoc:<class id>`, authorized by the same access check through policies on `realtime.messages`
+(`tc_classdoc_listen`: anyone with access; `tc_classdoc_send`: teacher and students). If private channels are not available
+the app uses a public channel with an unguessable name returned only by `classdoc_open` (same rule: no content travels on
+it); if Realtime is not available at all it reads every 2 seconds and shows "Live sync unavailable: updates every few
+seconds". Names and colours of the people in a document come from the database (`classdoc_pull` presence), never from other
+browsers. Tables: `class_docs`, `class_doc_updates`, `class_doc_versions`, `class_doc_presence` (no direct access).
+
+**Supabase dashboard steps (Ignacio):**
+1. Run the new `001_base.sql` (it creates the two policies on `realtime.messages`; check them in Database → Policies →
+   schema `realtime` → `messages`: `tc_classdoc_listen` and `tc_classdoc_send`).
+2. Realtime must be enabled for the project (it is by default). Private channels need nothing else.
+3. Recommended: Realtime → Settings → turn **off** "Allow public access" (only private channels are allowed). The app keeps
+   working (it then never uses the public fallback channel). If you leave it on, the app still tries the private channel first.
+4. If the project was very old and `realtime.messages` did not exist when you ran `001`, run `001` again after enabling
+   Realtime (it creates the policies only when that table exists). Without the policies everything still works by polling.
+
+**Limitations (class document).** Fast typing reaches others in well under a second with Realtime, every 2 s without it;
+cursors only move live with Realtime (without it they refresh every 2 s); the names on the cursors are the ones the school
+loaded; a student removed from the group loses access immediately, but a browser that is already open keeps what it has
+already loaded; a restore discards edits that someone was typing at that very moment; images, colours, comments and
+suggestion mode are not supported; there is no offline editing (unsent changes are retried while the page is open); the
+teacher-only private note for the teacher guide was not built.
+
+## Attendance (Asistencia)
+
+- **Automatic (today):** when a student enters the room of a calendar class (*Enter class* → lobby → *Join*) the app calls
+  `attendance_join` (allowed from 10 minutes before the start until the end), sends `attendance_heartbeat` every minute
+  while they are in the room and `attendance_leave` when they leave or close the tab (if the tab dies, the last heartbeat
+  counts as the exit; minutes only count inside the class time). **Late** = joined more than N minutes after the start;
+  N = `institutions.attendance_late_minutes` of the unit or the nearest unit above, 10 by default (an admin can change it
+  with `select public.set_attendance_late_minutes('<unit id>', 15);`, no screen yet). Students with no record are **absent**
+  once the class has ended (computed when reading). The teacher's own presence is recorded too.
+- **Teacher corrections:** in the class detail (Calendar) the teacher or substitute sees each student's status, minutes,
+  first join and "in the room now", and can set Present / Late / Absent / Excused (or back to Automatic) and a note
+  (`set_attendance`, source `teacher`: it wins over the automatic status, and the future AI/video data never overrides it).
+  Admins see the same list read-only.
+- **Group report** (teacher / substitute from the class detail; admins read-only from the group card → *Attendance*):
+  each student's % (present + late over the classes counted; excused and classes in progress are not counted) and
+  present / late / absent / excused, a classes × students matrix, date range (default 90 days) and **CSV export** (name,
+  email as loaded by that institution, status per class; `;` separator in Spanish). Students added to the group later are
+  not counted for earlier classes.
+- **Student:** "Attended 9 of 10 classes" on their dashboard (only their own; never classmates).
+- **Metrics (super admin):** `students.attendance` in `platform_insights` = total rate, no names.
+- **Later — real video + AI:** `attendance_record_external` (executable only with the service key) is the hook for
+  `api/livekit/webhook.js` (participant_joined / participant_left → source `auto`) and for the AI participation estimate
+  (`participation_seconds`, source `ai`). Not wired yet; it never overrides a teacher correction.
+- Table `session_attendance` (one row per class and enrollment; teacher rows with `kind = 'teacher'`), no direct access.
+
+**Limitations (attendance).** It only knows who entered the TeroClass room (the live class is still a demo: a student who
+joins by another channel is absent unless the teacher corrects it); minutes are counted with a one-minute heartbeat; one-off
+classes appear in the class detail but not in a group report; the late threshold has no screen yet (SQL / RPC only).
+
 ## Tests
 
-`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Metrics), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile), `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room) and `tests/e2e-insights.cjs` (class insights per role, demo generation, reflection, publish a message, student privacy, admin subtree, View as, mobile, Métricas) run the app in a headless browser
+`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Metrics), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile), `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room), `tests/e2e-insights.cjs` (class insights per role, demo generation, reflection, publish a message, student privacy, admin subtree, View as, mobile, Métricas), `tests/e2e-classdoc.cjs` (two browsers editing the same class document through a simulated Realtime broadcast, lock, paste a class without answers, admin read-only, live room tab, polling fallback, history/restore, export, mobile) and `tests/e2e-attendance.cjs` (join → present for the teacher, corrections, admin group report + CSV, student summary, mobile) run the app in a headless browser
 against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/<file>`).
 
 `tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage, insights, students & calendar privacy, and the upgrade path from the previous `001`) on a local
-Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql`, `class_insights.sql`, the upgrades from
-git fabb1c7 and c198c60 with data, and `002_live_class.sql` + its RLS suite after the current `001`).
+Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql`, `class_insights.sql`,
+`classdoc_attendance.sql` (class document access matrix, lock, versions/restore, Realtime policies; attendance privacy, late
+rule, overrides, report), the upgrades from git fabb1c7, c198c60 and d063eb0 with data, and `002_live_class.sql` + its RLS
+suite after the current `001`).
 CSV parser unit tests: `node --no-warnings --test tests/unit-*.test.mjs`.
 API: `node --no-warnings --test tests/api-*.test.mjs` (billing, live class, AI metadata, calendar feed + notifications).
 
 ## Live class (Aula en vivo)
 
 In-app video classroom, currently in **Demo mode** (simulated participants, sample insights, no cost). Ending a class opened from the
-Calendar (teacher / substitute) stores demo insights for that class (see *Class insights*). The insights renderers are shared:
+Calendar (teacher / substitute) stores demo insights for that class (see *Class insights*). A class opened from the Calendar has a
+*Documento* side tab (the class document) and records attendance (see *Attendance*). The insights renderers are shared:
 `public/insights-view.js` / `.css` (live-class demo + Insights panels), panels in `public/insights-panel.js`.
 To connect real video set `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in Vercel.
 See `docs/live-class.md` (activation, costs, privacy checklist). Tests: `tests/e2e-live.cjs`,

@@ -1786,7 +1786,9 @@ begin
                        and s.starts_at <= now() and (v_units is null or s.institution_id = any(v_units))),
         -- clases con insights (informe del docente) en el período: solo el total
         'insight_sessions', (select count(*) from public.teacher_insights ti join public.class_sessions s on s.id = ti.session_id
-                              where s.starts_at >= v_since and (v_units is null or s.institution_id = any(v_units))))
+                              where s.starts_at >= v_since and (v_units is null or s.institution_id = any(v_units))),
+        -- asistencia total del período (presentes + tarde / esperados en clases terminadas): solo la tasa, sin nombres
+        'attendance', public.tc_attendance_rate(v_since, v_units))
       from public.student_enrollments e where v_units is null or e.institution_id = any(v_units)),
     'costs', (select json_build_object(
         'recorded_ever', exists (select 1 from public.ai_request_log),
@@ -3087,14 +3089,25 @@ begin
          where g.id = any(v_groups)) x), '[]'::json),
     'sessions', coalesce((select json_agg(x order by x.starts_at) from (
         select s.id, coalesce(nullif(s.title, ''), g.name, '') as title, s.starts_at, s.ends_at, s.timezone, s.status,
-               g.name as group_name, public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name
+               g.name as group_name, public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name,
+               exists (select 1 from public.class_docs d where d.session_id = s.id) as has_doc
           from public.class_sessions s left join public.class_groups g on g.id = s.group_id
          where (s.group_id = any(v_groups)
                 or exists (select 1 from public.session_invitees si where si.session_id = s.id and si.enrollment_id = any(v_enr)))
            and s.ends_at > now() - interval '1 day' and s.starts_at < now() + interval '120 days'
          order by s.starts_at limit 300) x), '[]'::json),
     -- sus insights más recientes (los propios; el mensaje del docente solo si está publicado: ver my_insight)
-    'insights', public.tc_insight_summaries(v_enr, 5));
+    'insights', public.tc_insight_summaries(v_enr, 5),
+    -- documentos de sus clases ya terminadas (últimos 90 días; quedan como registro)
+    'docs', coalesce((select json_agg(x order by x.starts_at desc) from (
+        select s.id, coalesce(nullif(s.title, ''), g.name, '') as title, s.starts_at, s.ends_at, g.name as group_name, d.updated_at
+          from public.class_docs d join public.class_sessions s on s.id = d.session_id left join public.class_groups g on g.id = s.group_id
+         where (s.group_id = any(v_groups)
+                or exists (select 1 from public.session_invitees si where si.session_id = s.id and si.enrollment_id = any(v_enr)))
+           and s.ends_at <= now() and s.ends_at > now() - interval '90 days'
+         order by s.starts_at desc limit 8) x), '[]'::json),
+    -- su asistencia (solo la propia: "Asististe a 9 de 10 clases"); un estudiante genérico de "Ver como" no tiene
+    'attendance', public.tc_attendance_summary(v_enr));
 end $$;
 
 -- ── CALENDARIO EXTERNO (Google Calendar, Outlook, Apple) sin proveedor de email ──
@@ -3503,6 +3516,740 @@ begin
 end $$;
 revoke all on function public.calendar_feed(text) from public;
 grant execute on function public.calendar_feed(text) to anon, authenticated;
+
+-- ========== DOCUMENTO DE LA CLASE (uno por clase del calendario) ==========
+-- Un documento colaborativo (tipo Google Docs) por clase: docente, suplente y estudiantes de la clase lo leen y
+-- escriben a la vez; queda como registro después de la clase. Editor: Yjs + TipTap (public/class-doc.js).
+-- QUIÉN:
+--   · docente / suplente de la clase (o quien creó la clase suelta): leen, escriben, bloquean / desbloquean,
+--     restauran versiones;
+--   · estudiantes de la clase (miembros del grupo o invitados): leen y escriben, salvo que el docente lo bloquee;
+--   · admins de la unidad (y de sus superiores) y súper admin: SOLO LECTURA. Nadie más.
+-- CÓMO SE GUARDA (sin acceso directo a las tablas; todo por las funciones de abajo, que verifican el acceso):
+--   · class_doc_updates: cada cambio (actualización Yjs) que manda un editor (classdoc_push). Se numeran en orden
+--     (la fila de class_docs se bloquea al insertar), así quien lee nunca se saltea uno.
+--   · class_docs.state: foto compacta (Y.encodeStateAsUpdate) hasta state_upto; un editor la manda cada tanto
+--     (classdoc_snapshot) y los cambios ya incluidos se borran.
+--   · class_doc_versions: versiones (cada 10 min mientras se edita, al terminar la clase, manuales, antes de
+--     restaurar); máximo 20 por documento. Restaurar (solo docente) sube "generation" y los clientes recargan.
+--   · class_doc_presence: quién tiene el documento abierto (nombre y color los pone la base, no el navegador).
+-- TIEMPO REAL: los navegadores se avisan por Supabase Realtime en un canal PRIVADO "classdoc:<id de la clase>"
+--   (políticas sobre realtime.messages al final de esta sección, con el mismo control de acceso). Por el canal
+--   NUNCA viaja el contenido: solo "hay cambios, leé" y la posición del cursor; el contenido siempre se lee y se
+--   escribe con estas funciones. Sin Realtime, la app consulta cada 2 segundos.
+create table if not exists public.class_docs (
+  session_id uuid primary key references public.class_sessions(id) on delete cascade,
+  state bytea,                                       -- foto Yjs hasta state_upto (null = vacío)
+  state_upto bigint not null default 0,              -- último cambio (class_doc_updates.id) incluido en state
+  generation integer not null default 1,             -- sube al restaurar una versión
+  locked boolean not null default false,             -- bloqueado por el docente: los estudiantes solo leen
+  locked_at timestamptz,
+  channel_key text not null default public.tc_new_token(),  -- canal de respaldo si los privados no están disponibles
+  bytes integer not null default 0,
+  updated_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create table if not exists public.class_doc_updates (
+  id bigserial primary key,
+  session_id uuid not null references public.class_docs(session_id) on delete cascade,
+  generation integer not null,
+  data bytea not null check (octet_length(data) between 1 and 262144),
+  client_id text not null default '' check (length(client_id) <= 40),
+  user_id uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists class_doc_updates_sess_idx on public.class_doc_updates (session_id, id);
+create table if not exists public.class_doc_versions (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.class_docs(session_id) on delete cascade,
+  parts bytea[] not null,                            -- foto + cambios pendientes en ese momento (se aplican en orden)
+  label text not null check (label in ('auto','class_end','manual','before_restore')),
+  bytes integer not null default 0,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists class_doc_versions_sess_idx on public.class_doc_versions (session_id, created_at desc);
+create table if not exists public.class_doc_presence (
+  session_id uuid not null references public.class_sessions(id) on delete cascade,
+  client_id text not null check (length(client_id) between 1 and 40),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null default '',
+  color text not null default '#7c5cbf',
+  role text not null default 'student',
+  state jsonb not null default '{}'::jsonb,         -- solo la posición del cursor (máx. 2 KB)
+  seen_at timestamptz not null default now(),
+  primary key (session_id, client_id)
+);
+alter table public.class_docs         enable row level security;
+alter table public.class_doc_updates  enable row level security;
+alter table public.class_doc_versions enable row level security;
+alter table public.class_doc_presence enable row level security;
+revoke all on public.class_docs, public.class_doc_updates, public.class_doc_versions, public.class_doc_presence from anon, authenticated;
+revoke all on sequence public.class_doc_updates_id_seq from anon, authenticated;
+drop trigger if exists class_docs_hide_owner on public.class_docs;
+create trigger class_docs_hide_owner before insert or update of updated_by on public.class_docs
+  for each row execute function public.hide_superadmin_refs('updated_by');
+drop trigger if exists class_doc_versions_hide_owner on public.class_doc_versions;
+create trigger class_doc_versions_hide_owner before insert on public.class_doc_versions
+  for each row execute function public.hide_superadmin_refs('created_by');
+
+-- ── ayudas internas ──
+-- Mi papel en el documento de esta clase: 'teacher' (docente / suplente / quien creó la clase suelta),
+-- 'student' (asiste: miembro del grupo o invitado), 'admin' (admin de su unidad o súper admin: solo lectura) o null.
+create or replace function public.tc_classdoc_role(p_session uuid) returns text
+language sql stable security definer set search_path = public as
+$$ select case when auth.uid() is null or s.id is null then null
+               when public.teaches_session(s.id) then 'teacher'
+               when public.tc_attends(s.id, auth.uid()) then 'student'
+               when public.is_admin_of(s.institution_id) then 'admin' end
+     from (select p_session as id) x left join public.class_sessions s on s.id = x.id $$;
+-- Nombre que ven los demás en el documento (nunca el email): estudiante = nombre cargado por la institución
+create or replace function public.tc_classdoc_name(p_session uuid, p_user uuid, p_role text) returns text
+language sql stable security definer set search_path = public as
+$$ select coalesce(nullif(case when p_role = 'student' then
+            (select btrim(e.name) from public.student_enrollments e
+              where e.user_id = p_user
+                and (exists (select 1 from public.group_members m join public.class_sessions s on s.group_id = m.group_id
+                              where s.id = p_session and m.enrollment_id = e.id)
+                     or exists (select 1 from public.session_invitees i where i.session_id = p_session and i.enrollment_id = e.id))
+              order by e.created_at limit 1) end, ''),
+          nullif(public.tc_person_name(p_user), ''), 'Participante') $$;
+-- Color estable por persona y clase (paleta de la app)
+create or replace function public.tc_classdoc_color(p_session uuid, p_user uuid) returns text
+language sql immutable set search_path = public as
+$$ select (array['#7c5cbf','#0891b2','#d97706','#059669','#db2777','#4f46e5','#b45309','#0f766e','#9333ea','#dc2626'])
+          [1 + abs(hashtext(coalesce(p_session::text, '') || coalesce(p_user::text, ''))) % 10] $$;
+-- base64 → bytea (null si no es base64 válido)
+create or replace function public.tc_b64(p text) returns bytea
+language plpgsql immutable set search_path = public as
+$$ begin
+  if p is null or p = '' or p !~ '^[A-Za-z0-9+/=[:space:]]+$' then return null; end if;
+  return decode(p, 'base64');
+exception when others then return null;
+end $$;
+create or replace function public.tc_b64e(p bytea) returns text
+language sql immutable set search_path = public as $$ select translate(encode(p, 'base64'), E'\n\r', '') $$;
+-- Guarda una versión con la foto + los cambios pendientes (máximo 20 por documento; "fin de clase" se conserva)
+create or replace function public.tc_classdoc_add_version(p_session uuid, p_label text) returns uuid
+language plpgsql volatile security definer set search_path = public as
+$$
+declare d public.class_docs%rowtype; v_parts bytea[]; v_id uuid;
+begin
+  select * into d from public.class_docs where session_id = p_session;
+  if d.session_id is null then return null; end if;
+  v_parts := (case when d.state is not null then array[d.state] else '{}'::bytea[] end)
+             || coalesce((select array_agg(u.data order by u.id) from public.class_doc_updates u
+                           where u.session_id = p_session and u.generation = d.generation and u.id > d.state_upto), '{}'::bytea[]);
+  if coalesce(array_length(v_parts, 1), 0) = 0 then return null; end if;
+  insert into public.class_doc_versions (session_id, parts, label, bytes, created_by)
+  values (p_session, v_parts, p_label, (select coalesce(sum(octet_length(x)), 0) from unnest(v_parts) x),
+          case when p_label in ('manual','before_restore') then auth.uid() end)
+  returning id into v_id;
+  delete from public.class_doc_versions where id in (
+    select id from (select id, row_number() over (order by (label = 'class_end') desc, created_at desc, id) rn
+                      from public.class_doc_versions where session_id = p_session) x where x.rn > 20);
+  return v_id;
+end $$;
+-- Crea la fila del documento (si falta) y la bloquea hasta el fin de la transacción: los cambios quedan numerados en orden
+create or replace function public.tc_classdoc_lock_row(p_session uuid) returns public.class_docs
+language plpgsql volatile security definer set search_path = public as
+$$
+declare d public.class_docs%rowtype;
+begin
+  insert into public.class_docs (session_id) values (p_session) on conflict (session_id) do nothing;
+  select * into d from public.class_docs where session_id = p_session for update;
+  return d;
+end $$;
+-- Política de Realtime: ¿puedo escuchar (p_send = false) o mandar (true) en este canal? Solo canales "classdoc:<uuid>".
+-- Mandar: docente y estudiantes de la clase (los admins solo escuchan). Por el canal no viaja contenido.
+create or replace function public.tc_classdoc_rt_ok(p_topic text, p_send boolean) returns boolean
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_role text;
+begin
+  if p_topic is null or p_topic !~ '^classdoc:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then return false; end if;
+  v_role := public.tc_classdoc_role(substr(p_topic, 10)::uuid);
+  return case when coalesce(p_send, false) then v_role in ('teacher','student') else v_role is not null end;
+end $$;
+revoke all on function public.tc_classdoc_role(uuid) from public, anon, authenticated;
+revoke all on function public.tc_classdoc_name(uuid, uuid, text) from public, anon, authenticated;
+revoke all on function public.tc_classdoc_color(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.tc_b64(text) from public, anon, authenticated;
+revoke all on function public.tc_b64e(bytea) from public, anon, authenticated;
+revoke all on function public.tc_classdoc_add_version(uuid, text) from public, anon, authenticated;
+revoke all on function public.tc_classdoc_lock_row(uuid) from public, anon, authenticated;
+-- (las políticas de realtime.messages corren con el rol de quien se conecta: authenticated la necesita; solo responde sí/no)
+revoke all on function public.tc_classdoc_rt_ok(text, boolean) from public, anon;
+grant execute on function public.tc_classdoc_rt_ok(text, boolean) to authenticated;
+
+-- ── funciones de la app ──
+-- Abrir: la clase, mi papel, si puedo editar, la foto + los cambios pendientes y el canal de tiempo real.
+create or replace function public.classdoc_open(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v_role text := public.tc_classdoc_role(p_session); s public.class_sessions%rowtype; g public.class_groups%rowtype;
+        d public.class_docs%rowtype;
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  select * into s from public.class_sessions where id = p_session;
+  select * into g from public.class_groups where id = s.group_id;
+  select * into d from public.class_docs where session_id = p_session;
+  return json_build_object(
+    'session', json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name, ''), 'starts_at', s.starts_at,
+       'ends_at', s.ends_at, 'timezone', s.timezone, 'status', s.status, 'group_id', s.group_id, 'group_name', g.name,
+       'teacher_name', public.tc_person_name(coalesce(g.teacher_id, s.teacher_id))),
+    'role', v_role,
+    'can_edit', v_role = 'teacher' or (v_role = 'student' and not coalesce(d.locked, false)),
+    'can_lock', v_role = 'teacher',
+    'locked', coalesce(d.locked, false),
+    'generation', coalesce(d.generation, 1),
+    'state', case when d.state is not null then public.tc_b64e(d.state) end,
+    'upto', coalesce(d.state_upto, 0),
+    'updates', coalesce((select json_agg(json_build_object('id', u.id, 'd', public.tc_b64e(u.data), 'c', u.client_id) order by u.id)
+                           from public.class_doc_updates u
+                          where u.session_id = p_session and u.generation = d.generation and u.id > d.state_upto), '[]'::json),
+    'channel', json_build_object('topic', 'classdoc:' || p_session::text, 'key', d.channel_key),
+    'me', case when v_role in ('teacher','student') then json_build_object('name', public.tc_classdoc_name(p_session, auth.uid(), v_role),
+            'color', public.tc_classdoc_color(p_session, auth.uid())) end,
+    'versions', (select count(*) from public.class_doc_versions v where v.session_id = p_session),
+    'updated_at', d.updated_at);
+end $$;
+
+-- Mandar un cambio (actualización Yjs en base64). Docente siempre; estudiantes si no está bloqueado; admins nunca.
+create or replace function public.classdoc_push(p_session uuid, p_generation integer, p_update text, p_client text default '')
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_role text := public.tc_classdoc_role(p_session); d public.class_docs%rowtype; s public.class_sessions%rowtype;
+        v_data bytea := public.tc_b64(p_update); v_id bigint; v_last timestamptz;
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  if v_role not in ('teacher','student') then raise exception 'Solo lectura: no podés editar este documento'; end if;
+  if v_data is null or octet_length(v_data) = 0 then raise exception 'Cambio inválido'; end if;
+  if octet_length(v_data) > 262144 then raise exception 'Cambio demasiado grande'; end if;
+  d := public.tc_classdoc_lock_row(p_session);
+  if v_role = 'student' and d.locked then raise exception 'El docente bloqueó el documento'; end if;
+  if p_generation is distinct from d.generation then raise exception 'Documento desactualizado: volvé a abrirlo'; end if;
+  select * into s from public.class_sessions where id = p_session;
+  -- versiones automáticas: "fin de clase" (el estado al terminar, antes del primer cambio posterior) y cada 10 minutos
+  if now() > s.ends_at and not exists (select 1 from public.class_doc_versions where session_id = p_session and label = 'class_end') then
+    perform public.tc_classdoc_add_version(p_session, 'class_end');
+  end if;
+  select max(created_at) into v_last from public.class_doc_versions where session_id = p_session;
+  if v_last is null or v_last < now() - interval '10 minutes' then perform public.tc_classdoc_add_version(p_session, 'auto'); end if;
+  insert into public.class_doc_updates (session_id, generation, data, client_id, user_id)
+  values (p_session, d.generation, v_data, left(coalesce(p_client, ''), 40), auth.uid()) returning id into v_id;
+  update public.class_docs set updated_at = now(), updated_by = auth.uid(), bytes = bytes + octet_length(v_data) where session_id = p_session;
+  return json_build_object('id', v_id, 'generation', d.generation);
+end $$;
+
+-- Leer los cambios desde p_after (+ quién está conectado). Si me quedé atrás (foto nueva o versión restaurada):
+-- reset = true con la foto completa. Docente / estudiantes anuncian su presencia (p_presence = {cursor}).
+create or replace function public.classdoc_pull(p_session uuid, p_after bigint default 0, p_generation integer default null,
+                                                p_client text default '', p_presence jsonb default null)
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_role text := public.tc_classdoc_role(p_session); d public.class_docs%rowtype; v_reset boolean; v_client text := left(coalesce(p_client, ''), 40);
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  if p_presence is not null and v_role in ('teacher','student') and v_client <> '' then
+    insert into public.class_doc_presence (session_id, client_id, user_id, name, color, role, state, seen_at)
+    values (p_session, v_client, auth.uid(), public.tc_classdoc_name(p_session, auth.uid(), v_role), public.tc_classdoc_color(p_session, auth.uid()),
+            v_role, case when jsonb_typeof(p_presence) = 'object' and octet_length(p_presence::text) <= 2048 then p_presence else '{}'::jsonb end, now())
+    on conflict (session_id, client_id) do update
+      set state = excluded.state, seen_at = now(), name = excluded.name, role = excluded.role
+      where class_doc_presence.user_id = auth.uid();
+    delete from public.class_doc_presence where session_id = p_session and seen_at < now() - interval '2 minutes';
+  end if;
+  select * into d from public.class_docs where session_id = p_session;
+  v_reset := d.session_id is not null and (p_generation is distinct from d.generation or coalesce(p_after, 0) < d.state_upto);
+  return json_build_object(
+    'generation', coalesce(d.generation, 1), 'locked', coalesce(d.locked, false),
+    'can_edit', v_role = 'teacher' or (v_role = 'student' and not coalesce(d.locked, false)),
+    'reset', coalesce(v_reset, false),
+    'state', case when v_reset and d.state is not null then public.tc_b64e(d.state) end,
+    'upto', coalesce(d.state_upto, 0),
+    'updates', coalesce((select json_agg(json_build_object('id', u.id, 'd', public.tc_b64e(u.data), 'c', u.client_id) order by u.id)
+                           from (select * from public.class_doc_updates u
+                                  where u.session_id = p_session and u.generation = d.generation
+                                    and u.id > (case when v_reset then d.state_upto else greatest(coalesce(p_after, 0), d.state_upto) end)
+                                  order by u.id limit 2000) u), '[]'::json),
+    'presence', coalesce((select json_agg(json_build_object('client', pr.client_id, 'name', pr.name, 'color', pr.color, 'role', pr.role, 'state', pr.state)
+                                          order by pr.name, pr.client_id)
+                            from public.class_doc_presence pr
+                           where pr.session_id = p_session and pr.client_id <> v_client and pr.seen_at > now() - interval '45 seconds'), '[]'::json));
+end $$;
+
+-- Foto compacta (la manda un editor cada tanto): reemplaza la foto y borra los cambios ya incluidos (hasta p_upto)
+create or replace function public.classdoc_snapshot(p_session uuid, p_generation integer, p_state text, p_upto bigint)
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_role text := public.tc_classdoc_role(p_session); d public.class_docs%rowtype; v_data bytea := public.tc_b64(p_state); v_max bigint;
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  if v_role not in ('teacher','student') then raise exception 'Solo lectura: no podés editar este documento'; end if;
+  if v_data is null then raise exception 'Cambio inválido'; end if;
+  if octet_length(v_data) > 4194304 then raise exception 'El documento es demasiado grande'; end if;
+  d := public.tc_classdoc_lock_row(p_session);
+  if v_role = 'student' and d.locked then raise exception 'El docente bloqueó el documento'; end if;
+  if p_generation is distinct from d.generation then raise exception 'Documento desactualizado: volvé a abrirlo'; end if;
+  if coalesce(p_upto, -1) < d.state_upto then return json_build_object('ok', false, 'upto', d.state_upto); end if;
+  select max(id) into v_max from public.class_doc_updates where session_id = p_session and generation = d.generation;
+  if p_upto > greatest(coalesce(v_max, 0), d.state_upto) then raise exception 'Cambio inválido'; end if;
+  update public.class_docs set state = v_data, state_upto = p_upto, bytes = octet_length(v_data), updated_at = now() where session_id = p_session;
+  delete from public.class_doc_updates where session_id = p_session and id <= p_upto;
+  return json_build_object('ok', true, 'upto', p_upto);
+end $$;
+
+-- Bloquear (los estudiantes solo leen) o desbloquear: solo docente / suplente
+create or replace function public.classdoc_set_lock(p_session uuid, p_locked boolean) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare d public.class_docs%rowtype;
+begin
+  if public.tc_classdoc_role(p_session) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  d := public.tc_classdoc_lock_row(p_session);
+  update public.class_docs set locked = coalesce(p_locked, false), locked_at = case when coalesce(p_locked, false) then now() end,
+         updated_at = now(), updated_by = auth.uid()
+   where session_id = p_session;
+  return json_build_object('locked', coalesce(p_locked, false));
+end $$;
+
+-- Historial: versiones (cualquiera con acceso las ve) · una versión completa · guardar una ahora / fin de clase (docente)
+create or replace function public.classdoc_versions(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+begin
+  if public.tc_classdoc_role(p_session) is null then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(json_build_object('id', v.id, 'label', v.label, 'created_at', v.created_at, 'bytes', v.bytes,
+                     'by', case when v.created_by is not null then public.tc_person_name(v.created_by) end) order by v.created_at desc, v.id)
+                     from public.class_doc_versions v where v.session_id = p_session), '[]'::json);
+end $$;
+create or replace function public.classdoc_version(p_version uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare v public.class_doc_versions%rowtype;
+begin
+  select * into v from public.class_doc_versions where id = p_version;
+  if v.id is null or public.tc_classdoc_role(v.session_id) is null then raise exception 'No autorizado'; end if;
+  return json_build_object('id', v.id, 'session_id', v.session_id, 'label', v.label, 'created_at', v.created_at,
+                           'parts', (select json_agg(public.tc_b64e(x) order by o) from unnest(v.parts) with ordinality t(x, o)));
+end $$;
+create or replace function public.classdoc_add_version(p_session uuid, p_label text default 'manual') returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v_id uuid;
+begin
+  if public.tc_classdoc_role(p_session) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  if coalesce(p_label, '') not in ('manual','class_end') then raise exception 'Versión inválida'; end if;
+  perform public.tc_classdoc_lock_row(p_session);
+  if p_label = 'class_end' and exists (select 1 from public.class_doc_versions where session_id = p_session and label = 'class_end') then
+    return json_build_object('id', null, 'created', false);
+  end if;
+  v_id := public.tc_classdoc_add_version(p_session, p_label);
+  return json_build_object('id', v_id, 'created', v_id is not null);
+end $$;
+-- Restaurar una versión (solo docente / suplente): guarda la actual como "antes de restaurar", vuelve a esa versión y
+-- sube generation (los navegadores abiertos recargan; los cambios de una generación vieja se rechazan).
+create or replace function public.classdoc_restore(p_version uuid) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare v public.class_doc_versions%rowtype; d public.class_docs%rowtype; x bytea;
+begin
+  select * into v from public.class_doc_versions where id = p_version;
+  if v.id is null or public.tc_classdoc_role(v.session_id) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  d := public.tc_classdoc_lock_row(v.session_id);
+  perform public.tc_classdoc_add_version(v.session_id, 'before_restore');
+  delete from public.class_doc_updates where session_id = v.session_id;
+  update public.class_docs set generation = generation + 1, state = null, state_upto = 0, updated_at = now(), updated_by = auth.uid()
+   where session_id = v.session_id returning * into d;
+  foreach x in array v.parts loop
+    insert into public.class_doc_updates (session_id, generation, data, client_id, user_id) values (v.session_id, d.generation, x, 'restore', auth.uid());
+  end loop;
+  return json_build_object('generation', d.generation, 'restored', v.id);
+end $$;
+
+-- Clases de un grupo (pasadas y próximas) para la tarjeta del grupo: docente / suplente o admin de su unidad
+create or replace function public.group_sessions(p_group uuid, p_past_days integer default 60, p_future_days integer default 30)
+returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare g public.class_groups%rowtype;
+begin
+  select * into g from public.class_groups where id = p_group;
+  if g.id is null or not (public.teaches_group(p_group) or public.is_admin_of(g.institution_id)) then raise exception 'No autorizado'; end if;
+  return json_build_object(
+    'group', json_build_object('id', g.id, 'name', g.name, 'timezone', g.timezone, 'unit_name', (select name from public.institutions where id = g.institution_id)),
+    'can_edit', public.teaches_group(p_group),
+    'sessions', coalesce((select json_agg(json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name), 'starts_at', s.starts_at,
+          'ends_at', s.ends_at, 'timezone', s.timezone, 'status', s.status, 'has_doc', d.session_id is not null,
+          'doc_locked', coalesce(d.locked, false), 'doc_updated_at', d.updated_at) order by s.starts_at desc, s.id)
+        from public.class_sessions s left join public.class_docs d on d.session_id = s.id
+       where s.group_id = p_group
+         and s.starts_at > now() - make_interval(days => least(greatest(coalesce(p_past_days, 60), 0), 400))
+         and s.starts_at < now() + make_interval(days => least(greatest(coalesce(p_future_days, 30), 0), 400))), '[]'::json));
+end $$;
+
+-- Tiempo real: políticas del canal privado "classdoc:<id>" (solo si el proyecto tiene Realtime, como todo Supabase)
+do $$
+begin
+  if to_regclass('realtime.messages') is not null and to_regproc('realtime.topic') is not null then
+    execute 'drop policy if exists tc_classdoc_listen on realtime.messages';
+    execute 'create policy tc_classdoc_listen on realtime.messages for select to authenticated using (public.tc_classdoc_rt_ok((select realtime.topic()), false))';
+    execute 'drop policy if exists tc_classdoc_send on realtime.messages';
+    execute 'create policy tc_classdoc_send on realtime.messages for insert to authenticated with check (public.tc_classdoc_rt_ok((select realtime.topic()), true))';
+  end if;
+end $$;
+
+-- ========== ASISTENCIA ==========
+-- Una fila por clase y estudiante (inscripción) en session_attendance; también la presencia del docente (kind 'teacher').
+-- AUTOMÁTICA (hoy): al entrar a la sala desde "Entrar a clase" el navegador llama attendance_join; mientras está en la
+--   sala manda attendance_heartbeat cada minuto y attendance_leave al salir (si se cierra la pestaña, el último latido
+--   cuenta como salida). Tarde = entró más de N minutos después del inicio (N = institutions.attendance_late_minutes,
+--   heredado de la unidad superior; 10 por defecto). Sin registro y con la clase terminada = ausente (se calcula al leer).
+-- CORRECCIONES DEL DOCENTE: set_attendance (source 'teacher') gana sobre lo automático; null vuelve a lo automático.
+-- PRIVACIDAD: el estudiante ve solo lo suyo (resumen en student_view); docente / suplente: sus grupos y clases;
+--   admins: su unidad y lo que cuelga (solo lectura); súper admin: todo. Métricas: solo la tasa total.
+-- PRÓXIMAMENTE (video real + IA): attendance_record_external (solo con la service key) recibe los eventos de la sala
+--   de LiveKit (api/livekit/webhook.js: participant_joined / participant_left → source 'auto') y la participación que
+--   estime la IA (source 'ai'); nunca pisa una corrección del docente.
+alter table public.institutions add column if not exists attendance_late_minutes integer;
+alter table public.institutions drop constraint if exists institutions_attendance_late_ok;
+alter table public.institutions add constraint institutions_attendance_late_ok check (attendance_late_minutes is null or attendance_late_minutes between 0 and 120);
+create table if not exists public.session_attendance (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.class_sessions(id) on delete cascade,
+  enrollment_id uuid references public.student_enrollments(id) on delete cascade,   -- estudiante (null = docente)
+  user_id uuid references auth.users(id) on delete set null,
+  kind text not null default 'student' check (kind in ('student','teacher')),
+  first_join timestamptz,
+  last_seen timestamptz,
+  last_leave timestamptz,
+  seconds_present integer not null default 0 check (seconds_present >= 0),
+  in_room boolean not null default false,
+  joins integer not null default 0,
+  auto_status text check (auto_status in ('present','late')),                      -- lo que calculó la sala al entrar
+  status text check (status in ('present','late','absent','excused')),              -- corrección del docente (gana)
+  source text not null default 'auto' check (source in ('auto','teacher','ai')),
+  note text not null default '' check (length(note) <= 500),
+  participation_seconds integer check (participation_seconds is null or participation_seconds >= 0),  -- IA (futuro)
+  updated_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint session_attendance_kind check ((kind = 'student') = (enrollment_id is not null))
+);
+create unique index if not exists session_attendance_student on public.session_attendance (session_id, enrollment_id) where enrollment_id is not null;
+create unique index if not exists session_attendance_teacher on public.session_attendance (session_id, user_id) where kind = 'teacher';
+create index if not exists session_attendance_enr_idx on public.session_attendance (enrollment_id);
+alter table public.session_attendance enable row level security;
+revoke all on public.session_attendance from anon, authenticated;
+drop trigger if exists session_attendance_touch on public.session_attendance;
+create trigger session_attendance_touch before update on public.session_attendance for each row execute function public.touch_updated_at();
+drop trigger if exists session_attendance_hide_owner on public.session_attendance;
+create trigger session_attendance_hide_owner before insert or update of updated_by on public.session_attendance
+  for each row execute function public.hide_superadmin_refs('updated_by');
+
+-- ── ayudas internas ──
+create or replace function public.tc_late_minutes(p_inst uuid) returns integer
+language sql stable security definer set search_path = public as
+$$ select coalesce((select i.attendance_late_minutes from public.institution_chain(p_inst) c join public.institutions i on i.id = c.id
+                     where i.attendance_late_minutes is not null order by c.depth limit 1), 10) $$;
+-- La inscripción con la que este usuario asiste a esta clase
+create or replace function public.tc_session_enrollment(p_session uuid, p_user uuid) returns uuid
+language sql stable security definer set search_path = public as
+$$ select e.id from public.student_enrollments e
+    where p_user is not null and e.user_id = p_user
+      and (exists (select 1 from public.group_members m join public.class_sessions s on s.group_id = m.group_id
+                    where s.id = p_session and m.enrollment_id = e.id)
+           or exists (select 1 from public.session_invitees i where i.session_id = p_session and i.enrollment_id = e.id))
+    order by e.created_at limit 1 $$;
+-- Estado que se muestra: corrección del docente › lo que calculó la sala › ausente si la clase terminó › pendiente
+create or replace function public.tc_att_status(p_override text, p_auto text, p_first_join timestamptz, p_ends_at timestamptz) returns text
+language sql stable set search_path = public as
+$$ select coalesce(p_override, case when p_first_join is not null then coalesce(p_auto, 'present') end,
+                   case when now() > p_ends_at then 'absent' else 'pending' end) $$;
+-- Entrar / latido / salir: suma los segundos dentro del horario de la clase desde el último latido (si fue hace < 150 s)
+create or replace function public.tc_att_touch(p_session uuid, p_mode text) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare s public.class_sessions%rowtype; v_kind text; v_enr uuid; r public.session_attendance%rowtype; v_add integer := 0;
+        v_now timestamptz := now(); v_late integer;
+begin
+  select * into s from public.class_sessions where id = p_session;
+  if s.id is null or auth.uid() is null then raise exception 'No autorizado'; end if;
+  if public.teaches_session(p_session) then v_kind := 'teacher';
+  else
+    v_enr := public.tc_session_enrollment(p_session, auth.uid());
+    if v_enr is null then raise exception 'No autorizado'; end if;
+    v_kind := 'student';
+  end if;
+  if v_kind = 'student' and p_mode = 'join' then
+    if s.status = 'cancelled' then raise exception 'La clase está cancelada'; end if;
+    if v_now < s.starts_at - interval '10 minutes' or v_now > s.ends_at then raise exception 'La clase no está abierta ahora'; end if;
+  end if;
+  if v_kind = 'teacher' then
+    select * into r from public.session_attendance where session_id = p_session and kind = 'teacher' and user_id = auth.uid() for update;
+  else
+    select * into r from public.session_attendance where session_id = p_session and enrollment_id = v_enr for update;
+  end if;
+  if r.id is null then
+    if p_mode = 'leave' then return json_build_object('status', null, 'recorded', false); end if;
+    if v_kind = 'student' and p_mode <> 'join' and (v_now < s.starts_at - interval '10 minutes' or v_now > s.ends_at or s.status = 'cancelled') then
+      return json_build_object('status', null, 'recorded', false);
+    end if;
+    insert into public.session_attendance (session_id, enrollment_id, user_id, kind)
+    values (p_session, v_enr, auth.uid(), v_kind) returning * into r;
+  end if;
+  if r.in_room and r.last_seen is not null and v_now - r.last_seen <= interval '150 seconds' then
+    v_add := greatest(0, floor(extract(epoch from (least(v_now, s.ends_at) - greatest(r.last_seen, s.starts_at)))))::int;
+  end if;
+  v_late := public.tc_late_minutes(s.institution_id);
+  update public.session_attendance
+     set first_join = coalesce(first_join, v_now),
+         auto_status = coalesce(auto_status, case when v_kind = 'student' then
+                         case when v_now > s.starts_at + make_interval(mins => v_late) then 'late' else 'present' end end),
+         joins = joins + case when p_mode = 'join' then 1 else 0 end,
+         seconds_present = seconds_present + v_add,
+         last_seen = v_now,
+         in_room = p_mode <> 'leave',
+         last_leave = case when p_mode = 'leave' then v_now else last_leave end
+   where id = r.id returning * into r;
+  return json_build_object('recorded', true, 'kind', v_kind, 'minutes', round(r.seconds_present / 60.0)::int,
+    'status', case when v_kind = 'student' then public.tc_att_status(r.status, r.auto_status, r.first_join, s.ends_at) end);
+end $$;
+-- Resumen de asistencia de unas inscripciones (lo que ve el propio estudiante): clases terminadas y no canceladas de
+-- sus grupos (desde el día en que lo sumaron al grupo) + las clases a las que lo invitaron
+create or replace function public.tc_attendance_summary(p_enr uuid[]) returns json
+language sql stable security definer set search_path = public as
+$$ with exp as (
+     select distinct on (s.id, x.enr) s.id as session_id, x.enr, s.ends_at, g.name as group_name, s.group_id
+       from (select unnest(coalesce(p_enr, '{}')) as enr) x
+       join public.class_sessions s on s.status = 'scheduled' and s.ends_at < now()
+            and (exists (select 1 from public.group_members m where m.group_id = s.group_id and m.enrollment_id = x.enr
+                          and s.starts_at >= date_trunc('day', m.created_at))
+                 or exists (select 1 from public.session_invitees i where i.session_id = s.id and i.enrollment_id = x.enr))
+       left join public.class_groups g on g.id = s.group_id),
+   st as (
+     select exp.*, public.tc_att_status(a.status, a.auto_status, a.first_join, exp.ends_at) as status
+       from exp left join public.session_attendance a on a.session_id = exp.session_id and a.enrollment_id = exp.enr)
+   select json_build_object(
+     'held', count(*), 'attended', count(*) filter (where status in ('present','late')),
+     'present', count(*) filter (where status = 'present'), 'late', count(*) filter (where status = 'late'),
+     'absent', count(*) filter (where status = 'absent'), 'excused', count(*) filter (where status = 'excused'),
+     'groups', coalesce((select json_agg(json_build_object('name', gg.group_name, 'held', gg.held, 'attended', gg.attended) order by lower(gg.group_name))
+                           from (select coalesce(group_name, '') as group_name, count(*) as held, count(*) filter (where status in ('present','late')) as attended
+                                   from st group by coalesce(group_name, '')) gg), '[]'::json))
+   from st $$;
+-- Tasa total de asistencia (Métricas del súper admin; sin nombres): presentes + tarde / esperados, clases terminadas del período
+create or replace function public.tc_attendance_rate(p_since timestamptz, p_units uuid[]) returns json
+language sql stable security definer set search_path = public as
+$$ with exp as (
+     select s.id, s.ends_at, x.enrollment_id from public.class_sessions s
+       cross join lateral public.tc_session_students(s.id) x
+      where s.status = 'scheduled' and s.starts_at >= p_since and s.ends_at < now()
+        and (p_units is null or s.institution_id = any(p_units))),
+   st as (select public.tc_att_status(a.status, a.auto_status, a.first_join, exp.ends_at) as status
+            from exp left join public.session_attendance a on a.session_id = exp.id and a.enrollment_id = exp.enrollment_id)
+   select json_build_object('expected', count(*) filter (where status <> 'excused'),
+                            'attended', count(*) filter (where status in ('present','late')),
+                            'rate', case when count(*) filter (where status <> 'excused') > 0
+                                         then round(100.0 * count(*) filter (where status in ('present','late')) / count(*) filter (where status <> 'excused'), 1) end)
+     from st $$;
+revoke all on function public.tc_late_minutes(uuid) from public, anon, authenticated;
+revoke all on function public.tc_session_enrollment(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.tc_att_status(text, text, timestamptz, timestamptz) from public, anon, authenticated;
+revoke all on function public.tc_att_touch(uuid, text) from public, anon, authenticated;
+revoke all on function public.tc_attendance_summary(uuid[]) from public, anon, authenticated;
+revoke all on function public.tc_attendance_rate(timestamptz, uuid[]) from public, anon, authenticated;
+
+-- ── funciones de la app ──
+create or replace function public.attendance_join(p_session uuid) returns json
+language plpgsql volatile security definer set search_path = public as $$ begin return public.tc_att_touch(p_session, 'join'); end $$;
+create or replace function public.attendance_heartbeat(p_session uuid) returns json
+language plpgsql volatile security definer set search_path = public as $$ begin return public.tc_att_touch(p_session, 'beat'); end $$;
+create or replace function public.attendance_leave(p_session uuid) returns json
+language plpgsql volatile security definer set search_path = public as $$ begin return public.tc_att_touch(p_session, 'leave'); end $$;
+
+-- Lista de una clase (nombre, email, estado, minutos): docente / suplente (puede corregir) o admin de su unidad (lectura)
+create or replace function public.session_attendance(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare s public.class_sessions%rowtype; g public.class_groups%rowtype; v_teach boolean;
+begin
+  select * into s from public.class_sessions where id = p_session;
+  if s.id is null or not (public.teaches_session(p_session) or public.is_admin_of(s.institution_id)) then raise exception 'No autorizado'; end if;
+  select * into g from public.class_groups where id = s.group_id;
+  v_teach := public.teaches_session(p_session);
+  return (with people as (
+      select st.enrollment_id, st.name, st.email from public.tc_session_students(p_session) st
+      union
+      select e.id, e.name, e.email from public.session_attendance a join public.student_enrollments e on e.id = a.enrollment_id
+       where a.session_id = p_session),
+    rows as (
+      select p.*, a.first_join, a.last_leave, a.last_seen, a.in_room, a.seconds_present, a.joins, a.auto_status, a.status as override,
+             a.source, coalesce(a.note, '') as note,
+             public.tc_att_status(a.status, a.auto_status, a.first_join, s.ends_at) as eff
+        from people p left join public.session_attendance a on a.session_id = p_session and a.enrollment_id = p.enrollment_id)
+    select json_build_object(
+      'session', json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name, ''), 'starts_at', s.starts_at, 'ends_at', s.ends_at,
+         'timezone', s.timezone, 'status', s.status, 'group_id', s.group_id, 'group_name', g.name),
+      'can_edit', v_teach, 'late_minutes', public.tc_late_minutes(s.institution_id),
+      'started', now() >= s.starts_at, 'ended', now() > s.ends_at,
+      'students', coalesce((select json_agg(json_build_object('enrollment_id', r.enrollment_id,
+            'name', coalesce(nullif(btrim(r.name), ''), split_part(r.email, '@', 1)), 'email', r.email, 'status', r.eff,
+            'auto_status', r.auto_status, 'override', r.override, 'source', coalesce(r.source, 'auto'), 'note', r.note,
+            'minutes', round(coalesce(r.seconds_present, 0) / 60.0)::int, 'first_join', r.first_join, 'last_leave', r.last_leave,
+            'joins', coalesce(r.joins, 0), 'in_room', coalesce(r.in_room, false) and r.last_seen > now() - interval '150 seconds')
+            order by lower(coalesce(nullif(btrim(r.name), ''), r.email)), r.enrollment_id) from rows r), '[]'::json),
+      'counts', (select json_build_object('present', count(*) filter (where eff = 'present'), 'late', count(*) filter (where eff = 'late'),
+                   'absent', count(*) filter (where eff = 'absent'), 'excused', count(*) filter (where eff = 'excused'),
+                   'pending', count(*) filter (where eff = 'pending'), 'total', count(*)) from rows),
+      'staff', coalesce((select json_agg(json_build_object('name', public.tc_person_name(a.user_id), 'first_join', a.first_join,
+                   'minutes', round(a.seconds_present / 60.0)::int) order by a.first_join)
+                   from public.session_attendance a where a.session_id = p_session and a.kind = 'teacher' and a.user_id is not null), '[]'::json)));
+end $$;
+
+-- Corrección del docente / suplente: presente, tarde, ausente, justificado (o null = volver a lo automático) + nota
+create or replace function public.set_attendance(p_session uuid, p_enrollment uuid, p_status text, p_note text default null) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare s public.class_sessions%rowtype; r public.session_attendance%rowtype; v_status text := nullif(btrim(coalesce(p_status, '')), '');
+begin
+  select * into s from public.class_sessions where id = p_session;
+  if s.id is null or not public.teaches_session(p_session) then raise exception 'No autorizado'; end if;
+  if v_status is not null and v_status not in ('present','late','absent','excused') then raise exception 'Estado de asistencia inválido'; end if;
+  if p_enrollment is null or not (exists (select 1 from public.tc_session_students(p_session) st where st.enrollment_id = p_enrollment)
+                                  or exists (select 1 from public.session_attendance a where a.session_id = p_session and a.enrollment_id = p_enrollment)) then
+    raise exception 'Ese estudiante no es de esta clase';
+  end if;
+  insert into public.session_attendance (session_id, enrollment_id, kind) values (p_session, p_enrollment, 'student')
+  on conflict (session_id, enrollment_id) where enrollment_id is not null do nothing;
+  update public.session_attendance
+     set status = v_status, source = case when v_status is null then 'auto' else 'teacher' end,
+         note = case when p_note is null then note else public.tc_clean_note(p_note, 500) end, updated_by = auth.uid()
+   where session_id = p_session and enrollment_id = p_enrollment returning * into r;
+  return json_build_object('status', public.tc_att_status(r.status, r.auto_status, r.first_join, s.ends_at), 'override', r.status,
+                           'source', r.source, 'note', r.note);
+end $$;
+
+-- Informe del grupo: % de cada estudiante, presentes / tarde / ausentes / justificados y la matriz clases × estudiantes.
+-- Docente / suplente del grupo o admin de su unidad. Rango: fechas locales del grupo (máx. 366 días; por defecto 90).
+-- Emails: los que cargó esa institución (los ven el docente y los admins, como en la lista del grupo).
+create or replace function public.attendance_report(p_group uuid, p_from date default null, p_to date default null) returns json
+language plpgsql stable security definer set search_path = public as
+$$
+declare g public.class_groups%rowtype; v_to date; v_from date;
+begin
+  select * into g from public.class_groups where id = p_group;
+  if g.id is null or not (public.teaches_group(p_group) or public.is_admin_of(g.institution_id)) then raise exception 'No autorizado'; end if;
+  v_to := coalesce(p_to, (now() at time zone g.timezone)::date);
+  v_from := coalesce(p_from, v_to - 89);
+  if v_from > v_to or v_to - v_from > 366 then raise exception 'Rango de fechas inválido'; end if;
+  return (with ses as (
+      select s.id, coalesce(nullif(s.title, ''), g.name) as title, s.starts_at, s.ends_at
+        from public.class_sessions s
+       where s.group_id = p_group and s.status = 'scheduled' and s.starts_at <= now()
+         and (s.starts_at at time zone g.timezone)::date between v_from and v_to
+       order by s.starts_at limit 200),
+    stu as (
+      select e.id as enrollment_id, e.name, e.email, m.created_at as since, true as member
+        from public.group_members m join public.student_enrollments e on e.id = m.enrollment_id where m.group_id = p_group
+      union all
+      select e.id, e.name, e.email, null, false from public.student_enrollments e
+       where exists (select 1 from public.session_attendance a join ses on ses.id = a.session_id where a.enrollment_id = e.id)
+         and not exists (select 1 from public.group_members m where m.group_id = p_group and m.enrollment_id = e.id)),
+    cell as (
+      select stu.enrollment_id, ses.id as session_id, ses.starts_at,
+             case when a.id is null and (not stu.member or ses.starts_at < date_trunc('day', stu.since)) then null
+                  else public.tc_att_status(a.status, a.auto_status, a.first_join, ses.ends_at) end as status,
+             a.source
+        from stu cross join ses
+        left join public.session_attendance a on a.session_id = ses.id and a.enrollment_id = stu.enrollment_id),
+    agg as (
+      select stu.*,
+             (select count(*) from cell c where c.enrollment_id = stu.enrollment_id and c.status = 'present') as present,
+             (select count(*) from cell c where c.enrollment_id = stu.enrollment_id and c.status = 'late') as late,
+             (select count(*) from cell c where c.enrollment_id = stu.enrollment_id and c.status = 'absent') as absent,
+             (select count(*) from cell c where c.enrollment_id = stu.enrollment_id and c.status = 'excused') as excused,
+             (select coalesce(json_agg(json_build_object('s', c.status, 'src', c.source) order by c.starts_at, c.session_id), '[]'::json)
+                from cell c where c.enrollment_id = stu.enrollment_id) as cells
+        from stu)
+    select json_build_object(
+      'group', json_build_object('id', g.id, 'name', g.name, 'timezone', g.timezone, 'unit_name', (select name from public.institutions where id = g.institution_id)),
+      'from', v_from, 'to', v_to, 'can_edit', public.teaches_group(p_group), 'late_minutes', public.tc_late_minutes(g.institution_id),
+      'sessions', coalesce((select json_agg(json_build_object('id', ses.id, 'title', ses.title, 'starts_at', ses.starts_at, 'ends_at', ses.ends_at)
+                              order by ses.starts_at, ses.id) from ses), '[]'::json),
+      'students', coalesce((select json_agg(json_build_object('enrollment_id', a.enrollment_id,
+            'name', coalesce(nullif(btrim(a.name), ''), split_part(a.email, '@', 1)), 'email', a.email, 'member', a.member,
+            'present', a.present, 'late', a.late, 'absent', a.absent, 'excused', a.excused,
+            'pct', case when a.present + a.late + a.absent > 0 then round(100.0 * (a.present + a.late) / (a.present + a.late + a.absent)) end,
+            'cells', a.cells) order by a.member desc, lower(coalesce(nullif(btrim(a.name), ''), a.email)), a.enrollment_id) from agg a), '[]'::json),
+      'totals', (select json_build_object('present', count(*) filter (where status = 'present'), 'late', count(*) filter (where status = 'late'),
+                   'absent', count(*) filter (where status = 'absent'), 'excused', count(*) filter (where status = 'excused'),
+                   'rate', case when count(*) filter (where status in ('present','late','absent')) > 0
+                                then round(100.0 * count(*) filter (where status in ('present','late')) / count(*) filter (where status in ('present','late','absent'))) end)
+                   from cell)));
+end $$;
+
+-- Retraso permitido de una unidad (admins): minutos después del inicio para contar "tarde" (null = heredar de la unidad superior)
+create or replace function public.set_attendance_late_minutes(p_unit uuid, p_minutes integer) returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+begin
+  perform public.tc_assert_admin(p_unit);
+  if p_minutes is not null and (p_minutes < 0 or p_minutes > 120) then raise exception 'Minutos inválidos (de 0 a 120)'; end if;
+  update public.institutions set attendance_late_minutes = p_minutes where id = p_unit;
+  return json_build_object('late_minutes', public.tc_late_minutes(p_unit), 'own', p_minutes);
+end $$;
+
+-- HOOK para el video real + IA (todavía no se usa): solo con la service key (api/livekit/webhook.js). Registra la
+-- entrada / salida / segundos que informe LiveKit (p_source 'auto') o la participación que estime la IA ('ai').
+-- Nunca pisa una corrección del docente (source 'teacher').
+create or replace function public.attendance_record_external(p_session uuid, p_enrollment uuid, p_joined_at timestamptz,
+  p_left_at timestamptz, p_seconds integer, p_participation_seconds integer default null, p_source text default 'auto')
+returns json
+language plpgsql volatile security definer set search_path = public as
+$$
+declare s public.class_sessions%rowtype; r public.session_attendance%rowtype;
+begin
+  select * into s from public.class_sessions where id = p_session;
+  if s.id is null or coalesce(p_source, '') not in ('auto','ai')
+     or not exists (select 1 from public.tc_session_students(p_session) st where st.enrollment_id = p_enrollment) then
+    raise exception 'Datos de asistencia inválidos';
+  end if;
+  insert into public.session_attendance (session_id, enrollment_id, kind) values (p_session, p_enrollment, 'student')
+  on conflict (session_id, enrollment_id) where enrollment_id is not null do nothing;
+  update public.session_attendance a
+     set first_join = least(coalesce(a.first_join, p_joined_at), coalesce(p_joined_at, a.first_join)),
+         auto_status = coalesce(a.auto_status, case when p_joined_at is null then null
+                         when p_joined_at > s.starts_at + make_interval(mins => public.tc_late_minutes(s.institution_id)) then 'late' else 'present' end),
+         last_leave = coalesce(p_left_at, a.last_leave), last_seen = greatest(coalesce(a.last_seen, p_left_at, p_joined_at), coalesce(p_left_at, p_joined_at)),
+         seconds_present = greatest(a.seconds_present, coalesce(p_seconds, 0)),
+         participation_seconds = coalesce(p_participation_seconds, a.participation_seconds),
+         source = case when a.source = 'teacher' then 'teacher' else p_source end
+   where a.session_id = p_session and a.enrollment_id = p_enrollment returning * into r;
+  return json_build_object('status', public.tc_att_status(r.status, r.auto_status, r.first_join, s.ends_at), 'source', r.source);
+end $$;
+revoke all on function public.attendance_record_external(uuid, uuid, timestamptz, timestamptz, integer, integer, text) from public, anon, authenticated;
+grant execute on function public.attendance_record_external(uuid, uuid, timestamptz, timestamptz, integer, integer, text) to service_role;
+
+-- Permisos de las funciones de la app (documento de la clase + asistencia)
+do $$
+declare f text;
+begin
+  foreach f in array array[
+    'classdoc_open(uuid)', 'classdoc_push(uuid, integer, text, text)', 'classdoc_pull(uuid, bigint, integer, text, jsonb)',
+    'classdoc_snapshot(uuid, integer, text, bigint)', 'classdoc_set_lock(uuid, boolean)', 'classdoc_versions(uuid)',
+    'classdoc_version(uuid)', 'classdoc_add_version(uuid, text)', 'classdoc_restore(uuid)', 'group_sessions(uuid, integer, integer)',
+    'attendance_join(uuid)', 'attendance_heartbeat(uuid)', 'attendance_leave(uuid)', 'session_attendance(uuid)',
+    'set_attendance(uuid, uuid, text, text)', 'attendance_report(uuid, date, date)', 'set_attendance_late_minutes(uuid, integer)'] loop
+    execute format('revoke all on function public.%s from public, anon', f);
+    execute format('grant execute on function public.%s to authenticated', f);
+  end loop;
+end $$;
 
 -- ========== IDENTIDAD DEL SÚPER ADMIN: oculta para admins y docentes ==========
 -- Filas nuevas: created_by / invited_by / uploaded_by que apunten a un súper admin quedan en null.

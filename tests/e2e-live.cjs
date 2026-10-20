@@ -39,6 +39,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     if (u.pathname === '/csv-import.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'csv-import.js')) });
     if (u.pathname === '/groups-calendar.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'groups-calendar.js')) });
     if (u.pathname === '/groups-calendar.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(path.join(PUB, 'groups-calendar.css')) });
+    if (/^\/(class-doc\.(js|css)|attendance\.js)$/.test(u.pathname)) return r.fulfill({ contentType: u.pathname.endsWith('.css') ? 'text/css' : 'application/javascript', body: fs.readFileSync(path.join(PUB, u.pathname.slice(1))) });
     if (u.pathname.startsWith('/api/')) return r.fulfill({ status: 404, body: '{}' });
     return r.fulfill({ contentType: 'text/html', body: RAW_HTML });
   });
@@ -456,6 +457,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
       if (u.pathname === '/csv-import.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'csv-import.js')) });
       if (u.pathname === '/groups-calendar.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'groups-calendar.js')) });
       if (u.pathname === '/groups-calendar.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(path.join(PUB, 'groups-calendar.css')) });
+      if (/^\/(class-doc\.(js|css)|attendance\.js)$/.test(u.pathname)) return r.fulfill({ contentType: u.pathname.endsWith('.css') ? 'text/css' : 'application/javascript', body: fs.readFileSync(path.join(PUB, u.pathname.slice(1))) });
       return r.fulfill({ contentType: 'text/html', body: RAW_HTML });
     });
     const p2 = await c2.newPage();
