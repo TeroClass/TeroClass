@@ -7,6 +7,7 @@ process.env.AZURE_OPENAI_ENDPOINT = 'https://azure.example.com/';
 process.env.AZURE_OPENAI_API_KEY = 'azure-secret';
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 const gen = (await import('../api/generate.js')).default;
+const { appBody } = await import('./ai-fixtures.mjs');
 const { sanitizeMeta } = await import('../api/_lib/meta.js');
 
 const USER = { id: '1a2b3c4d-5e6f-4a1b-9c8d-000000000001', email: 'profe@tec.com' };
@@ -20,6 +21,7 @@ function mock({ quota = { allowed: true, used: 1, limit: 60, event: 41 }, quotaS
     calls.push({ url: u, headers: h, body });
     const j = (s, b) => new Response(JSON.stringify(b), { status: s, headers: { 'content-type': 'application/json' } });
     if (u.endsWith('/auth/v1/user')) return h.Authorization === 'Bearer good-token' ? j(200, USER) : j(401, { msg: 'bad jwt' });
+    if (u.endsWith('/rpc/ip_rate_hit')) return j(200, true);
     if (u.endsWith('/rpc/consume_ai_quota')) {
       // quotaV2 = 'missing': database without the p_meta version (PostgREST: function not found)
       if (body && 'p_meta' in body && quotaV2 === 'missing') return j(404, { code: 'PGRST202', message: 'Could not find the function public.consume_ai_quota(p_meta)' });
@@ -38,7 +40,8 @@ function res() {
   r.setHeader = (k, v) => { r.headers[k] = v; };
   return r;
 }
-const req = (body = {}) => ({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { messages: [{ role: 'user', content: 'Hola' }], ...body } });
+// the app's own request shapes (api/_lib/guard.js refuses anything else, TC-01)
+const req = (body = {}) => ({ method: 'POST', headers: { authorization: 'Bearer good-token', 'x-forwarded-for': '203.0.113.7' }, body: { ...appBody(body.kind || 'generate'), ...body } });
 const by = (calls, end) => calls.filter(c => c.url.endsWith(end));
 const order = calls => calls.map(c => c.url.replace(/^.*\/(rpc\/)?/, '').replace(/\?.*$/, ''));
 
@@ -72,7 +75,7 @@ test('generate: sends the sanitized meta with the user token (no service key), t
   const r = res();
   await gen(req({ kind: 'student', meta: { subjects: ['Math'], language: 'Spanish', age_band: 'teen', institution_id: 'evil', user_id: 'evil' } }), r);
   assert.equal(r.statusCode, 200);
-  assert.deepEqual(order(calls), ['user', 'consume_ai_quota', 'completions', 'finish_ai_event']);
+  assert.deepEqual(order(calls), ['user', 'ip_rate_hit', 'consume_ai_quota', 'completions', 'finish_ai_event']);
   const q = by(calls, '/rpc/consume_ai_quota')[0];
   assert.equal(q.headers.Authorization, 'Bearer good-token');
   assert.deepEqual(q.body, { p_meta: { kind: 'student', subjects: ['Math'], language: 'Spanish', age_band: 'teen' } });

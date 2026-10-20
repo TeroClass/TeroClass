@@ -21,8 +21,10 @@ const ROOM_RE = /^[A-Za-z0-9_-]{3,64}$/;
 const STAFF_ROLES = new Set(['teacher', 'org_admin', 'superadmin']);
 
 // Rooms are created by a teacher as "<ownerKey>-<random>"; only that teacher gets roomAdmin.
-// Calendar classes ("sess-<uuid>") are checked against the database (live_room_role). Ad-hoc rooms below:
-// only the creating teacher hosts; anyone signed in with the link can join as a student.
+// Calendar classes ("sess-<uuid>") are checked against the database (live_room_role). Ad-hoc rooms (TC-13, 2026-10):
+// the database decides (adhoc_room_access): the creating teacher hosts; staff (teachers / admins) of the SAME account
+// (main institution) can join as participants; students and accounts without an institution cannot — their classes
+// go through the calendar. The display name is decided by the database too (live_display_name, TC-27), never the body.
 // "sess-" + 32 hex chars (uuid without dashes) → uuid, or null for ad-hoc rooms.
 export function sessionIdFromRoom(room) {
   const m = /^sess-([0-9a-f]{32})$/i.exec(String(room || ''));
@@ -69,6 +71,20 @@ export function consentFlags(c) {
     consent: { recording: recorded, ai_analysis: recorded, storage: recorded } };
 }
 export const ownerKey = userId => String(userId || '').replace(/-/g, '').slice(0, 12).toLowerCase();
+// Ask one function with the caller's own session. undefined = could not check (network / old database).
+async function userRpcValue(token, fn, body) {
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+      method: 'POST', signal: controller.signal,
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) return undefined;
+    const t = await r.text(); let d = null; try { d = t ? JSON.parse(t) : null; } catch { return undefined; }
+    return d;
+  } catch { return undefined; } finally { clearTimeout(timer); }
+}
 
 function cleanName(v, fallback) {
   const s = String(v ?? '').replace(/[\u0000-\u001f\u007f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80);
@@ -110,19 +126,27 @@ export default async function handler(req, res) {
     if (role === 'teacher') isAdmin = v.role === 'teacher';
     else if (role === 'student') { if (v.role === 'teacher') return res.status(403).json({ error: 'Only the teacher of this class can host it.', code: 'owner' }); }
     else return res.status(403).json({ error: 'You are not part of this class.', code: 'not_member' });
-  } else if (v.role === 'teacher') {
-    let profile = null;
-    try { profile = await getProfile(token, user.id); } catch { profile = null; }
-    if (!profile || !STAFF_ROLES.has(profile.role)) return res.status(403).json({ error: 'Only teachers can host a class.', code: 'role' });
-    if (!v.room.toLowerCase().startsWith(ownerKey(user.id) + '-')) {
+  } else {
+    // ad-hoc room "<ownerKey>-<…>": host = its creator; guests = staff of the creator's account (database decides)
+    const key = /^([0-9a-f]{12})-/i.exec(v.room);
+    if (!key) return res.status(403).json({ error: 'You are not part of this class.', code: 'not_member' });
+    const access = await userRpcValue(token, 'adhoc_room_access', { p_owner_key: key[1].toLowerCase() });
+    if (access === undefined) return res.status(503).json({ error: 'Could not check your access to this class. Please try again.', code: 'access_check' });
+    if (access === 'host') isAdmin = v.role === 'teacher';
+    else if (access === 'guest') { if (v.role === 'teacher') return res.status(403).json({ error: 'Only the teacher who created this class can host it.', code: 'owner' }); }
+    else if (v.role === 'teacher') {
+      let profile = null;
+      try { profile = await getProfile(token, user.id); } catch { profile = null; }
+      if (!profile || !STAFF_ROLES.has(profile.role)) return res.status(403).json({ error: 'Only teachers can host a class.', code: 'role' });
       return res.status(403).json({ error: 'Only the teacher who created this class can host it.', code: 'owner' });
-    }
-    isAdmin = true;
+    } else return res.status(403).json({ error: 'Only people of the same institution can join this class. Join your classes from the calendar.', code: 'not_member' });
   }
 
   const now = Math.floor(Date.now() / 1000);
   const identity = user.id;
-  const name = cleanName(v.name, cleanName(user.user_metadata?.name, 'Participant'));
+  // TC-27: the name everyone sees comes from the database (the name the institution loaded, or the profile)
+  const dbName = await userRpcValue(token, 'live_display_name', { p_session: sessId || null });
+  const name = cleanName(typeof dbName === 'string' ? dbName : '', cleanName(user.user_metadata?.name, 'Participant'));
   // Consent from the database (never from the body). Metadata is visible to everyone in the room: flags only.
   const f = consentFlags(await myConsent(token));
   const recorded = f.recorded;

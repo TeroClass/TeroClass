@@ -6,21 +6,16 @@
 //   Authorization: Bearer <the teacher's Supabase session token>
 // Who may notify, and to whom, is decided by the database (session_notify_payload: only the session's
 // teacher / substitute / creator, recipients = its students), called with the caller's own token.
+// TC-08 (2026-10): before anything is sent the database grants the teacher's daily e-mail quota (email_quota_take;
+// fail closed), at most 100 recipients per send, and the class title is cleaned before it goes into the subject
+// (one line, no links or addresses, 60 characters).
 import { SUPABASE_URL, SUPABASE_KEY, bearer } from '../_lib/livekit.js';
 import { buildCalendar, appOrigin, isUuid } from '../_lib/ics.js';
+import { resendKey, EMAIL_RE, timedFetch, safeSubjectText, takeQuota, sendEmails, fromAddress, escHtml } from '../_lib/mail.js';
 
+export { resendKey };
 const KINDS = new Set(['invite', 'update', 'cancel']);
-const EMAIL_RE = /^[^\s@<>"',;()]{1,64}@[^\s@<>"',;()]{1,190}\.[A-Za-z]{2,24}$/;
-const MAX_RECIPIENTS = 200;
-const TIMEOUT_MS = 10000;
-
-export function resendKey() { return String(process.env.RESEND_API_KEY || '').trim() || null; }
-
-async function timedFetch(url, opts) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try { return await fetch(url, { ...opts, signal: controller.signal }); } finally { clearTimeout(timer); }
-}
+export const MAX_RECIPIENTS = 100;
 
 const T = {
   es: { invite: 'Invitación', update: 'Clase actualizada', cancel: 'Clase cancelada', join: 'Entrar a la clase',
@@ -30,16 +25,15 @@ const T = {
         intro: { invite: 'You have a class on TeroClass.', update: 'One of your classes on TeroClass changed.', cancel: 'One of your classes on TeroClass was cancelled.' },
         when: 'When', ics: 'The event is attached: open it to add it to your calendar.' },
 };
-const escHtml = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 export function buildEmails(p, { kind, lang, origin, from }) {
   const t = T[lang] || T.es;
   const when = (() => { try { return new Date(p.starts_at).toLocaleString(lang === 'en' ? 'en-US' : 'es-UY', { timeZone: p.timezone || 'America/Montevideo', dateStyle: 'full', timeStyle: 'short' }) + ` (${p.timezone || 'America/Montevideo'})`; } catch { return String(p.starts_at); } })();
-  const title = String(p.title || p.group_name || 'Class').slice(0, 200);
+  const title = safeSubjectText(p.title || p.group_name || 'Class', 120) || 'TeroClass';
   const ics = buildCalendar([p], { method: kind === 'cancel' ? 'CANCEL' : 'REQUEST', origin, name: 'TeroClass' });
   const link = `${origin}/?session=${p.id}`;
-  const subject = `${t[kind]}: ${title} · ${when}`.replace(/[\r\n]+/g, ' ').slice(0, 250);
-  const html = `<p>${escHtml(t.intro[kind])}</p><p><b>${escHtml(title)}</b>${p.group_name ? ` · ${escHtml(p.group_name)}` : ''}<br>${escHtml(t.when)}: ${escHtml(when)}</p>`
+  const subject = `${t[kind]}: ${safeSubjectText(title, 60)} · ${when}`.replace(/[\r\n]+/g, ' ').slice(0, 200);
+  const html = `<p>${escHtml(t.intro[kind])}</p><p><b>${escHtml(title)}</b>${p.group_name ? ` · ${escHtml(safeSubjectText(p.group_name, 80))}` : ''}<br>${escHtml(t.when)}: ${escHtml(when)}</p>`
     + (kind === 'cancel' ? '' : `<p><a href="${escHtml(link)}">${escHtml(t.join)}</a></p>`) + `<p style="color:#888">${escHtml(t.ics)}</p>`;
   const recipients = (Array.isArray(p.recipients) ? p.recipients : [])
     .map(r => String(r?.email || '').trim()).filter(e => EMAIL_RE.test(e))
@@ -73,18 +67,11 @@ export default async function handler(req, res) {
   } catch { return res.status(502).json({ error: 'Could not reach the database.', code: 'upstream' }); }
   if (!payload || !isUuid(payload.id)) return res.status(403).json({ error: 'Not allowed.', code: 'forbidden' });
 
-  const from = String(process.env.NOTIFY_FROM || 'TeroClass <no-reply@teroclass.com>').slice(0, 200);
-  const emails = buildEmails(payload, { kind: b.kind, lang, origin: appOrigin(req), from });
+  const emails = buildEmails(payload, { kind: b.kind, lang, origin: appOrigin(req), from: fromAddress() });
   if (!emails.length) return res.status(200).json({ configured: true, sent: 0, failed: 0 });
-  let sent = 0; let failed = 0;
-  for (let i = 0; i < emails.length; i += 100) {             // Resend batch: up to 100 emails per call
-    const chunk = emails.slice(i, i + 100);
-    try {
-      const r = await timedFetch('https://api.resend.com/emails/batch', {
-        method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(chunk),
-      });
-      if (r.ok) sent += chunk.length; else { failed += chunk.length; console.error(`notify: resend batch failed (HTTP ${r.status})`); }
-    } catch { failed += chunk.length; console.error('notify: resend batch failed (network)'); }
-  }
+  const q = await takeQuota(token, 'session', emails.length);
+  if (!q) return res.status(503).json({ configured: true, sent: 0, error: 'Could not check your e-mail limit. Nothing was sent.', code: 'email_quota_check' });
+  if (!q.allowed) return res.status(429).json({ configured: true, sent: 0, error: 'You reached the e-mail limit for today. Share the class link instead.', code: 'email_quota', reason: q.reason || null });
+  const { sent, failed } = await sendEmails(key, emails);
   return res.status(200).json({ configured: true, sent, failed });
 }

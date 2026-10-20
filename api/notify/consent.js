@@ -1,5 +1,5 @@
 // Vercel serverless: emails the institution admins when someone says NO to recording and writes the justification
-// ("Justificá tu respuesta", 001_base.sql consent_declines). "Dummy feature" like the class invitations: it sends ONLY
+// (optional since 2026-10, P-11; a "no" without text sends nothing — 001_base.sql consent_decline_notify_payload). "Dummy feature" like the class invitations: it sends ONLY
 // when RESEND_API_KEY is set in Vercel; otherwise it is a no-op ({configured:false}) and admins see the justification
 // in Groups → Consentimientos. The admins' emails are read with the service key (consent_decline_notify_payload, which
 // only the service role can execute), so they never reach the browser. No key ever leaves the server.
@@ -17,12 +17,12 @@ const oneLine = s => String(s ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, 
 
 const T = {
   es: { subject: n => `Consentimiento de grabación: ${n} no aceptó que se graben sus clases`,
-        intro: 'Una persona de tu institución no aceptó que se graben sus clases en TeroClass y dejó esta justificación:',
+        intro: 'Una persona de tu institución no aceptó que se graben sus clases en TeroClass y dejó este comentario (era opcional):',
         student: 'Estudiante', teacher: 'Docente', unit: 'Unidad', cls: 'Clase', when: 'Fecha',
         note: 'Entró a la clase sin ser grabada. Se le va a volver a preguntar en su próxima clase.',
         open: 'Ver en TeroClass → Grupos → Consentimientos' },
   en: { subject: n => `Recording consent: ${n} did not agree to have their classes recorded`,
-        intro: 'Someone in your institution did not agree to have their classes recorded on TeroClass and left this justification:',
+        intro: 'Someone in your institution did not agree to have their classes recorded on TeroClass and left this comment (it was optional):',
         student: 'Student', teacher: 'Teacher', unit: 'Unit', cls: 'Class', when: 'Date',
         note: 'They joined the class without being recorded. They will be asked again at their next class.',
         open: 'See it in TeroClass → Groups → Consents' },

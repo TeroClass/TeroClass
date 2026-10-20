@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 process.env.AZURE_OPENAI_ENDPOINT = 'https://azure.example.com/';
 process.env.AZURE_OPENAI_API_KEY = 'azure-secret';
 const gen = (await import('../api/generate.js')).default;
+const { appBody } = await import('./ai-fixtures.mjs');
 const status = (await import('../api/billing/status.js')).default;
 
 const USER = { id: '1a2b3c4d-5e6f-4a1b-9c8d-000000000001', email: 'profe@tec.com' };
@@ -22,6 +23,7 @@ function mock({ quota = { allowed: true, used: 1, limit: 60 }, budget = { allowe
     calls.push({ url: u, headers: h, body: opts.body ? JSON.parse(opts.body) : null });
     const j = (s, b) => new Response(JSON.stringify(b), { status: s, headers: { 'content-type': 'application/json' } });
     if (u.endsWith('/auth/v1/user')) return h.Authorization === 'Bearer good-token' ? j(200, USER) : j(401, { msg: 'bad jwt' });
+    if (u.endsWith('/rpc/ip_rate_hit')) return j(200, true);
     if (u.endsWith('/rpc/consume_ai_quota')) return j(200, quota);
     if (u.endsWith('/rpc/ai_budget_check')) return j(budgetStatus, budgetStatus === 200 ? budget : { message: 'boom' });
     if (u.endsWith('/rpc/ai_record_usage')) return j(recordStatus, recordStatus === 200 ? after : { message: 'boom' });
@@ -38,7 +40,8 @@ function res() {
   r.setHeader = (k, v) => { r.headers[k] = v; };
   return r;
 }
-const req = (body = {}) => ({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { messages: [{ role: 'user', content: 'Hola' }], ...body } });
+// the app's own request shapes (api/_lib/guard.js refuses anything else, TC-01)
+const req = (body = {}) => ({ method: 'POST', headers: { authorization: 'Bearer good-token', 'x-forwarded-for': '203.0.113.7' }, body: { ...appBody(body.kind || 'generate'), ...body } });
 const setKey = k => { if (k) process.env.SUPABASE_SERVICE_ROLE_KEY = k; else delete process.env.SUPABASE_SERVICE_ROLE_KEY; };
 const by = (calls, end) => calls.filter(c => c.url.endsWith(end));
 const azureCalls = calls => calls.filter(c => c.url.startsWith('https://azure.example.com/'));
@@ -63,7 +66,7 @@ test('with the key: daily limit (user JWT) → budget check (service key) → Az
   const r = res(); await gen(req({ kind: 'student' }), r);
   assert.equal(r.statusCode, 200);
   const order = calls.map(c => c.url.replace(/^.*\/(rpc\/)?/, '').replace(/\?.*$/, ''));
-  assert.deepEqual(order, ['user', 'consume_ai_quota', 'ai_budget_check', 'completions', 'ai_record_usage']);
+  assert.deepEqual(order, ['user', 'ip_rate_hit', 'consume_ai_quota', 'ai_budget_check', 'completions', 'ai_record_usage']);
   const q = by(calls, '/rpc/consume_ai_quota')[0]; assert.equal(q.headers.Authorization, 'Bearer good-token');
   const b = by(calls, '/rpc/ai_budget_check')[0];
   assert.equal(b.headers.apikey, JWT_KEY); assert.equal(b.headers.Authorization, 'Bearer ' + JWT_KEY);
@@ -75,9 +78,13 @@ test('with the key: daily limit (user JWT) → budget check (service key) → Az
   assert.ok(!out.includes(JWT_KEY) && !out.includes('secret-root'), 'no key / internal ids in the response');
 });
 
-test('new-format secret key goes only in the apikey header; unknown kind → generate', async () => {
-  setKey(NEW_KEY); const calls = mock();
-  const r = res(); await gen(req({ kind: '<script>' }), r);
+test('new-format secret key goes only in the apikey header; unknown kind → refused before any cost (TC-01)', async () => {
+  setKey(NEW_KEY); let calls = mock();
+  let r = res(); await gen(req({ kind: '<script>', messages: appBody('generate').messages }), r);
+  assert.equal(r.statusCode, 400); assert.equal(r.body.code, 'invalid');
+  assert.equal(azureCalls(calls).length, 0); assert.equal(by(calls, '/rpc/consume_ai_quota').length, 0);
+  calls = mock();
+  r = res(); await gen(req(), r);
   assert.equal(r.statusCode, 200);
   const b = by(calls, '/rpc/ai_budget_check')[0];
   assert.equal(b.headers.apikey, NEW_KEY); assert.equal(b.headers.Authorization, undefined);

@@ -145,6 +145,11 @@ test('notify: with a key → auth required, payload from the database with the c
         assert.equal(opts.headers.Authorization, 'Bearer good');
         return new Response(JSON.stringify(payload), { status: 200 });
       }
+      if (url.endsWith('/rpc/email_quota_take')) {          // TC-08: the teacher's daily quota, with the teacher's token
+        assert.equal(opts.headers.Authorization, 'Bearer good');
+        assert.deepEqual(JSON.parse(opts.body), { p_kind: 'session', p_recipients: 2 });
+        return new Response('{"allowed":true}', { status: 200 });
+      }
       if (url === 'https://api.resend.com/emails/batch') {
         assert.equal(opts.headers.Authorization, 'Bearer re_test_secret_key_123');
         return new Response('{"data":[]}', { status: 200 });

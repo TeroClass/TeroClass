@@ -16,7 +16,7 @@ const ENV = { LIVEKIT_URL: 'wss://teroclass-br.livekit.cloud', LIVEKIT_API_KEY: 
 function setEnv(on) { for (const [k, v] of Object.entries(ENV)) { if (on) process.env[k] = v; else delete process.env[k]; } }
 // my_consent (001_base.sql): the token reads the caller's consent from the database (never from the body)
 const GRANTED = { current_version: '2026-10', status: 'granted', granted: true, recorded: true, version: '2026-10', minor: false, guardian_consent: null };
-function mockFetch({ user = USER, role = 'teacher', liveRole = null, liveFail = false, consent = GRANTED } = {}) {
+function mockFetch({ user = USER, role = 'teacher', liveRole = null, liveFail = false, consent = GRANTED, adhoc = null, dbName = 'Profe <b>Ana</b>' } = {}) {
   const calls = [];
   globalThis.fetch = async (url, opts) => {
     calls.push({ url: String(url), opts });
@@ -24,6 +24,9 @@ function mockFetch({ user = USER, role = 'teacher', liveRole = null, liveFail = 
     const ok = user && auth === 'Bearer good-token';
     if (String(url).endsWith('/auth/v1/user')) return new Response(JSON.stringify(ok ? user : { msg: 'bad jwt' }), { status: ok ? 200 : 401 });
     if (String(url).endsWith('/rest/v1/rpc/live_room_role')) return liveFail ? new Response('{}', { status: 500 }) : new Response(JSON.stringify(ok ? liveRole : null), { status: ok ? 200 : 401 });
+    // TC-13: ad-hoc rooms → the database says host (creator) / guest (staff of the same account) / null
+    if (String(url).endsWith('/rest/v1/rpc/adhoc_room_access')) { const k = JSON.parse(opts.body).p_owner_key; return new Response(JSON.stringify(ok ? (k === tokenMod.ownerKey(USER.id) ? 'host' : adhoc) : null), { status: ok ? 200 : 401 }); }
+    if (String(url).endsWith('/rest/v1/rpc/live_display_name')) return new Response(JSON.stringify(ok ? dbName : null), { status: ok ? 200 : 401 });
     if (String(url).endsWith('/rest/v1/rpc/my_consent')) return new Response(JSON.stringify(ok ? consent : { message: 'JWT' }), { status: ok ? 200 : 401 });
     if (String(url).includes('/rest/v1/profiles')) return new Response(JSON.stringify(ok ? [{ role, institution_id: null }] : []), { status: 200 });
     return new Response('{}', { status: 404 });
@@ -38,7 +41,7 @@ function res() {
   return r;
 }
 const room = `${tokenMod.ownerKey(USER.id)}-abc123`;
-const goodBody = { room, role: 'teacher', name: 'Profe <b>Ana</b>', consent: { recording: true, ai_analysis: true, storage: false } };
+const goodBody = { room, role: 'teacher', name: 'Someone Else', consent: { recording: true, ai_analysis: true, storage: false } }; // name: ignored (TC-27)
 const b64d = s => JSON.parse(Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
 
 test('config: configured false/true without leaking secrets', async () => {
@@ -103,12 +106,29 @@ test('token: valid LiveKit JWT (structure, claims, HS256 signature)', async () =
 });
 
 test('token: students get no roomAdmin; teachers only in their own rooms', async () => {
-  setEnv(true); mockFetch();
-  let r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { ...goodBody, role: 'student', room: 'otherroom-1' } }, r);
+  setEnv(true); mockFetch({ adhoc: 'guest' });
+  let r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { ...goodBody, role: 'student', room: 'ffffffffffff-x1' } }, r);
   assert.equal(r.statusCode, 200);
   assert.equal(b64d(r.body.token.split('.')[1]).video.roomAdmin, undefined);
   r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { ...goodBody, room: 'ffffffffffff-x1' } }, r);
   assert.equal(r.statusCode, 403);
+  setEnv(false);
+});
+
+test('TC-13: ad-hoc rooms are closed to anyone the database does not allow (students, other institutions, made-up names)', async () => {
+  setEnv(true); mockFetch({ adhoc: null });
+  const call = async b => { const r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: b }, r); return r; };
+  assert.equal((await call({ ...goodBody, role: 'student', room: 'ffffffffffff-x1' })).statusCode, 403, 'not the same account');
+  assert.equal((await call({ ...goodBody, role: 'student', room: 'otherroom-1' })).statusCode, 403, 'not a TeroClass room name');
+  assert.equal((await call({ ...goodBody, role: 'student', room })).statusCode, 200, 'the creator can always join their own room');
+  setEnv(false);
+});
+
+test('TC-27: the name in the room comes from the database, never from the request body', async () => {
+  setEnv(true); mockFetch({ dbName: 'Ana Loaded' });
+  const r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { ...goodBody, name: 'Docente' } }, r);
+  assert.equal(r.statusCode, 200);
+  assert.equal(b64d(r.body.token.split('.')[1]).name, 'Ana Loaded');
   setEnv(false);
 });
 
