@@ -8,8 +8,10 @@
 <link rel="icon" type="image/png" sizes="512x512" href="/favicon-512.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="theme-color" content="#ffffff">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
+/* Inter served from this site (TC-22: no request to Google Fonts; /vendor/fonts, SIL OFL 1.1) */
+@font-face{font-family:'Inter';font-style:normal;font-display:swap;font-weight:100 900;src:url(/vendor/fonts/inter-latin-wght-normal.woff2) format('woff2-variations'),url(/vendor/fonts/inter-latin-wght-normal.woff2) format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:'Inter';font-style:normal;font-display:swap;font-weight:100 900;src:url(/vendor/fonts/inter-latin-ext-wght-normal.woff2) format('woff2-variations'),url(/vendor/fonts/inter-latin-ext-wght-normal.woff2) format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f0eef8;--white:#fff;--black:#111;--ink:#1a1a1a;--ink-soft:#444;--ink-muted:#888;
@@ -1318,7 +1320,8 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 <div class="modal-overlay" id="modal-gc"><div class="modal gc-modal" role="dialog" aria-modal="true" aria-labelledby="gc-modal-title" id="gc-modal-box"></div></div>
 <div class="toast" id="toast"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+<!-- supabase-js 2.116.0, served from this site (TC-11: no third-party script on the page; see public/vendor/licenses) -->
+<script src="/vendor/supabase-js-2.116.0.js"></script>
 <script>
 // ══ PEDAGOGICAL METHODOLOGIES ══
 const METHODOLOGIES = [
@@ -1601,6 +1604,8 @@ function initI18n(){
 let playbookCache={}; // orgId -> [{id,name,summary,chars,created_at}]
 const playbookBusy={}; // docId|tempId -> status text
 const scriptLoads={}; // url -> Promise (cached; removed on failure so it can be retried)
+// Third-party libraries are served from this site, pinned by version (TC-10 / TC-11; see public/vendor/licenses)
+const VENDOR={mammoth:'/vendor/mammoth-1.13.0.browser.min.js',pdfjs:'/vendor/pdfjs-4.10.38/pdf.min.mjs',pdfWorker:'/vendor/pdfjs-4.10.38/pdf.worker.min.mjs'};
 function loadScriptOnce(src,timeoutMs=20000){
   if(scriptLoads[src])return scriptLoads[src];
   const p=new Promise((res,rej)=>{
@@ -1617,13 +1622,14 @@ async function extractFileText(file){
   const name=file.name.toLowerCase();
   if(name.endsWith('.txt')||name.endsWith('.md'))return await file.text();
   if(name.endsWith('.docx')){
-    await loadScriptOnce('https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js');
+    await loadScriptOnce(VENDOR.mammoth); // mammoth 1.13.0 (TC-19), served from this site
     const r=await window.mammoth.extractRawText({arrayBuffer:await file.arrayBuffer()});return r.value||'';
   }
   if(name.endsWith('.pdf')){
-    await loadScriptOnce('https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js');
-    window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
-    const pdf=await window.pdfjsLib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise;
+    // TC-10: pdf.js 4.10.38 (fixes CVE-2024-4367), served from this site, and never evaluating code from the PDF
+    let pdfjs;try{pdfjs=await import(VENDOR.pdfjs);}catch(e){throw new Error('Could not load the reader for this file type. Check your connection and try again.');}
+    pdfjs.GlobalWorkerOptions.workerSrc=VENDOR.pdfWorker;
+    const pdf=await pdfjs.getDocument({data:new Uint8Array(await file.arrayBuffer()),isEvalSupported:false,enableXfa:false}).promise;
     let out='';for(let i=1;i<=Math.min(pdf.numPages,200);i++){const pg=await pdf.getPage(i);const tc=await pg.getTextContent();out+=tc.items.map(it=>it.str).join(' ')+'\n\n';}
     return out;
   }

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+<title>Consentimiento del tutor/a · TeroClass</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="stylesheet" href="/legal.css">
+</head>
+<body>
+<!-- P-10 (2026-10): the parent / guardian of a minor confirms or declines the recording consent from their own link
+     (/tutor?t=<token>), without an account. Database: guardian_consent_info / guardian_consent_respond (001_base.sql). -->
+<div class="lg-wrap">
+  <div class="lg-top"><a class="lg-brand" href="/">TeroClass</a></div>
+  <section class="lg-card" aria-live="polite">
+    <h1 id="tu-title">Consentimiento de grabación</h1>
+    <div id="tu-body"><p>Cargando…</p></div>
+  </section>
+  <p class="lg-foot"><a href="/privacidad">Política de privacidad</a> · <a href="/terminos">Términos de uso</a></p>
+</div>
+<script>
+(function () {
+  'use strict';
+  var SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
+  var KEY = 'sb_publishable_D4ZATRSmyiURioJ4PvTb4A_rR_urilK';
+  var en = /^en/i.test(navigator.language || '') && !/[?&]lang=es/.test(location.search);
+  var T = en ? {
+    title: 'Recording consent', loading: 'Loading…', invalid: 'This link is not valid. Ask for a new one.', expired: 'This link expired. Ask for a new one from TeroClass.',
+    ask: function (s, g) { return (g ? g + ', ' : '') + (s || 'a student under 18') + ' named you as their parent or guardian. Do you agree that their classes on TeroClass are recorded (audio only) and analysed by AI to create their learning insights?'; },
+    more: ['Only the voice is recorded (audio), never video, and only of people who agreed.', 'The original audio is deleted after 30 days; the insights stay in their TeroClass record.', 'No emotion detection; speakers are identified by their own microphone.', 'If you say no, they still attend their classes normally, without being recorded.', 'You can change your answer at any time from this same link.'],
+    yes: 'Yes, I agree', no: "No, I don't agree", confirmed: '✓ You agreed. Their classes can be recorded (audio only).', declined: 'You did not agree. Their classes are not recorded.',
+    change: 'You can change your answer:', error: 'Could not save your answer. Try again.', privacy: 'Privacy policy'
+  } : {
+    title: 'Consentimiento de grabación', loading: 'Cargando…', invalid: 'Este link no es válido. Pedí uno nuevo.', expired: 'Este link venció. Pedí uno nuevo desde TeroClass.',
+    ask: function (s, g) { return (g ? g + ': ' : '') + (s || 'Una persona menor de 18 años') + ' te indicó como su madre, padre o tutor/a. ¿Aceptás que sus clases en TeroClass se graben (solo audio) y que la IA las analice para generar sus insights de aprendizaje?'; },
+    more: ['Solo se graba la voz (audio), nunca video, y solo de quienes aceptaron.', 'El audio original se borra a los 30 días; los insights quedan en su registro de TeroClass.', 'No se detectan emociones; cada persona se identifica por su propio micrófono.', 'Si decís que no, igual participa de sus clases normalmente, sin ser grabado/a.', 'Podés cambiar tu respuesta cuando quieras desde este mismo link.'],
+    yes: 'Sí, acepto', no: 'No acepto', confirmed: '✓ Aceptaste. Sus clases se pueden grabar (solo audio).', declined: 'No aceptaste. Sus clases no se graban.',
+    change: 'Podés cambiar tu respuesta:', error: 'No se pudo guardar tu respuesta. Probá de nuevo.', privacy: 'Política de privacidad'
+  };
+  document.documentElement.lang = en ? 'en' : 'es';
+  document.getElementById('tu-title').textContent = T.title;
+  var body = document.getElementById('tu-body');
+  var token = (new URLSearchParams(location.search).get('t') || '').trim();
+  function el(tag, text, cls) { var e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
+  function rpc(fn, args) {
+    return fetch(SB + '/rest/v1/rpc/' + fn, { method: 'POST', headers: { apikey: KEY, 'Content-Type': 'application/json' }, body: JSON.stringify(args) })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); });
+  }
+  function render(info) {
+    body.textContent = '';
+    if (!info || info.status === 'invalid') { body.appendChild(el('p', T.invalid)); return; }
+    if (info.status === 'expired') { body.appendChild(el('p', T.expired)); return; }
+    body.appendChild(el('p', T.ask(info.student, info.guardian_name)));
+    var ul = el('ul'); T.more.forEach(function (m) { ul.appendChild(el('li', m)); }); body.appendChild(ul);
+    if (info.status === 'confirmed' || info.status === 'declined') {
+      body.appendChild(el('p', info.status === 'confirmed' ? T.confirmed : T.declined, 'tu-status'));
+      body.appendChild(el('p', T.change));
+    }
+    var row = el('div', null, 'tu-actions');
+    var y = el('button', T.yes, 'tu-btn yes'); y.type = 'button'; y.id = 'tu-yes';
+    var n = el('button', T.no, 'tu-btn'); n.type = 'button'; n.id = 'tu-no';
+    y.onclick = function () { answer(true, y, n); }; n.onclick = function () { answer(false, y, n); };
+    row.appendChild(y); row.appendChild(n); body.appendChild(row);
+  }
+  function answer(ok, y, n) {
+    y.disabled = n.disabled = true;
+    rpc('guardian_consent_respond', { p_token: token, p_accept: ok }).then(render, function () {
+      y.disabled = n.disabled = false; body.appendChild(el('p', T.error, 'tu-status'));
+    });
+  }
+  if (!/^[0-9a-f]{64}$/.test(token)) { render({ status: 'invalid' }); return; }
+  rpc('guardian_consent_info', { p_token: token }).then(render, function () { render({ status: 'invalid' }); });
+})();
+</script>
+</body>
+</html>

@@ -16,7 +16,10 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const RAW_HTML = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+// supabase-js is self-hosted since 2026-10 (/vendor/supabase-js-2.116.0.js, byte-identical to the npm 2.116.0 UMD the tests
+// load as SB_JS): the tests keep serving it through their CDN route, so the tag is pointed back there.
+const RAW_HTML = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8')
+  .replace('<script src="/vendor/supabase-js-2.116.0.js"></script>', '<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>');
 // Tests that answer every page request with HTML get the live-class assets inlined
 // (in production they are separate files: see vercel.json). Function replacers: no $-patterns.
 const asset = f => fs.readFileSync(path.join(ROOT, 'public', f), 'utf8');

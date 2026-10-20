@@ -25,7 +25,8 @@
   'use strict';
 
   const LK_VERSION = '2.22.3';
-  const LK_CDN = `https://cdn.jsdelivr.net/npm/livekit-client@${LK_VERSION}/dist/livekit-client.umd.js`;
+  // served from this site (TC-11: no third-party script; public/vendor/licenses)
+  const LK_CDN = `/vendor/livekit-client-${LK_VERSION}.umd.js`;
   const CONSENT_VERSION = '2026-10'; // = tc_consent_version() (001_base.sql) and api/class/token.js; bump all three when the text changes
   const CONSENT_TEXT = 'I agree that my classes on TeroClass are recorded (audio only) and that AI analyses them to create my insights and improve the classes.';
   const CONSENT_MORE = ['Only your voice is recorded (audio), never video, and only for people who agreed.',

@@ -40,6 +40,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     if (u.pathname === '/groups-calendar.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'groups-calendar.js')) });
     if (u.pathname === '/groups-calendar.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(path.join(PUB, 'groups-calendar.css')) });
     if (/^\/(class-doc\.(js|css)|attendance\.js)$/.test(u.pathname)) return r.fulfill({ contentType: u.pathname.endsWith('.css') ? 'text/css' : 'application/javascript', body: fs.readFileSync(path.join(PUB, u.pathname.slice(1))) });
+    if (u.pathname.startsWith('/vendor/livekit-client')) { net.livekitCdn++; return r.abort(); } // self-hosted SDK (TC-11)
     if (u.pathname.startsWith('/api/')) return r.fulfill({ status: 404, body: '{}' });
     return r.fulfill({ contentType: 'text/html', body: RAW_HTML });
   });
@@ -468,6 +469,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await c2.route('http://teroclass.test/**', async r => {
       const u = new URL(r.request().url());
       if (u.pathname === '/api/class/config') return r.fulfill({ contentType: 'application/json', body: '{"configured":true}' });
+      if (u.pathname.startsWith('/vendor/livekit-client')) { seen.cdn = u.pathname; return r.fulfill({ contentType: 'application/javascript', body: umd }); }
       if (u.pathname === '/api/class/token') { seen.token = { auth: r.request().headers().authorization, body: JSON.parse(r.request().postData()) }; return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ configured: true, url: 'ws://127.0.0.1:9', token: 'a.b.c', identity: 'x', room: seen.token.body.room, recorded: false }) }); }
       if (u.pathname === '/live-class.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'live-class.js')) });
       if (u.pathname === '/live-class.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(path.join(PUB, 'live-class.css')) });
@@ -493,7 +495,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await p2.waitForSelector('#lc-consent-ok'); // Ana already agreed (database): not asked again
     await p2.click('#lc-join');
     await p2.waitForSelector('#lc-room', { timeout: 30000 });
-    if (!seen.cdn.includes('livekit-client@2.22.3/dist/livekit-client.umd.js')) throw new Error('CDN: ' + seen.cdn);
+    if (seen.cdn !== '/vendor/livekit-client-2.22.3.umd.js') throw new Error('SDK (self-hosted): ' + seen.cdn);
     if (!seen.token || !/^Bearer tok-/.test(seen.token.auth || '')) throw new Error('token sin sesión');
     const b = seen.token.body;
     // consent is never sent by the browser: the server reads it from the database (api/class/token.js → my_consent)
