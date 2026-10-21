@@ -325,7 +325,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     if ((await text(page, '#nav-billing .sib-tooltip')) !== 'Plan y consumo') throw new Error('tooltip');
     await page.click('#nav-billing');
     await page.waitForSelector('#bl-seats');
-    if (!/Comprar 2M tokens por USD 11\.99/.test((await text(page, '[data-bl="buy"]')).replace(/\s+/g, ' '))) throw new Error('buy ES');
+    if (!/Comprar 2M tokens por USD 11,99/.test((await text(page, '[data-bl="buy"]')).replace(/\s+/g, ' '))) throw new Error('buy ES');
     let u = await untranslated(page, '#panel-billing'); if (u.length) throw new Error('billing sin traducir: ' + JSON.stringify(u));
     await page.click('[data-bl="buy"]');
     u = await untranslated(page, '#panel-billing'); if (u.length) throw new Error('confirm sin traducir: ' + JSON.stringify(u));

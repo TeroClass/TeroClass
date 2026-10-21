@@ -24,9 +24,9 @@
   const inViewAs = () => typeof viewAs !== 'undefined' && !!viewAs;
   const blocked = () => (typeof vaBlocked === 'function' ? vaBlocked() : false);
   const loc = () => (typeof uiLocale === 'function' ? uiLocale() : undefined);
-  const fmt = (d, o) => { try { return new Date(d).toLocaleString(loc(), o); } catch (e) { return ''; } };
+  const fmt = (d, o) => { try { return new Date(d).toLocaleString(loc(), o && o.hour ? { hourCycle: 'h23', ...o } : o); } catch (e) { return ''; } }; // P-30: 24 h
   const fDay = d => fmt(d, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
-  const fTime = d => fmt(d, { hour: '2-digit', minute: '2-digit' });
+  const fTime = d => fmt(d, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); // P-30: 24 h like the calendar
   async function rpc(fn, args) {
     try { const { data, error } = await sb.rpc(fn, args || {}); return { data, error }; } catch (e) { return { data: null, error: e }; }
   }

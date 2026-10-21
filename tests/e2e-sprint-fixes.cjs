@@ -194,6 +194,40 @@ const onTop = (page, sel) => page.evaluate(sel => { const e = document.querySele
     await ctx.close();
   });
 
+  // ── P-17 / P-18 / P-19 / P-29 / P-30: home greeting + next class, skills only for languages, brand, 24 h ──
+  await step('P-17 home says "¡Hola, Laura!" and shows the next class (no "Coming soon"); P-18 skills only for languages; P-29 / P-30', async () => {
+    const { ctx, page, base } = await setup(browser);
+    const sol = M.seedInstitution({ name: 'Instituto Sol', slug: 'sol' });
+    const prof = M.newUser('laura@sol.uy', { name: 'Laura Gómez' }); const pp = db.profiles.find(x => x.id === prof.id); pp.role = 'teacher'; pp.institution_id = sol.id;
+    const g = { id: M.uid(), institution_id: sol.id, name: 'Ciencias 2°B', teacher_id: prof.id, substitute_id: null, timezone: 'America/Montevideo' }; db.class_groups.push(g);
+    const at = new Date(Date.now() + 26 * 3600e3); at.setHours(17, 30, 0, 0);
+    db.class_sessions.push({ id: M.uid(), institution_id: sol.id, group_id: g.id, series_id: null, teacher_id: prof.id, title: 'La fotosíntesis', starts_at: at.toISOString(), ends_at: new Date(+at + 45 * MIN).toISOString(), timezone: 'America/Montevideo', status: 'scheduled', seq: 0, modified: false, updated_at: new Date().toISOString() });
+    await login(page, base, 'laura@sol.uy');
+    await page.evaluate(() => setUiLang('es'));
+    await page.evaluate(() => showPanel('home'));
+    await page.waitForSelector('#home-next:not([hidden])');
+    if (await page.textContent('#home-hello') !== '¡Hola, Laura!') throw new Error('greeting: ' + await page.textContent('#home-hello'));
+    const nx = await page.textContent('#home-next');
+    if (!/Tu próxima clase/.test(nx) || !/La fotosíntesis/.test(nx) || !/17:30/.test(nx) || /p\. ?m\./i.test(nx)) throw new Error('next class: ' + nx);
+    if (await page.$('.soon-badge') || /Próximamente|Coming soon/.test(await page.textContent('#panel-home'))) throw new Error('"Coming soon" still shown');
+    if (/Tero Class/.test(await page.evaluate(() => document.body.innerText))) throw new Error('brand written as "Tero Class"');
+    await shot(page, 'home-teacher-es-d');
+    await page.click('[data-next-open]');
+    await page.waitForSelector('#panel-calendar.active');
+    // P-18: Speaking / Listening / … only for a language class
+    await page.evaluate(() => showPanel('ai'));
+    if (!(await page.isVisible('#skills-block'))) throw new Error('skills hidden with no subject');
+    await page.fill('#subjects-input', 'Ciencias'); await page.press('#subjects-input', 'Enter');
+    if (await page.isVisible('#skills-block')) throw new Error('language skills shown for Science');
+    await page.fill('#subjects-input', 'Inglés'); await page.press('#subjects-input', 'Enter');
+    if (!(await page.isVisible('#skills-block'))) throw new Error('skills hidden for English');
+    // P-19: the generated class no longer starts with "Semana X - Clase X" / an empty "Asistencia:"
+    const r = await page.evaluate(() => ({ lang: document.documentElement.lang, prompt: buildUserPrompt({ prompt: 'La fotosíntesis', language: 'Spanish', level: 'Secondary', age: '13 years old', groupSize: '25', duration: '45 min', subjects: ['Ciencias'], skills: getSkillsPriority() }) }));
+    if (/Semana X - Clase X|Asistencia:/.test(r.prompt)) throw new Error('P-19: "Semana X - Clase X" / "Asistencia:" still asked for');
+    if (r.lang !== 'es') throw new Error('P-28: <html lang> follows the UI language: ' + r.lang);
+    await ctx.close();
+  });
+
   await browser.close();
   if (failed) { console.log(`${failed} sprint-fix test(s) FAILED`); process.exit(1); }
   console.log('ALL SPRINT-FIX TESTS PASSED');

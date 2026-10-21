@@ -66,7 +66,7 @@
 .gc-join.big:disabled{box-shadow:none}
 .gc-join-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px;border-radius:10px;background:var(--bg)}
 .gc-join-row .gc-hint{margin:0}
-.gc-icon-btn{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:28px;padding:0 7px;border:1.5px solid var(--border);border-radius:7px;background:var(--white);color:var(--ink-soft);font-size:11px;font-weight:700;font-family:'Inter',sans-serif;text-decoration:none;cursor:pointer}
+.gc-icon-btn{display:inline-flex;align-items:center;gap:4px;justify-content:center;min-width:30px;height:28px;padding:0 7px;border:1.5px solid var(--border);border-radius:7px;background:var(--white);color:var(--ink-soft);font-size:11px;font-weight:700;font-family:'Inter',sans-serif;text-decoration:none;cursor:pointer}
 .gc-icon-btn:hover{border-color:var(--brand-primary);color:var(--brand-primary)}
 
 /* dialogs */
@@ -97,7 +97,9 @@
 .gc-week-head{border-bottom:1px solid var(--border);background:var(--white);position:sticky;top:0;z-index:2}
 .gc-dh{padding:8px 4px;text-align:center;font-size:11px;color:var(--ink-muted);text-transform:capitalize;border-left:1px solid var(--bg)}
 .gc-dh b{display:block;font-size:18px;color:var(--ink);font-weight:700;line-height:1.2}
-.gc-dh.today b{display:inline-block;background:var(--brand-primary);color:#fff;border-radius:50%;width:30px;height:30px;line-height:30px;margin-top:2px}
+/* P-32: today's number sits UNDER the day name, like the other days (the circle never covers it) */
+.gc-dh span{display:block}
+.gc-dh.today b{display:block;background:var(--brand-primary);color:#fff;border-radius:50%;width:30px;height:30px;line-height:30px;margin:2px auto 0}
 .gc-week-scroll{max-height:calc(100vh - 300px);min-height:320px;overflow-y:auto;overflow-x:visible}
 .gc-hours{border-right:1px solid var(--border)}
 .gc-hour{height:46px;font-size:10px;color:var(--ink-muted);text-align:right;padding:2px 6px 0 0;box-sizing:border-box}

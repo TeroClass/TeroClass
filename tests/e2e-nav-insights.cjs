@@ -396,18 +396,20 @@ const PLATFORM_NAV = ['#nav-superadmin', '#nav-metrics', '#nav-platform'];
     const w = await page.evaluate(() => document.querySelector('.icon-sidebar').getBoundingClientRect().width);
     if (w < 80 || w > 90) throw new Error('sidebar width ' + w);
     const labels = await page.$$eval('.icon-sidebar .sib-btn', bs => bs.filter(b => b.offsetParent).map(b => b.querySelector('.sib-label').textContent));
-    if (JSON.stringify(labels) !== '["Live class","Structure","Groups","Dashboard","Insights","Branding","AI Settings","Plan & usage","Institutions","Metrics","Platform"]') throw new Error('labels: ' + JSON.stringify(labels));
+    if (JSON.stringify(labels) !== '["Structure","Groups","Dashboard","Insights","Branding","AI Settings","Plan & usage","Institutions","Metrics","Platform"]') throw new Error('labels: ' + JSON.stringify(labels));
     const tips = await page.$$eval('.icon-sidebar .sib-btn', bs => bs.every(b => b.querySelector('.sib-tooltip')?.textContent === b.querySelector('.sib-label').textContent));
     if (!tips) throw new Error('tooltips missing');
     const seps = await page.$$eval('.sib-group', gs => gs.filter(g => g.offsetParent).map(g => getComputedStyle(g).borderTopWidth));
-    if (JSON.stringify(seps) !== '["0px","1px","1px"]') throw new Error('separators: ' + JSON.stringify(seps));
+    if (JSON.stringify(seps) !== '["0px","1px"]') throw new Error('separators (P-20: no teaching group in admin mode): ' + JSON.stringify(seps));
     const overflow = await page.evaluate(() => [...document.querySelectorAll('.sib-label')].filter(l => l.offsetParent && l.scrollWidth > l.clientWidth + 1).map(l => l.textContent));
     if (overflow.length) throw new Error('labels overflow: ' + overflow);
     await page.setViewportSize({ width: 390, height: 780 });
     await page.waitForTimeout(150);
     const w2 = await page.evaluate(() => document.querySelector('.icon-sidebar').getBoundingClientRect().width);
     if (w2 > 64) throw new Error('narrow sidebar width ' + w2);
-    if (await page.isVisible('#nav-admin .sib-label')) throw new Error('labels shown on a phone');
+    // P-28: a phone keeps a short name under each icon (not icons only), without overflowing the sidebar
+    if (!(await page.isVisible('#nav-admin .sib-label'))) throw new Error('no labels on a phone');
+    { const ov = await page.evaluate(() => [...document.querySelectorAll('.sib-label')].filter(l => l.offsetParent).map(l => l.getBoundingClientRect()).filter(b => b.right > document.querySelector('.icon-sidebar').getBoundingClientRect().right + 1).length); if (ov) throw new Error('labels outside the sidebar: ' + ov); }
     if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) throw new Error('horizontal scroll on a phone');
     if (!(await visible(page, '#isw-btn'))) throw new Error('switcher hidden on a phone');
     await openSwitcher(page);

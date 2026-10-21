@@ -189,7 +189,7 @@ const snapshot = () => JSON.stringify({ inst: db.institutions, plans: db.plannin
     await page.waitForSelector('#viewas-banner', { state: 'hidden' });
     await page.waitForSelector('#panel-platform.active');
     if (!(await page.isVisible('#nav-platform')) || !(await page.isVisible('#nav-superadmin'))) throw new Error('owner nav not restored');
-    if ((await page.textContent('#topbar-brand-name')) !== 'Tero Class') throw new Error('branding not restored');
+    if ((await page.textContent('#topbar-brand-name')) !== 'TeroClass') throw new Error('branding not restored');
     if ((await brand(page)) !== '#7c5cbf') throw new Error('brand color not restored: ' + await brand(page));
     if ((await page.textContent('#um-email')) !== SUPERADMIN_EMAIL) throw new Error('user menu not restored');
     if (!/All institutions/.test(await page.textContent('#isw-label'))) throw new Error('switcher selection not restored');

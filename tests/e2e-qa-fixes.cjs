@@ -332,7 +332,7 @@ async function run(name, browser, opts, fn) {
     await page.click('.topbar-right .lang-toggle button[data-lang="en"]');
     if (/Vista previa/.test(await page.evaluate(() => document.body.innerText))) throw new Error('Vista previa in EN');
     if (await page.isVisible('.topbar-search') || await page.isVisible('.prompt-add-btn') || await page.isVisible('.video-play-btn')) throw new Error('dead UI still visible');
-    if ((await page.$$('.soon-badge')).length !== 2) throw new Error('no coming soon badges');
+    if ((await page.$$('.soon-badge')).length !== 0) throw new Error('P-17: "Coming soon" cards are gone');
   });
 
   await run('Branding preview Admin/Teacher toggle switches the preview', browser, {}, async ({ page }) => {

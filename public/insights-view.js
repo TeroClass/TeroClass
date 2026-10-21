@@ -391,7 +391,7 @@
   const D = s => `<span data-no-i18n>${E(s)}</span>`; // class/user data: never translated
   const dec = (v, lang) => String(Math.round(num(v) * 10) / 10).replace('.', lang === 'es' ? ',' : '.');
   const delta = (v, unit = '') => v > 0 ? `<span class="lc-delta up">▲ <span data-no-i18n>${v}${unit}</span></span>` : v < 0 ? `<span class="lc-delta down">▼ <span data-no-i18n>${Math.abs(v)}${unit}</span></span>` : '<span class="lc-delta">= <span>no change</span></span>';
-  const fmtWhen = d => { try { return new Date(d).toLocaleString(typeof uiLocale === 'function' ? uiLocale() : undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } };
+  const fmtWhen = d => { try { return new Date(d).toLocaleString(typeof uiLocale === 'function' ? uiLocale() : undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); } catch (e) { return ''; } }; // P-30: 24 h
 
   function studentPickerHtml(X, idx, P) {
     return `<div class="lc-student-pick" role="group" aria-label="${E(tr('Choose a student'))}">

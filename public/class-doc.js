@@ -645,9 +645,9 @@
     }
     htmlDoc() {
       const s = this.info.session || {};
-      return `<!DOCTYPE html><html lang="${typeof uiLang !== 'undefined' ? uiLang : 'es'}"><head><meta charset="UTF-8"><title>${H(s.title || 'Tero Class')}</title>
+      return `<!DOCTYPE html><html lang="${typeof uiLang !== 'undefined' ? uiLang : 'es'}"><head><meta charset="UTF-8"><title>${H(s.title || 'TeroClass')}</title>
 <style>body{font-family:Inter,Arial,sans-serif;max-width:760px;margin:32px auto;padding:0 20px;color:#1a1a1a;line-height:1.65}h1,h2,h3{line-height:1.3}table{border-collapse:collapse;width:100%;margin:12px 0}td,th{border:1px solid #ccc;padding:6px 8px;vertical-align:top}th{background:#f3eeff}blockquote{border-left:3px solid #d4c5f0;margin:8px 0;padding:2px 12px;color:#444}.meta{color:#888;font-size:13px;border-bottom:1px solid #eee;padding-bottom:10px;margin-bottom:16px}</style></head>
-<body><h1>${H(s.title || '')}</h1><div class="meta">${H(s.group_name || '')}${s.group_name ? ' · ' : ''}${H(fDT(s.starts_at))} · ${H(tr('Class document'))} · Tero Class</div>${this.editor.getHTML()}</body></html>`;
+<body><h1>${H(s.title || '')}</h1><div class="meta">${H(s.group_name || '')}${s.group_name ? ' · ' : ''}${H(fDT(s.starts_at))} · ${H(tr('Class document'))} · TeroClass</div>${this.editor.getHTML()}</body></html>`;
     }
     downloadHtml() { download(fileBase(this.info) + '.html', this.htmlDoc(), 'text/html;charset=utf-8'); }
     downloadMd() {

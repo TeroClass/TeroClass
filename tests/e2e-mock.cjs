@@ -145,7 +145,8 @@ async function nav(page, sel) {
     if (!aiCall.body.messages[1].content.includes('NOT a language class')) throw new Error('no respeta la disciplina');
     if (!aiCall.body.messages[1].content.includes('GOLDEN RULE')) throw new Error('falta materiales listos');
     const up = aiCall.body.messages[1].content;
-    if (!up.includes('100% of the document in Spanish') || !up.includes('Semana X - Clase X') || !up.includes('Objetivos de hoy')) throw new Error('no fuerza el idioma');
+    if (!up.includes('100% of the document in Spanish') || !up.includes('Objetivos de hoy')) throw new Error('no fuerza el idioma');
+    if (/Semana X - Clase X|Asistencia:/.test(up)) throw new Error('P-19: el encabezado "Semana X - Clase X" / "Asistencia:" vacío sigue en el pedido');
     if (!up.includes("STUDENTS' AGE: 15 years old")) throw new Error('no usa la edad');
     if (JSON.stringify(aiCall.body).includes('apiKey')) throw new Error('se envía apiKey desde el navegador');
     await page.waitForFunction(() => document.getElementById('lp-doc-student')?.innerText.includes('You will be able'));
@@ -239,6 +240,11 @@ async function nav(page, sel) {
     await page.waitForSelector('#members-card select.member-role');
     const profe = db.profiles.find(p => p.email === 'profe@tec.com');
     await page.selectOption(`select[data-id="${profe.id}"]`, 'org_admin');
+    // P-31: a role change asks first; "Cancel" puts the select back
+    await page.waitForSelector('#modal-danger.active'); await page.click('#dg-cancel');
+    if (profe.role === 'org_admin' || (await page.inputValue(`select[data-id="${profe.id}"]`)) !== 'teacher') throw new Error('cambió el rol sin confirmar');
+    await page.selectOption(`select[data-id="${profe.id}"]`, 'org_admin');
+    await page.waitForSelector('#modal-danger.active'); await page.click('#dg-ok');
     await page.waitForFunction(() => /Role updated/.test(document.getElementById('toast').textContent));
     if (profe.role !== 'org_admin') throw new Error('rol no cambiado');
     await page.click(`button.member-remove[data-id="${profe.id}"]`);

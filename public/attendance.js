@@ -25,7 +25,7 @@
   const inViewAs = () => typeof viewAs !== 'undefined' && !!viewAs;
   const blocked = () => (typeof vaBlocked === 'function' ? vaBlocked() : false);
   const loc = () => (typeof uiLocale === 'function' ? uiLocale() : undefined);
-  const fmt = (d, o) => { try { return new Date(d).toLocaleString(loc(), o); } catch (e) { return ''; } };
+  const fmt = (d, o) => { try { return new Date(d).toLocaleString(loc(), o && o.hour ? { hourCycle: 'h23', ...o } : o); } catch (e) { return ''; } }; // P-30: 24 h
   const fTime = d => fmt(d, typeof uiLang !== 'undefined' && uiLang === 'es' ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' } : { hour: 'numeric', minute: '2-digit' });
   const fDay = d => fmt(d, { weekday: 'short', day: 'numeric', month: 'short' });
   const fShort = d => fmt(d, { day: 'numeric', month: 'numeric' });
@@ -204,11 +204,14 @@
   // ════════════════════════════════════════════════════════════════════════════════════════════
   // STUDENT DASHBOARD
   // ════════════════════════════════════════════════════════════════════════════════════════════
+  // P-25: while the video classroom is not connected, "absent" only means "did not enter the TeroClass room": not shown in red
+  const liveOn = () => typeof APP_CONFIG !== 'undefined' && APP_CONFIG.live === true;
   function studentCardHtml(a) {
     if (!a || !Number(a.held)) return `<div class="gs-ins-empty"><div class="gs-ins-title">${esc(tr('Your attendance will appear here after your first classes.'))}</div><p class="gc-sub">${esc(tr('You are marked present when you enter the class room.'))}</p></div>`;
     const groups = (a.groups || []).filter(g => g.name);
     return `<div class="gs-att-big"><span>${esc(tr('Attended'))}</span> <b data-no-i18n>${Number(a.attended) || 0}</b> <span>${esc(tr('of'))}</span> <b data-no-i18n>${Number(a.held) || 0}</b> <span>${esc(tr(Number(a.held) === 1 ? 'class' : 'classes'))}</span></div>
-      <div class="gc-chips">${['present', 'late', 'absent', 'excused'].filter(k => Number(a[k])).map(k => `<span class="att-st ${k}" data-no-i18n>${esc(tr(STATUS[k]))}: <b>${Number(a[k])}</b></span>`).join('')}</div>
+      <div class="gc-chips">${['present', 'late', 'absent', 'excused'].filter(k => Number(a[k]) && (k !== 'absent' || liveOn())).map(k => `<span class="att-st ${k}" data-no-i18n>${esc(tr(STATUS[k]))}: <b>${Number(a[k])}</b></span>`).join('')}</div>
+      ${liveOn() ? '' : `<p class="gc-sub">${esc(tr('Attendance counts the classes you entered from TeroClass. If you took a class in person or elsewhere, your teacher can mark it.'))}</p>`}
       ${groups.length > 1 ? `<div class="gs-att-groups">${groups.map(g => { const p = g.held ? Math.round(100 * g.attended / g.held) : 0; return `<div class="gs-att-g"><b data-no-i18n>${esc(g.name)}</b><span data-no-i18n>${Number(g.attended)}/${Number(g.held)}</span><span class="att-bar"><i style="width:${p}%"></i></span></div>`; }).join('')}</div>` : ''}`;
   }
 
@@ -281,7 +284,7 @@
     'Read-only: the shared document of each class (it stays as a record) and its attendance.': 'Solo lectura: el documento compartido de cada clase (queda como registro) y su asistencia.',
     'Attendance report': 'Informe de asistencia', 'Past classes': 'Clases pasadas', 'Next classes': 'Próximas clases', 'No classes in the last 90 days or the next 30.': 'No hay clases en los últimos 90 días ni en los próximos 30.',
     'Your attendance will appear here after your first classes.': 'Tu asistencia va a aparecer acá después de tus primeras clases.',
-    'You are marked present when you enter the class room.': 'Quedás presente cuando entrás a la sala de la clase.', 'Attended': 'Asististe a', 'of': 'de', 'class': 'clase', 'classes': 'clases',
+    'You are marked present when you enter the class room.': 'Quedás presente cuando entrás a la sala de la clase.', 'Attended': 'Asististe a', 'Attendance counts the classes you entered from TeroClass. If you took a class in person or elsewhere, your teacher can mark it.': 'La asistencia cuenta las clases a las que entraste desde TeroClass. Si tuviste una clase presencial o por otro medio, tu docente la puede marcar.', 'of': 'de', 'class': 'clase', 'classes': 'clases',
     'Invalid date range.': 'Rango de fechas inválido.', 'The class is not open right now.': 'La clase no está abierta ahora.', 'The class is cancelled.': 'La clase está cancelada.',
     'Invalid attendance status.': 'Estado de asistencia inválido.', 'That student is not in this class.': 'Ese estudiante no es de esta clase.', 'Invalid minutes (0 to 120).': 'Minutos inválidos (de 0 a 120).',
     'My attendance': 'Mi asistencia', 'Class documents': 'Documentos de clase', 'Open class document': 'Abrir documento de la clase',

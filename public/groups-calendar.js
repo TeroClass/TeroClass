@@ -47,7 +47,7 @@
 
   // ── dates & time zones ─────────────────────────────────────────────────────────────────────
   const loc = () => (typeof uiLocale === 'function' ? uiLocale() : undefined);
-  const fmt = (d, o) => { try { return new Date(d).toLocaleString(loc(), o); } catch (e) { return ''; } };
+  const fmt = (d, o) => { try { return new Date(d).toLocaleString(loc(), o && o.hour ? { hourCycle: 'h23', ...o } : o); } catch (e) { return ''; } }; // P-30: 24 h
   // Spanish (Uruguay): 24-hour clock; English: 2:00 PM
   const fTime = d => { try { return new Date(d).toLocaleTimeString(loc(), uiLang === 'es' ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' } : { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
   const fDay = d => fmt(d, { weekday: 'short', day: 'numeric', month: 'short' });
@@ -305,7 +305,7 @@
       return `<div class="gs-item${s.status === 'cancelled' ? ' cancelled' : ''}" data-sid="${esc(s.id)}">
         <div class="gs-item-time">${rangeHtml(s)}</div>
         <div class="gs-item-main"><div class="gs-item-title" data-no-i18n>${esc(sTitle(s))}</div><div class="gc-meta">${s.group_name ? `<span data-no-i18n>${esc(s.group_name)}</span>` : ''}${s.teacher_name ? ` <span class="gs-dot">·</span> <span data-no-i18n>${esc(s.teacher_name)}</span>` : ''}</div></div>
-        <div class="gs-item-act">${s.status === 'cancelled' ? '<span class="gc-chip cancelled">Cancelled</span>' : `${j.k === 'open' ? joinButtonHtml(s, { compact: true }) : ''}<button type="button" class="gc-icon-btn" data-gc="doc" data-id="${esc(s.id)}" title="${esc(tr('Class document'))}" aria-label="${esc(tr('Class document'))}">📄</button><a class="gc-icon-btn" href="${esc(googleUrl(s))}" target="_blank" rel="noopener" title="${esc(tr('Add to Google Calendar'))}" aria-label="${esc(tr('Add to Google Calendar'))}">G+</a><button type="button" class="gc-icon-btn" data-gc="ics" data-id="${esc(s.id)}" title="${esc(tr('Download .ics (Outlook, Apple)'))}" aria-label="${esc(tr('Download .ics (Outlook, Apple)'))}">⬇</button>`}</div>
+        <div class="gs-item-act">${s.status === 'cancelled' ? '<span class="gc-chip cancelled">Cancelled</span>' : `${j.k === 'open' ? joinButtonHtml(s, { compact: true }) : ''}<button type="button" class="gc-icon-btn" data-gc="doc" data-id="${esc(s.id)}" title="${esc(tr('Class document'))}" aria-label="${esc(tr('Class document'))}">📄</button><a class="gc-icon-btn" href="${esc(googleUrl(s))}" target="_blank" rel="noopener" title="${esc(tr('Add to Google Calendar'))}" aria-label="${esc(tr('Add to Google Calendar'))}">📅 <span>Google</span></a><button type="button" class="gc-icon-btn" data-gc="ics" data-id="${esc(s.id)}" title="${esc(tr('Download .ics (Outlook, Apple)'))}" aria-label="${esc(tr('Download .ics (Outlook, Apple)'))}">⬇ <span>Download</span></button>`}</div>
       </div>`;
     }).join('')}</div>`).join('') + (up.length > shown.length ? `<div class="gc-hint"><span>And more:</span> <b>${up.length - shown.length}</b></div>` : '')
       : '<div class="gs-none">No classes scheduled yet.</div>';
@@ -1576,6 +1576,7 @@
     'Speaking time': 'Tiempo de habla', 'New words': 'Palabras nuevas', 'Progress': 'Progreso', 'Preview': 'Vista previa',
     // calendar
     "Your classes and your groups' classes.": 'Tus clases y las de tus grupos.', '🔗 Subscribe': '🔗 Suscribirme', '+ Schedule class': '+ Programar clase',
+    'Download': 'Descargar', 'Google': 'Google',
     'Calendar view': 'Vista del calendario', 'Week': 'Semana', 'Agenda': 'Agenda', 'Previous': 'Anterior', 'Next': 'Siguiente', 'Loading…': 'Cargando…',
     'No classes in this period.': 'No hay clases en este período.', 'No classes this week.': 'No hay clases esta semana.',
     'As a student': 'Como estudiante', 'Substitute': 'Suplente', 'Class': 'Clase', 'Group': 'Grupo', 'Teacher': 'Docente', 'Join': 'Entrar',

@@ -299,6 +299,7 @@ function seedTree() {
     if (!calls.rpc.some(c => c.fn === 'admin_move_member' && c.body.p_user === t.tc1.id && c.body.p_inst === t.sede2.id)) throw new Error('admin_move_member not called');
     await page.fill('#pf-search', 'tm@');
     await page.locator('#pf-table-body tr', { hasText: 'tm@h.com' }).locator('select[data-hc="pf-role"]').selectOption('org_admin');
+    await page.waitForSelector('#modal-danger.active'); await page.click('#dg-ok'); // P-31: confirm the role change
     await waitToast(page, /Role updated/);
     if (t.tm.role !== 'org_admin') throw new Error('role not changed');
     await page.fill('#pf-search', 'owner');

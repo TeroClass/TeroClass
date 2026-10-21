@@ -1059,7 +1059,7 @@ Cierre y ticket de salida (5 min)
 
   function renderChat() {
     const R = S.room; const box = document.getElementById('lc-chat-list'); if (!R || !box) return;
-    box.innerHTML = R.chat.length ? R.chat.map(m => `<div class="lc-msg${m.self ? ' self' : ''}"><div class="lc-msg-head"><b data-no-i18n>${esc(m.self ? R.name : m.name)}</b> <span data-no-i18n>${esc(new Date(m.ts).toLocaleTimeString(typeof uiLocale === 'function' ? uiLocale() : undefined, { hour: '2-digit', minute: '2-digit' }))}</span></div><div class="lc-msg-text" data-no-i18n>${esc(m.text)}</div></div>`).join('')
+    box.innerHTML = R.chat.length ? R.chat.map(m => `<div class="lc-msg${m.self ? ' self' : ''}"><div class="lc-msg-head"><b data-no-i18n>${esc(m.self ? R.name : m.name)}</b> <span data-no-i18n>${esc(new Date(m.ts).toLocaleTimeString(typeof uiLocale === 'function' ? uiLocale() : undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }))}</span></div><div class="lc-msg-text" data-no-i18n>${esc(m.text)}</div></div>`).join('')
       : '<p class="lc-empty">No messages yet. Messages are visible to everyone in the class.</p>';
     box.scrollTop = box.scrollHeight;
   }
@@ -1783,7 +1783,7 @@ Cierre y ticket de salida (5 min)
   // ════════════════════════════════════════════════════════════════════════════════════════
   if (typeof I18N_ES === 'object' && I18N_ES) Object.assign(I18N_ES, {
     'Live class': 'Aula en vivo', '▶ Start live class': '▶ Iniciar clase en vivo', 'Demo': 'Demo',
-    'Teach online from TeroClass: video, your class plan beside you, and learning insights after class.': 'Dá clase online desde TeroClass: video, tu planificación al lado y aprendizajes de cada estudiante después de la clase.',
+    'Teach online from TeroClass: video, your class plan beside you, and learning insights after class.': 'Da clase online desde TeroClass: video, tu planificación al lado y aprendizajes de cada estudiante después de la clase.',
     'Start a live class': 'Iniciar una clase en vivo', 'Class plan': 'Planificación', 'Sample plan (no saved class)': 'Plan de ejemplo (sin clase guardada)',
     'Tip: save a class first and it will appear here with its activity timers.': 'Consejo: guardá una clase y va a aparecer acá con los temporizadores de cada actividad.',
     'Upcoming sessions': 'Próximas sesiones', 'Past sessions': 'Sesiones anteriores', 'participants': 'participantes', 'Open lobby': 'Abrir sala de espera',
