@@ -15,6 +15,9 @@
 //    si el tiempo se acaba, se devuelve lo escrito hasta ahí con finish_reason "length": la app pide la continuación.
 //    max_tokens por tipo de pedido (guard.js).
 //  · TC-20: al navegador solo le llegan mensajes genéricos; el detalle queda en los logs.
+//  · TC-01: además de los pedidos por día, cada pedido descuenta sus tokens ESTIMADOS (entrada / 4 + max_tokens) del tope
+//    diario de la persona y del de su institución (platform_settings; consume_ai_quota). Cuentas sin institución o con
+//    el email sin confirmar: muy poco. Todo con el token del usuario (sin la clave del servidor).
 import { serviceKey, budgetCheck, recordUsage, publicBudget, budgetError, warnNotConfigured } from './_lib/billing.js';
 import { sanitizeMeta } from './_lib/meta.js';
 import { validateGenerateBody, clientIp, ipKey, memRateHit } from './_lib/guard.js';
@@ -69,12 +72,19 @@ function userRpc(fn, token, body, ms = SUPABASE_TIMEOUT_MS) {
   }, ms);
 }
 
-// Suma 1 uso del día para este usuario (con SU token: la función decide su límite) y anota el pedido
-// con sus metadatos ya limpios. Devuelve { allowed, used, limit, event? } o null si no se pudo verificar.
-// Si la base todavía no tiene la versión con p_meta (script sin volver a correr), reintenta sin metadatos.
-async function consumeQuota(token, meta, ms) {
-  let r = await userRpc('consume_ai_quota', token, meta ? { p_meta: meta } : {}, ms);
-  if (!r.ok && meta && (r.status === 404 || r.data?.code === 'PGRST202')) r = await userRpc('consume_ai_quota', token, {}, ms);
+// Tokens ESTIMADOS de un pedido (TC-01): ~4 caracteres por token de entrada + el máximo de salida permitido.
+export const estimateTokens = (messages, maxTokens) =>
+  Math.ceil((messages || []).reduce((n, m) => n + String(m?.content || '').length, 0) / 4) + (Number(maxTokens) || 0);
+
+// Suma 1 uso del día para este usuario (con SU token: la función decide sus límites: pedidos por día y tokens estimados
+// por día de la persona y de su institución, TC-01) y anota el pedido con sus metadatos ya limpios.
+// Devuelve { allowed, used, limit, reason?, event? } o null si no se pudo verificar.
+// Si la base todavía no tiene la versión nueva (script sin volver a correr), reintenta con la firma anterior.
+async function consumeQuota(token, meta, est, ms) {
+  let r = await userRpc('consume_ai_quota', token, { ...(meta ? { p_meta: meta } : {}), p_est_tokens: est }, ms);
+  const missing = x => !x.ok && (x.status === 404 || x.data?.code === 'PGRST202');
+  if (missing(r)) r = await userRpc('consume_ai_quota', token, meta ? { p_meta: meta } : {}, ms);
+  if (missing(r) && meta) r = await userRpc('consume_ai_quota', token, {}, ms);
   const q = r.ok ? r.data : null;
   return q && typeof q.allowed === 'boolean' ? q : null;
 }
@@ -201,11 +211,17 @@ export default async function handler(req, res) {
     }
 
     // Límite diario (falla cerrado: si no se puede verificar, no se llama a Azure)
-    const quota = await consumeQuota(token, sanitizeMeta(req.body?.meta, kind), Math.min(SUPABASE_TIMEOUT_MS, left()));
+    const quota = await consumeQuota(token, sanitizeMeta(req.body?.meta, kind), estimateTokens(messages, maxTokens), Math.min(SUPABASE_TIMEOUT_MS, left()));
     if (!quota) {
       return res.status(503).json({ error: 'Could not check your daily AI limit. Please try again.', code: 'quota_check' });
     }
     if (!quota.allowed) {
+      if (quota.reason === 'institution') {
+        return res.status(429).json({ error: "Your institution reached today's AI limit. Try again tomorrow or ask your admin.", code: 'quota_institution' });
+      }
+      if (quota.reason === 'tokens') {
+        return res.status(429).json({ error: "You reached today's AI limit for your account. Try again tomorrow.", code: 'quota_tokens' });
+      }
       return res.status(429).json({
         error: `Daily AI limit reached (${quota.limit} per day). Try again tomorrow.`,
         code: 'quota', used: quota.used, limit: quota.limit,

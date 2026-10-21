@@ -112,6 +112,13 @@ begin
   return true;
 end $$;
 revoke all on function public.tc_rate_take(text, bigint, bigint, integer) from public, anon, authenticated;
+-- Devuelve lo que se había tomado en la ventana actual (cuando un segundo control falla). Uso interno.
+create or replace function public.tc_rate_give(p_key text, p_amount bigint, p_window_s integer) returns void
+language sql volatile security definer set search_path = public, pg_temp as
+$$ update public.rate_counters set amount = greatest(amount - greatest(p_amount, 0), 0)
+    where key = left(p_key, 200)
+      and window_start = to_timestamp(floor(extract(epoch from now()) / greatest(p_window_s, 1)) * greatest(p_window_s, 1)) $$;
+revoke all on function public.tc_rate_give(text, bigint, integer) from public, anon, authenticated;
 
 -- Marcas de cambios de datos que se aplican UNA sola vez (volver a correr el script no los repite).
 create table if not exists public.tc_schema_marks (key text primary key, done_at timestamptz not null default now());
@@ -216,6 +223,12 @@ alter table public.platform_settings add column if not exists ai_price_input num
   check (ai_price_input >= 0 and ai_price_input <= 1000);
 alter table public.platform_settings add column if not exists ai_price_output numeric(10,4) not null default 10.00
   check (ai_price_output >= 0 and ai_price_output <= 1000);
+-- TC-01 (2026-10): topes DIARIOS de IA que valen aunque falte SUPABASE_SERVICE_ROLE_KEY (tokens ESTIMADOS por pedido:
+-- caracteres de entrada / 4 + max_tokens, los calcula api/generate.js). Por cuenta (institución madre) y por docente.
+alter table public.platform_settings add column if not exists ai_daily_tokens_institution bigint not null default 3000000
+  check (ai_daily_tokens_institution between 0 and 100000000000);
+alter table public.platform_settings add column if not exists ai_daily_tokens_user bigint not null default 400000
+  check (ai_daily_tokens_user between 0 and 100000000000);
 
 -- Plan de cada cuenta (una fila por institución madre; se crea al crear la madre o al primer uso)
 create table if not exists public.billing_accounts (
@@ -1226,11 +1239,31 @@ begin
 end $$;
 revoke all on function public.ai_meta_clean(jsonb) from public, anon, authenticated;
 
+-- Tope diario de tokens ESTIMADOS por persona (TC-01). Docentes / admins: platform_settings.ai_daily_tokens_user
+-- (admins ×2, súper admin ×10). Cuentas sin institución (las que cualquiera crea gratis): muy poco.
+create or replace function public.ai_daily_token_limit(p_uid uuid) returns bigint
+language sql stable security definer set search_path = public, pg_temp as
+$$ select case
+     when p.id is null or p.role = 'student' then 0
+     when p.role = 'superadmin' then s.ai_daily_tokens_user * 10
+     when p.role = 'org_admin' and p.institution_id is not null then s.ai_daily_tokens_user * 2
+     when p.institution_id is not null then s.ai_daily_tokens_user
+     when (select u.email_confirmed_at from auth.users u where u.id = p_uid) is null then 30000
+     when p.created_at > now() - interval '7 days' then 60000
+     else 150000 end
+   from public.platform_settings s left join public.profiles p on p.id = p_uid where s.id $$;
+revoke all on function public.ai_daily_token_limit(uuid) from public, anon, authenticated;
+
 -- Suma 1 uso del día y, si viene p_meta (lo manda api/generate.js), anota el pedido en ai_events
 -- (institución y usuario salen del perfil, nunca del pedido). Si no se pudo anotar, el pedido sigue igual.
--- La versión vieja sin argumentos se reemplaza (llamarla sin nada sigue funcionando: p_meta es opcional).
+-- TC-01 (2026-10): p_est_tokens = tokens ESTIMADOS del pedido (api/generate.js: entrada / 4 + max_tokens; se acota a
+-- 25.000, el máximo de un pedido real). Se descuentan del tope diario de la persona y del de su cuenta (institución
+-- madre); si no alcanza, no se cuenta nada y vuelve {allowed:false, reason:'tokens'|'institution'}. Llamarla a mano solo
+-- gasta el cupo propio (el de la cuenta, como mucho hasta el tope de la persona).
+-- Las versiones viejas (sin argumentos / solo p_meta) se reemplazan: llamarla como antes sigue funcionando.
 drop function if exists public.consume_ai_quota();
-create or replace function public.consume_ai_quota(p_meta jsonb default null) returns json
+drop function if exists public.consume_ai_quota(jsonb);
+create or replace function public.consume_ai_quota(p_meta jsonb default null, p_est_tokens integer default null) returns json
 language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare
@@ -1239,7 +1272,11 @@ declare
   v_limit integer;
   v_used  integer;
   v_inst  uuid;
+  v_root  uuid;
   v_event bigint;
+  v_est   bigint := least(greatest(coalesce(p_est_tokens, 0), 0), 25000);
+  v_tlim  bigint;
+  v_ilim  bigint;
   m       jsonb;
 begin
   if v_uid is null then raise exception 'No autorizado'; end if;
@@ -1247,29 +1284,67 @@ begin
   if v_limit <= 0 then -- estudiantes: nunca generan (ni se anota nada en ai_events)
     return json_build_object('allowed', false, 'used', 0, 'limit', 0);
   end if;
+  select institution_id into v_inst from public.profiles where id = v_uid;
+  v_root := case when v_inst is not null then public.billing_root(v_inst) end;
+  -- tokens estimados: primero el tope de la persona, después el de la cuenta (si falla el segundo, se devuelve el primero)
+  if v_est > 0 then
+    v_tlim := public.ai_daily_token_limit(v_uid);
+    if not public.tc_rate_take('aitok:u:' || v_uid::text, v_est, v_tlim, 86400) then
+      return json_build_object('allowed', false, 'reason', 'tokens', 'limit', v_limit,
+                               'used', coalesce((select count from public.ai_usage where user_id = v_uid and day = v_day), 0));
+    end if;
+    if v_root is not null then
+      select ai_daily_tokens_institution into v_ilim from public.platform_settings where id;
+      if not public.tc_rate_take('aitok:i:' || v_root::text, v_est, coalesce(v_ilim, 0), 86400) then
+        perform public.tc_rate_give('aitok:u:' || v_uid::text, v_est, 86400);
+        return json_build_object('allowed', false, 'reason', 'institution', 'limit', v_limit,
+                                 'used', coalesce((select count from public.ai_usage where user_id = v_uid and day = v_day), 0));
+      end if;
+    end if;
+  end if;
   insert into public.ai_usage as a (user_id, day, count) values (v_uid, v_day, 1)
   on conflict (user_id, day) do update set count = a.count + 1 where a.count < v_limit
   returning a.count into v_used;
   if v_used is null then
+    if v_est > 0 then  -- no se usó: devolver los tokens reservados
+      perform public.tc_rate_give('aitok:u:' || v_uid::text, v_est, 86400);
+      if v_root is not null then perform public.tc_rate_give('aitok:i:' || v_root::text, v_est, 86400); end if;
+    end if;
     select count into v_used from public.ai_usage where user_id = v_uid and day = v_day;
-    return json_build_object('allowed', false, 'used', v_used, 'limit', v_limit);
+    return json_build_object('allowed', false, 'reason', 'requests', 'used', v_used, 'limit', v_limit);
   end if;
   if p_meta is null then
     return json_build_object('allowed', true, 'used', v_used, 'limit', v_limit);
   end if;
   begin
     m := public.ai_meta_clean(p_meta);
-    select institution_id into v_inst from public.profiles where id = v_uid;
     insert into public.ai_events (user_id, inst_id, root_id, kind, subjects, language, age_band, level, bars)
-    values (v_uid, v_inst, case when v_inst is not null then public.billing_root(v_inst) end, m->>'kind',
+    values (v_uid, v_inst, v_root, m->>'kind',
             array(select jsonb_array_elements_text(m->'subjects')), m->>'language', m->>'age_band', m->>'level', m->'bars')
     returning id into v_event;
   exception when others then v_event := null;
   end;
   return json_build_object('allowed', true, 'used', v_used, 'limit', v_limit, 'event', v_event);
 end $$;
-revoke all on function public.consume_ai_quota(jsonb) from public, anon;
-grant execute on function public.consume_ai_quota(jsonb) to authenticated;
+revoke all on function public.consume_ai_quota(jsonb, integer) from public, anon;
+grant execute on function public.consume_ai_quota(jsonb, integer) to authenticated;
+
+-- Súper admin: topes diarios de IA (tokens estimados) por cuenta y por docente (TC-01)
+create or replace function public.update_ai_guardrails(p_institution bigint, p_user bigint) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_institution is null or p_institution < 0 or p_institution > 100000000000 or p_user is null or p_user < 0 or p_user > 100000000000 then
+    raise exception 'Cantidad de tokens inválida';
+  end if;
+  update public.platform_settings set ai_daily_tokens_institution = p_institution, ai_daily_tokens_user = p_user,
+         updated_by = auth.uid(), updated_at = now() where id;
+  return (select json_build_object('ai_daily_tokens_institution', ai_daily_tokens_institution, 'ai_daily_tokens_user', ai_daily_tokens_user)
+            from public.platform_settings where id);
+end $$;
+revoke all on function public.update_ai_guardrails(bigint, bigint) from public, anon;
+grant execute on function public.update_ai_guardrails(bigint, bigint) to authenticated;
 
 -- api/generate.js (con el token del usuario) marca cómo terminó su pedido: una sola vez, solo los propios,
 -- dentro de los 15 minutos. Devuelve true si lo marcó.
@@ -1707,7 +1782,8 @@ begin
     'month', v_month,
     'settings', json_build_object('pack_tokens', s.pack_tokens, 'pack_price', s.pack_price, 'currency', s.currency,
       'personal_monthly_tokens', s.personal_monthly_tokens, 'default_seats', s.default_seats, 'default_monthly_tokens', s.default_monthly_tokens,
-      'ai_price_input', s.ai_price_input, 'ai_price_output', s.ai_price_output),
+      'ai_price_input', s.ai_price_input, 'ai_price_output', s.ai_price_output,
+      'ai_daily_tokens_institution', s.ai_daily_tokens_institution, 'ai_daily_tokens_user', s.ai_daily_tokens_user),
     'accounts', coalesce((select json_agg(x order by x.name) from (
       select i.id, i.name, i.slug,
              coalesce(a.seats, s.default_seats) as seats, public.seats_used(i.id) as seats_used,

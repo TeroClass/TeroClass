@@ -3151,7 +3151,7 @@ async function callAIMessages(messages,temperature=.7,opts={}){
       const srv=typeof data?.error==='string'?data.error:(data?.error?.message||'');
       if(res.status===401){await sessionExpired();throw new Error(AI_MSG.expired);}
       if(res.status===402&&data?.code==='budget'){const be=new Error(srv||AI_MSG.budget);be.code='budget';be.budget=data;showBudgetModal(data);throw be;}
-      if(res.status===429)throw new Error(data?.code==='quota'&&srv?srv:AI_MSG.busy);
+      if(res.status===429)throw new Error(/^quota/.test(data?.code||'')&&srv?srv:AI_MSG.busy);
       if(res.status===504||res.status===408)throw new Error(AI_MSG.timeout);
       if(res.status===422)throw new Error(srv||AI_MSG.filter);
       if(res.status===413||data?.code==='too_long')throw new Error(AI_MSG.long);
@@ -4196,6 +4196,9 @@ function platformBillingHtml(){
   <div class="admin-card bl-pf-card" id="pf-ai-prices-card"><div class="admin-card-title">AI cost estimate <span>Used by Metrics · USD per 1M tokens</span></div>
     <div class="bl-settings">${num('pfs-ai-in',s.ai_price_input??2.5,'Input tokens (USD per 1M)','0.01')}${num('pfs-ai-out',s.ai_price_output??10,'Output tokens (USD per 1M)','0.01')}</div>
     <div class="bl-row"><button class="btn-modal-save" data-bl="pf-save-prices">Save prices</button> <span class="bl-hint">Default: GPT-4o (input 2.50 · output 10.00). Only an estimate: check your Azure bill for the real cost.</span></div></div>
+  <div class="admin-card bl-pf-card" id="pf-ai-caps-card"><div class="admin-card-title">AI daily limits <span>Work even without the server key · estimated tokens per day (UTC)</span></div>
+    <div class="bl-settings">${num('pfs-cap-inst',s.ai_daily_tokens_institution??3000000,'Per institution (all its people)','100000')}${num('pfs-cap-user',s.ai_daily_tokens_user??400000,'Per teacher (admins ×2)','10000')}</div>
+    <div class="bl-row"><button class="btn-modal-save" data-bl="pf-save-caps">Save limits</button> <span class="bl-hint">A class is about 10,000–25,000 estimated tokens. Accounts without an institution get much less (30,000–150,000). Also set a budget alert in Azure.</span></div></div>
   <div class="admin-card bl-pf-card" id="pf-plans-card"><div class="admin-card-title">Institutions: plan and usage <span>This month (UTC)</span></div>
     <table class="teachers-table"><thead><tr><th>Institution</th><th>Seats</th><th>Tokens / month</th><th>Used this month</th><th>Extra tokens</th><th></th></tr></thead><tbody id="pf-plans">${accts.length?accts.map(a=>{const pct=a.monthly_tokens>0?Math.min(100,Math.round(a.used_month/a.monthly_tokens*100)):(a.used_month>0?100:0);return `<tr data-root="${esc(a.id)}"><td data-no-i18n>${esc(a.name)}${a.pending?' <span class="bl-badge pending">Pending</span>':''}</td>
       <td><span data-no-i18n>${esc(fmtInt(a.seats_used))} /</span> <input type="number" min="0" class="settings-input bl-num" data-f="seats" value="${esc(a.seats)}" aria-label="Seats"></td>
@@ -4229,6 +4232,17 @@ async function platformSavePrices(btn){
   if(error){showToast('Error: '+dbErr(error.message),'err');return;}
   IN.data=null;showToast('Prices saved ✓','ok');renderPlatformBilling();
 }
+async function platformSaveCaps(btn){
+  if(vaBlocked())return;
+  const g=id=>document.getElementById(id)?.value.trim()||'';
+  const a=g('pfs-cap-inst'),b=g('pfs-cap-user');
+  if(!blIntOk(a)||!blIntOk(b)){showToast('Use whole numbers for tokens and seats, and a price like 11.99.','err');return;}
+  btn.disabled=true;
+  const {error}=await sb.rpc('update_ai_guardrails',{p_institution:Number(a),p_user:Number(b)});
+  btn.disabled=false;
+  if(error){showToast('Error: '+dbErr(error.message),'err');return;}
+  showToast('Limits saved ✓','ok');renderPlatformBilling();
+}
 async function platformSavePlan(id,btn){
   if(vaBlocked())return;
   const tr=btn.closest('tr');const seats=tr?.querySelector('[data-f="seats"]')?.value.trim()||'',monthly=tr?.querySelector('[data-f="monthly"]')?.value.trim()||'';
@@ -4260,6 +4274,7 @@ document.addEventListener('click',e=>{
     case 'open-billing':closeModal('modal-budget');showPanel('billing');break;
     case 'pf-save-settings':platformSaveSettings(el);break;
     case 'pf-save-prices':platformSavePrices(el);break;
+    case 'pf-save-caps':platformSaveCaps(el);break;
     case 'pf-save-plan':platformSavePlan(el.dataset.id,el);break;
     case 'pf-approve':platformDecide(el.dataset.id,true,el);break;
     case 'pf-reject':platformDecide(el.dataset.id,false,el);break;
@@ -4822,7 +4837,9 @@ const I18N_ES_NAV={
 'Average, including handouts and checks':'Promedio, incluye fichas y verificaciones','Cost per class':'Costo por clase','Average estimate':'Estimación promedio',
 'By institution':'Por institución','Tokens and estimated cost':'Tokens y costo estimado','Classes':'Clases','Tokens':'Tokens',
 'No AI token usage recorded in this period.':'No hay consumo de tokens de IA registrado en este período.','Prices per 1M tokens:':'Precios por millón de tokens:','Change in Platform':'Cambiar en Plataforma',
-'AI cost estimate':'Costo estimado de la IA','Used by Metrics · USD per 1M tokens':'Lo usa Métricas · USD por millón de tokens','Input tokens (USD per 1M)':'Tokens de entrada (USD por millón)','Output tokens (USD per 1M)':'Tokens de salida (USD por millón)',
+'AI cost estimate':'Costo estimado de la IA','AI daily limits':'Límites diarios de IA','Work even without the server key · estimated tokens per day (UTC)':'Funcionan aun sin la clave del servidor · tokens estimados por día (UTC)',
+'Per institution (all its people)':'Por institución (toda su gente)','Per teacher (admins ×2)':'Por docente (admins ×2)','Save limits':'Guardar límites','Limits saved ✓':'Límites guardados ✓',
+'A class is about 10,000–25,000 estimated tokens. Accounts without an institution get much less (30,000–150,000). Also set a budget alert in Azure.':'Una clase son unos 10.000–25.000 tokens estimados. Las cuentas sin institución tienen mucho menos (30.000–150.000). Configurá también una alerta de presupuesto en Azure.','Used by Metrics · USD per 1M tokens':'Lo usa Métricas · USD por millón de tokens','Input tokens (USD per 1M)':'Tokens de entrada (USD por millón)','Output tokens (USD per 1M)':'Tokens de salida (USD por millón)',
 'Save prices':'Guardar precios','Default: GPT-4o (input 2.50 · output 10.00). Only an estimate: check your Azure bill for the real cost.':'Por defecto: GPT-4o (entrada 2,50 · salida 10,00). Es solo una estimación: el costo real está en tu factura de Azure.',
 'Prices saved ✓':'Precios guardados ✓','Use a price between 0 and 1000, like 2.50.':'Usá un precio entre 0 y 1000, por ejemplo 2.50.','Unit not found.':'Unidad no encontrada.','Invalid AI price (0 to 1000 USD per million tokens).':'Precio de IA inválido (de 0 a 1000 USD por millón de tokens).',
 'Loading…':'Cargando…'
@@ -5149,6 +5166,9 @@ document.addEventListener('change',async e=>{
 // ══ Fix sprint (2026-10): Spanish for the strings added by the audit fixes ══
 const I18N_ES_FIX={
 'The AI did not answer. Try again in a moment.':'La IA no respondió. Probá de nuevo en un momento.',
+// TC-01: daily AI caps (estimated tokens per person and per institution)
+"Your institution reached today's AI limit. Try again tomorrow or ask your admin.":'Tu institución llegó al límite de IA de hoy. Probá de nuevo mañana o hablá con tu admin.',
+"You reached today's AI limit for your account. Try again tomorrow.":'Llegaste al límite de IA de hoy para tu cuenta. Probá de nuevo mañana.',
 // auth: value line, password recovery, captcha, legal (TC-04, TC-18, P-12, P-35)
 'Plan classes with AI, teach them online and see what each class achieved.':'Planificá clases con IA, dalas en línea y mirá qué logró cada clase.',
 'Forgot your password?':'¿Olvidaste tu contraseña?','Reset your password':'Recuperá tu contraseña',

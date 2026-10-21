@@ -23,8 +23,10 @@ function mock({ quota = { allowed: true, used: 1, limit: 60, event: 41 }, quotaS
     if (u.endsWith('/auth/v1/user')) return h.Authorization === 'Bearer good-token' ? j(200, USER) : j(401, { msg: 'bad jwt' });
     if (u.endsWith('/rpc/ip_rate_hit')) return j(200, true);
     if (u.endsWith('/rpc/consume_ai_quota')) {
-      // quotaV2 = 'missing': database without the p_meta version (PostgREST: function not found)
-      if (body && 'p_meta' in body && quotaV2 === 'missing') return j(404, { code: 'PGRST202', message: 'Could not find the function public.consume_ai_quota(p_meta)' });
+      // quotaV2 = 'missing': database without the p_meta version (PostgREST: function not found);
+      // 'v2': has p_meta but not p_est_tokens (001_base.sql before 2026-10)
+      if (body && ('p_meta' in body || 'p_est_tokens' in body) && quotaV2 === 'missing') return j(404, { code: 'PGRST202', message: 'Could not find the function public.consume_ai_quota(p_meta)' });
+      if (body && 'p_est_tokens' in body && quotaV2 === 'v2') return j(404, { code: 'PGRST202', message: 'Could not find the function public.consume_ai_quota(p_est_tokens, p_meta)' });
       return j(quotaStatus, quotaStatus === 200 ? quota : { message: 'boom' });
     }
     if (u.endsWith('/rpc/finish_ai_event')) return j(finishStatus, finishStatus === 200 ? true : { message: 'boom' });
@@ -78,7 +80,8 @@ test('generate: sends the sanitized meta with the user token (no service key), t
   assert.deepEqual(order(calls), ['user', 'ip_rate_hit', 'consume_ai_quota', 'completions', 'finish_ai_event']);
   const q = by(calls, '/rpc/consume_ai_quota')[0];
   assert.equal(q.headers.Authorization, 'Bearer good-token');
-  assert.deepEqual(q.body, { p_meta: { kind: 'student', subjects: ['Math'], language: 'Spanish', age_band: 'teen' } });
+  assert.deepEqual(q.body.p_meta, { kind: 'student', subjects: ['Math'], language: 'Spanish', age_band: 'teen' });
+  assert.ok(Number.isInteger(q.body.p_est_tokens) && q.body.p_est_tokens > 3000, 'TC-01: estimated tokens sent: ' + q.body.p_est_tokens);
   const f = by(calls, '/rpc/finish_ai_event')[0];
   assert.equal(f.headers.Authorization, 'Bearer good-token');
   assert.deepEqual(f.body, { p_event: 41, p_ok: true });
@@ -88,7 +91,7 @@ test('generate: sends the sanitized meta with the user token (no service key), t
 test('generate: a request without meta is still recorded (kind only)', async () => {
   const calls = mock();
   await gen(req({ kind: 'playbook' }), res());
-  assert.deepEqual(by(calls, '/rpc/consume_ai_quota')[0].body, { p_meta: { kind: 'playbook', subjects: [] } });
+  assert.deepEqual(by(calls, '/rpc/consume_ai_quota')[0].body.p_meta, { kind: 'playbook', subjects: [] });
 });
 
 test('generate: Azure errors / content filter mark the event as failed', async () => {
@@ -120,8 +123,23 @@ test('generate: database without the meta version → retries without meta (gene
   const r = res(); await gen(req({ meta: { subjects: ['Math'] } }), r);
   assert.equal(r.statusCode, 200);
   const q = by(calls, '/rpc/consume_ai_quota');
-  assert.equal(q.length, 2);
-  assert.ok('p_meta' in q[0].body); assert.deepEqual(q[1].body, {});
+  assert.equal(q.length, 3);
+  assert.ok('p_est_tokens' in q[0].body); assert.ok('p_meta' in q[1].body && !('p_est_tokens' in q[1].body)); assert.deepEqual(q[2].body, {});
+});
+test('generate: database before the token caps (p_meta only) → retries with p_meta (TC-01)', async () => {
+  const calls = mock({ quotaV2: 'v2', quota: { allowed: true, used: 2, limit: 60, event: 41 } });
+  const r = res(); await gen(req({ meta: { subjects: ['Math'] } }), r);
+  assert.equal(r.statusCode, 200);
+  const q = by(calls, '/rpc/consume_ai_quota');
+  assert.equal(q.length, 2); assert.deepEqual(q[1].body.p_meta.subjects, ['Math']);
+});
+test('generate: the daily token caps answer 429 with a clear message (TC-01)', async () => {
+  for (const [reason, code] of [['tokens', 'quota_tokens'], ['institution', 'quota_institution']]) {
+    const calls = mock({ quota: { allowed: false, reason, used: 3, limit: 60 } });
+    const r = res(); await gen(req({}), r);
+    assert.equal(r.statusCode, 429); assert.equal(r.body.code, code);
+    assert.equal(calls.filter(c => c.url.startsWith('https://azure.example.com/')).length, 0);
+  }
 });
 
 test('generate: quota still fails closed (503, Azure not called), and 429 records nothing more', async () => {

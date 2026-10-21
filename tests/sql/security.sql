@@ -230,7 +230,7 @@ set role authenticated; select qa.as_user(:'LONER');
 select qa.eq('H2: no-institution user limit 15', $$select public.consume_ai_quota()->>'limit'$$, '15');
 do $$ begin for i in 2..15 loop perform public.consume_ai_quota(); end loop; end $$;
 select qa.eq('H2: 15th call allowed', $$select public.get_ai_quota()->>'used'$$, '15');
-select qa.eq('H2: 16th call refused', $$select public.consume_ai_quota()::text$$, '{"allowed" : false, "used" : 15, "limit" : 15}');
+select qa.eq('H2: 16th call refused', $$select public.consume_ai_quota()::text$$, '{"allowed" : false, "reason" : "requests", "used" : 15, "limit" : 15}');
 select qa.fails('H2: user cannot reset own usage (update)', $$update public.ai_usage set count=0$$, 'permission denied');
 select qa.fails('H2: user cannot delete usage', $$delete from public.ai_usage$$, 'permission denied');
 select qa.fails('H2: user cannot insert usage', $$insert into public.ai_usage values (auth.uid(), current_date + 1, 0)$$, 'permission denied');

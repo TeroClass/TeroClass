@@ -72,6 +72,8 @@ insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at) values
   (gen_random_uuid(),'lf-student@x.com','{"via":"student_link","name":"Stu"}',now()),
   (gen_random_uuid(),'lf-loner@x.com','{"name":"Loner"}',now()),
   (gen_random_uuid(),'lf-loner2@x.com','{"name":"Loner Two"}',now());
+insert into auth.users(id,email,raw_user_meta_data) values (gen_random_uuid(),'lf-unconf@x.com','{"name":"Unconfirmed"}');
+insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at) values (gen_random_uuid(),'lf-fresh@x.com','{"name":"Fresh"}',now());
 set role authenticated; select ql.as_user(ql.uid('lf-adm@x.com')::text);
 select ql.eq('TC-07: inviting a STUDENT account as org_admin → pending (not moved)', $$select public.invite_member(ql.inst('lf-s1'), 'LF-Student@x.com', 'org_admin')$$, 'pending');
 select ql.eq('TC-07: …the student is still a student, without a unit', $$select ql.prof('lf-student@x.com')$$, 'student:-');
@@ -165,6 +167,28 @@ select ql.fails('TC-01: nobody reads the counters directly', $$select count(*) f
 reset role;
 set role anon; select ql.as_user('');
 select ql.fails('TC-01: anon cannot call ip_rate_hit', $$select public.ip_rate_hit('ai:'||repeat('d', 64), 3, 60)$$, 'permission denied');
+reset role;
+
+-- ===== TC-01: daily caps on ESTIMATED AI tokens (per person and per account), without the server key =====
+delete from public.rate_counters where key like 'aitok:%';
+set role authenticated; select ql.as_user(ql.uid('lf-fresh@x.com')::text);
+select ql.eq('TC-01: a new account without institution: 2 big requests (25k est.) fit, the 3rd → "tokens" (60k a day)', $$select (public.consume_ai_quota(null, 25000)->>'allowed')||(public.consume_ai_quota(null, 900000)->>'allowed')||(public.consume_ai_quota(null, 25000)->>'reason')$$, 'truetruetokens');
+select ql.eq('TC-01: …a refused request is not counted', $$select public.consume_ai_quota(null, 1)->>'used'$$, '3');
+select ql.eq('TC-01: a negative estimate counts as 0', $$select public.consume_ai_quota(null, -999999)->>'allowed'$$, 'true');
+select ql.eq('TC-01: …and the 6th request of a new account → "requests" (5 a day)', $$select (public.consume_ai_quota(null, 1)->>'used')||'/'||(public.consume_ai_quota(null, 1)->>'reason')$$, '5/requests');
+select ql.fails('TC-01: only the super admin changes the daily caps', $$select public.update_ai_guardrails(1, 1)$$, 'No autorizado');
+select ql.as_user(:'OWNER');
+reset role; delete from public.rate_counters where key like 'aitok:%'; set role authenticated; select ql.as_user(:'OWNER');
+select ql.eq('TC-01: the super admin sets the account cap (30k) from Platform', $$select public.update_ai_guardrails(30000, 400000)->>'ai_daily_tokens_institution'$$, '30000');
+select ql.as_user(ql.uid('lf-t1@x.com')::text);
+select ql.eq('TC-01: a teacher of the account: 25k fit, 25k more → "institution"', $$select (public.consume_ai_quota(null, 25000)->>'allowed')||(public.consume_ai_quota(null, 25000)->>'reason')$$, 'trueinstitution');
+reset role;
+select ql.eq('TC-01: …and the person''s own counter got its 25k back', $$select amount::text from public.rate_counters where key = 'aitok:u:'||ql.uid('lf-t1@x.com')::text$$, '25000');
+select ql.eq('TC-01: unconfirmed e-mail without institution → 30k tokens a day', $$select public.ai_daily_token_limit(ql.uid('lf-unconf@x.com'))::text$$, '30000');
+select ql.eq('TC-01: teacher 400k, admin 800k (platform_settings)', $$select public.ai_daily_token_limit(ql.uid('lf-t1@x.com'))||'/'||public.ai_daily_token_limit(ql.uid('lf-adm@x.com'))$$, '400000/800000');
+update public.platform_settings set ai_daily_tokens_institution = 3000000 where id;
+set role anon; select ql.as_user('');
+select ql.fails('TC-01: anon cannot consume AI quota', $$select public.consume_ai_quota(null, 1)$$, 'permission denied');
 reset role;
 
 -- ===== groups + a class for the live room / plan / document =====
