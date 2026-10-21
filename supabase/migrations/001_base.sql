@@ -3326,8 +3326,16 @@ begin
   return (select json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name, ''), 'group_name', g.name,
             'starts_at', s.starts_at, 'ends_at', s.ends_at, 'timezone', s.timezone, 'status', s.status, 'seq', s.seq,
             'teacher_name', public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)),
+            -- TC-08 (2026-10): only people the INSTITUTION loaded (group members, manual / CSV enrollments) or who already
+            -- signed in get an e-mail; an address a teacher typed for a one-off class gets the link shared by hand
+            -- ("Copy invitation link") until it is a known student. Never more than 100 (the API caps it too).
             'recipients', coalesce((select json_agg(json_build_object('email', p->>'email', 'name', p->>'name'))
-                                      from json_array_elements(public.session_people(p_session)) p), '[]'::json))
+                                      from json_array_elements(public.session_people(p_session)) p
+                                      join public.student_enrollments e on e.id = (p->>'enrollment_id')::uuid
+                                     where p->>'via' = 'group' or e.source <> 'session' or e.user_id is not null), '[]'::json),
+            'skipped', (select count(*) from json_array_elements(public.session_people(p_session)) p
+                          join public.student_enrollments e on e.id = (p->>'enrollment_id')::uuid
+                         where not (p->>'via' = 'group' or e.source <> 'session' or e.user_id is not null)))
             from public.class_sessions s left join public.class_groups g on g.id = s.group_id where s.id = p_session);
 end $$;
 

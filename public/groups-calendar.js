@@ -743,7 +743,9 @@
         return;
       }
       if (!r.ok) { if (!quiet) showToast('Error: ' + (j.error || r.status), 'err'); return; }
-      if (j.sent > 0) { showToast(`Emails sent to ${j.sent} students ✓`, 'ok'); if (note) { note.textContent = tr('Emails sent ✓'); note.className = 'gc-note ok'; } }
+      const sk = Number(j.skipped) || 0; // TC-08: addresses typed for this class only (not loaded by the institution)
+      if (j.sent > 0) { showToast(`Emails sent to ${j.sent} students ✓`, 'ok'); if (note) { note.textContent = tr('Emails sent ✓') + (sk ? ' ' + tr('Some students only get the link you share:') + ' ' + sk : ''); note.className = 'gc-note ok'; } }
+      else if (sk) { if (note) { note.textContent = tr('These students are not loaded by your institution yet: use "Copy invitation link" and send it yourself.'); note.className = 'gc-note warn'; } if (!quiet) showToast('These students are not loaded by your institution yet: use "Copy invitation link" and send it yourself.', 'warn'); }
       else if (!quiet) showToast('There are no students to email.', 'err');
     } catch (e) { if (!quiet) showToast('Error: ' + (e?.message || e), 'err'); } finally { busy(btn, false); }
   }
@@ -1580,7 +1582,9 @@
     'Group time:': 'Hora del grupo:', 'Group:': 'Grupo:', 'Without a group': 'Sin grupo', 'Weekly': 'Semanal', 'The class opens 10 minutes before it starts.': 'La clase se abre 10 minutos antes de empezar.',
     'Add to calendar': 'Agregar al calendario', 'Google Calendar': 'Google Calendar', '.ics (Outlook, Apple)': '.ics (Outlook, Apple)',
     'Could not load the students.': 'No se pudieron cargar los estudiantes.', 'No students yet.': 'Todavía no hay estudiantes.', 'Invited': 'Invitado/a',
-    'Invite': 'Invitar', 'Email the students': 'Mandar email a los estudiantes', 'Copy invitation link': 'Copiar link de invitación', 'Edit': 'Editar',
+    'Invite': 'Invitar', 'Email the students': 'Mandar email a los estudiantes',
+    'Some students only get the link you share:': 'Algunos estudiantes solo reciben el link que compartas:',
+    'These students are not loaded by your institution yet: use "Copy invitation link" and send it yourself.': 'Estos estudiantes todavía no los cargó tu institución: usá "Copiar link de invitación" y mandalo vos.', 'Copy invitation link': 'Copiar link de invitación', 'Edit': 'Editar',
     'Class plan': 'Plan de la clase', 'Saved class': 'Clase guardada', 'No plan attached yet: the live room will show this plan to you (never to students).': 'Todavía no hay un plan adjunto: el aula en vivo te va a mostrar este plan a vos (nunca a los estudiantes).',
     'Choose a saved class': 'Elegí una clase guardada', '— Choose a saved class —': '— Elegí una clase guardada —', 'Attach plan': 'Adjuntar plan', 'Remove plan': 'Quitar plan',
     'Create and save a class in Classes to attach it here.': 'Creá y guardá una clase en Clases para adjuntarla acá.', 'Choose a saved class first.': 'Primero elegí una clase guardada.',

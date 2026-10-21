@@ -204,6 +204,18 @@ insert into public.plannings (owner_id, institution_id, title, data) values
   (ql.uid('lf-loner@x.com'), ql.inst('lf-s1'), 'Fotosíntesis 2°', '{"content":"Fotosíntesis\nObjetivos de hoy:\n- Explicar\nRespuestas:\n1. luz","params":{"subjects":["Biología"]}}'),
   (ql.uid('lf-t1@x.com'), ql.inst('lf-s2'), 'Plan ajeno', '{"content":"x"}');
 
+-- ===== TC-08: only people the institution loaded (or who signed in) are e-mailed =====
+set role authenticated; select ql.as_user(ql.uid('lf-loner@x.com')::text);
+select set_config('ql.oneoff', public.create_session(null, 'LF one-off', now() + interval '2 days', 45, 'America/Montevideo', array['typed.by.teacher@x.com'])->>'id', false);
+select ql.eq('TC-08: an address a teacher typed for a one-off class is not e-mailed (skipped)', $$select json_array_length(public.session_notify_payload(current_setting('ql.oneoff')::uuid)->'recipients')||'/'||(public.session_notify_payload(current_setting('ql.oneoff')::uuid)->>'skipped')$$, '0/1');
+select ql.eq('TC-08: group members (loaded by the institution) are e-mailed', $$select (json_array_length(public.session_notify_payload(ql.sess('LF now'))->'recipients') >= 1)::text$$, 'true');
+reset role;
+update public.student_enrollments set user_id = ql.uid('lf-kid@x.com') where lower(email) = 'typed.by.teacher@x.com';
+set role authenticated; select ql.as_user(ql.uid('lf-loner@x.com')::text);
+select ql.eq('TC-08: …once that person has signed in, they are', $$select json_array_length(public.session_notify_payload(current_setting('ql.oneoff')::uuid)->'recipients')::text$$, '1');
+reset role;
+update public.student_enrollments set user_id = null where lower(email) = 'typed.by.teacher@x.com';
+
 -- ===== P-06: plan attached to a calendar class =====
 set role authenticated; select ql.as_user(ql.uid('lf-loner@x.com')::text);
 select ql.eq('P-06: the teacher attaches their saved class', $$select public.set_session_plan(ql.sess('LF now'), ql.plan('Fotosíntesis 2°'))->>'planning_title'$$, 'Fotosíntesis 2°');

@@ -158,13 +158,18 @@ test('notify: with a key → auth required, payload from the database with the c
     });
     r = res(); await notifyMod.default({ method: 'POST', headers: { authorization: 'Bearer good', host: 'teroclass.com' }, body: { session_id: S1, kind: 'cancel', lang: 'en' } }, r);
     assert.equal(r.statusCode, 200);
-    assert.deepEqual(r.body, { configured: true, sent: 2, failed: 0 });
+    assert.deepEqual(r.body, { configured: true, sent: 2, failed: 0, skipped: 0 });
     assert.ok(!JSON.stringify(r.body).includes('re_test'));
     const batch = JSON.parse(calls.find(c => c.url.includes('resend')).opts.body);
     assert.deepEqual(batch.map(e => e.to[0]), ['ana@mail.com', 'beto@mail.com']);
     const att = Buffer.from(batch[0].attachments[0].content, 'base64').toString('utf8');
     assert.ok(att.includes('METHOD:CANCEL') && att.includes('STATUS:CANCELLED') && att.includes(`UID:${S1}@teroclass.com`));
     assert.match(batch[0].subject, /^Class cancelled: /);
+    // TC-08: only people the institution loaded are e-mailed; the rest are reported as "skipped" and nothing is sent
+    const sentCalls = [];
+    mockFetch(url => { if (url.endsWith('/rpc/session_notify_payload')) return new Response(JSON.stringify({ ...payload, recipients: [], skipped: 3 }), { status: 200 }); sentCalls.push(url); return new Response('{}', { status: 404 }); });
+    r = res(); await notifyMod.default({ method: 'POST', headers: { authorization: 'Bearer good' }, body: { session_id: S1, kind: 'invite' } }, r);
+    assert.deepEqual(r.body, { configured: true, sent: 0, failed: 0, skipped: 3 }); assert.equal(sentCalls.length, 0);
     // not the session's teacher → the database refuses
     mockFetch(() => new Response('{"message":"No autorizado"}', { status: 400 }));
     r = res(); await notifyMod.default({ method: 'POST', headers: { authorization: 'Bearer good' }, body: { session_id: S1, kind: 'invite' } }, r);

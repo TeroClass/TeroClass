@@ -8,7 +8,8 @@
 // teacher / substitute / creator, recipients = its students), called with the caller's own token.
 // TC-08 (2026-10): before anything is sent the database grants the teacher's daily e-mail quota (email_quota_take;
 // fail closed), at most 100 recipients per send, and the class title is cleaned before it goes into the subject
-// (one line, no links or addresses, 60 characters).
+// (one line, no links or addresses, 60 characters). Only people the institution loaded (or who already signed in) are
+// e-mailed; addresses a teacher typed for a one-off class are "skipped" (the app offers the link to share).
 import { SUPABASE_URL, SUPABASE_KEY, bearer } from '../_lib/livekit.js';
 import { buildCalendar, appOrigin, isUuid } from '../_lib/ics.js';
 import { resendKey, EMAIL_RE, timedFetch, safeSubjectText, takeQuota, sendEmails, fromAddress, escHtml } from '../_lib/mail.js';
@@ -68,10 +69,12 @@ export default async function handler(req, res) {
   if (!payload || !isUuid(payload.id)) return res.status(403).json({ error: 'Not allowed.', code: 'forbidden' });
 
   const emails = buildEmails(payload, { kind: b.kind, lang, origin: appOrigin(req), from: fromAddress() });
-  if (!emails.length) return res.status(200).json({ configured: true, sent: 0, failed: 0 });
+  // TC-08: addresses a teacher typed for a one-off class (not loaded by the institution, never signed in) are skipped
+  const skipped = Number(payload.skipped) || 0;
+  if (!emails.length) return res.status(200).json({ configured: true, sent: 0, failed: 0, skipped });
   const q = await takeQuota(token, 'session', emails.length);
   if (!q) return res.status(503).json({ configured: true, sent: 0, error: 'Could not check your e-mail limit. Nothing was sent.', code: 'email_quota_check' });
   if (!q.allowed) return res.status(429).json({ configured: true, sent: 0, error: 'You reached the e-mail limit for today. Share the class link instead.', code: 'email_quota', reason: q.reason || null });
   const { sent, failed } = await sendEmails(key, emails);
-  return res.status(200).json({ configured: true, sent, failed });
+  return res.status(200).json({ configured: true, sent, failed, skipped });
 }
