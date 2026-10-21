@@ -997,7 +997,7 @@ Cierre y ticket de salida (5 min)
   }
 
   function consentBadge(p) {
-    if (p.recorded) return `<span class="lc-badge rec" title="${esc(tr('Consented to recording'))}">● <span>Recorded</span></span>${p.minor ? ` <span class="lc-badge" title="${esc(tr('Under 18: guardian consent declared by the student or managed by the institution (not verified by TeroClass)'))}">👪 <span>Under 18</span></span>` : ''}`;
+    if (p.recorded) return `<span class="lc-badge rec" title="${esc(tr('Consented to recording'))}">● <span>${recorderOn() ? 'Recorded' : 'Consented'}</span></span>${p.minor ? ` <span class="lc-badge" title="${esc(tr('Under 18: guardian consent declared by the student or managed by the institution (not verified by TeroClass)'))}">👪 <span>Under 18</span></span>` : ''}`;
     return `<span class="lc-badge off" title="${esc(tr('Attends without recording'))}"><span>Not recorded</span></span>`;
   }
   function tileHtml(p) {
@@ -1889,7 +1889,7 @@ Cierre y ticket de salida (5 min)
     'Your next classes': 'Tus próximas clases', 'Past classes': 'Clases pasadas', 'The insights of the classes you taught are in Insights.': 'Los insights de las clases que diste están en Insights.',
     'Open Insights': 'Abrir Insights', 'Open in Calendar': 'Abrir en el Calendario', 'No classes in the next two weeks. Schedule them in the Calendar.': 'No tenés clases en las próximas dos semanas. Programalas en el Calendario.',
     'No plan attached to this class. Attach a saved class from this class in the Calendar.': 'Esta clase no tiene un plan adjunto. Adjuntá una clase guardada desde esta clase en el Calendario.',
-    'Teacher (sample)': 'Docente (ejemplo)', 'Participant': 'Participante',
+    'Teacher (sample)': 'Docente (ejemplo)', 'Participant': 'Participante', 'Consented': 'Aceptó',
     // P-07 / TC-13 / TC-23 (2026-10)
     'The video classroom is not connected yet: a room opens in preview mode (only you, nothing is recorded).': 'El aula de video todavía no está conectada: la sala se abre en modo vista previa (solo vos, no se graba nada).',
     'Your scheduled classes are in the Calendar. Here you can open a quick room and invite your students with a link.': 'Tus clases programadas están en el Calendario. Acá podés abrir una sala rápida e invitar a tus estudiantes con un link.',

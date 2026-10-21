@@ -392,6 +392,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     const rec = await text('#lc-rec');
     if (!/Recording ready to be turned on — nothing is recorded yet/.test(rec) || /Recording — only/.test(rec)) throw new Error('indicador sin grabador: ' + rec);
     if (await page.$eval('#lc-rec', e => e.dataset.recorder) !== 'off') throw new Error('data-recorder');
+    { const b = await text('.lc-tile[data-pid="local"] .lc-tile-top'); if (/Recorded/.test(b) || !/Consented/.test(b)) throw new Error('tile badge without recorder: ' + b); }
     await shot('rec-ready');
     await page.click('#lc-ctl-end'); await page.click('#lc-end-confirm'); await page.waitForSelector('#lc-demo-card');
     await page.evaluate(() => { APP_CONFIG.recording = true; });
