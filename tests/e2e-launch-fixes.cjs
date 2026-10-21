@@ -199,6 +199,7 @@ const shot = async (page, n) => { if (SHOTS) await page.screenshot({ path: `${SH
     await p2.fill('#login-email', 'alumna@gmail.com'); await p2.fill('#login-password', 'secreto123'); await p2.click('#tab-login .auth-btn');
     await p2.waitForSelector('#modal-my-inv.active', { timeout: 15000 });
     await shot(p2, 'my-invitation');
+    { const l = await p2.textContent('#modal-my-inv .myinv-line'); if (!/^Ana Admin (invited you to join|te invitó a unirte a) Colegio Lanzamiento (as|como) (institution admin|admin de la institución)$/.test(l)) throw new Error('invitation line: ' + l); }
     await p2.click('#modal-my-inv [data-inv-accept]');
     await p2.waitForSelector('#nav-admin', { state: 'visible', timeout: 15000 });
     const pr = db.profiles.find(p => p.email === 'alumna@gmail.com');

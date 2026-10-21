@@ -667,6 +667,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 .btn-modal-save.dg-go{background:#b42318}
 .btn-modal-save:disabled{opacity:.45;cursor:not-allowed}
 .myinv-item{border:1px solid var(--border);border-radius:10px;padding:12px;margin:10px 0}
+.myinv-line{font-size:14px;font-weight:600;color:var(--ink);margin:12px 0 -4px}
 .myinv-item b{display:block;font-size:14px}
 .myinv-meta{font-size:12px;color:var(--ink-muted);margin:3px 0 10px}
 .myinv-actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -1352,9 +1353,10 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
       <div class="modal-sub" id="invite-res-sub"></div>
       <div class="inv-link-box"><input type="text" id="invite-res-link" class="modal-input" readonly data-no-i18n aria-label="Invitation link"></div>
       <div class="inv-share">
-        <button class="btn-modal-cancel" type="button" id="invite-copy-link">📋 Copy link</button>
+        <button class="btn-modal-cancel" type="button" id="invite-copy-link">📋 Copy invitation link</button>
         <button class="btn-modal-cancel" type="button" id="invite-copy-msg">💬 Copy message</button>
         <a class="btn-modal-cancel inv-wa" id="invite-wa" href="#" target="_blank" rel="noopener">WhatsApp</a>
+        <a class="btn-modal-cancel inv-mail" id="invite-mailto" href="#">✉️ Email</a>
       </div>
       <ol class="inv-steps" id="invite-res-steps"></ol>
       <div class="modal-actions">
@@ -5087,7 +5089,11 @@ function renderMyInvitations(list){
   const box=document.getElementById('myinv-list');if(!box)return;
   if(!list.length){closeModal('modal-my-inv');return;}
   document.getElementById('myinv-title').textContent=list.length>1?trText('You have invitations'):trText('You have an invitation');
-  box.innerHTML=list.map(i=>`<div class="myinv-item"><b data-no-i18n>${esc(i.path||i.unit_name||'')}</b>
+  // TC-07: "X invited you to join <institution> as <role> — Accept / Decline" (the owner shows as "TeroClass team")
+  const line=i=>{const who=String(i.invited_by||'TeroClass'),inst=String(i.unit_name||i.path||''),es=uiLang==='es';
+    const role=i.role==='org_admin'?(es?'admin de la institución':'institution admin'):(es?'docente':'teacher');
+    return es?`${who} te invitó a unirte a ${inst} como ${role}`:`${who} invited you to join ${inst} as ${role}`;};
+  box.innerHTML=list.map(i=>`<p class="myinv-line" data-no-i18n>${esc(line(i))}</p><div class="myinv-item"><b data-no-i18n>${esc(i.path||i.unit_name||'')}</b>
     <div class="myinv-meta"><span>${i.role==='org_admin'?'Institution admin':'Teacher'}</span> · <span>Invited by</span> <span data-no-i18n>${esc(i.invited_by||'')}</span> · <span>Expires</span> <span data-no-i18n>${esc(fmtDate(i.expires_at,{day:'numeric',month:'short'}))}</span></div>
     <div class="myinv-actions"><button class="btn-modal-save" type="button" data-inv-accept="${esc(i.id)}">Accept</button><button class="btn-modal-cancel" type="button" data-inv-decline="${esc(i.id)}">Decline</button></div></div>`).join('')
     +(currentUser?.isStudent?'<p class="access-help">If you accept, your account becomes a teacher / admin account of that institution. You keep your classes as a student.</p>':'');
@@ -5148,6 +5154,7 @@ async function showInviteResult(p,result){
   document.getElementById('invite-copy-link').onclick=()=>copyText(link);
   document.getElementById('invite-copy-msg').onclick=()=>copyText(msg);
   document.getElementById('invite-wa').href='https://wa.me/?text='+encodeURIComponent(msg);
+  document.getElementById('invite-mailto').href='mailto:'+encodeURIComponent(p.email||'')+'?subject='+encodeURIComponent(trText('Invitation to TeroClass'))+'&body='+encodeURIComponent(msg);
   steps.innerHTML=showShare?(p.has_account
     ?['Send them the message (WhatsApp, email…).','They sign in with their account and click "Accept".','They appear in Team; the invitation expires in 14 days.']
     :['Send them the link (WhatsApp, email…).','They open it and create their account with '+(p.email||'that email')+'.','They join this unit automatically; the invitation expires in 14 days.']).map(x=>`<li>${esc(trText(x))}</li>`).join(''):'';
@@ -5281,7 +5288,7 @@ const I18N_ES_FIX={
 'Invitation accepted ✓':'Invitación aceptada ✓','Invitation declined.':'Invitación rechazada.',
 'After inviting you get a link to send by email or WhatsApp. Whoever already has a TeroClass account will see the invitation when they sign in and decide whether to accept it. Invitations expire after 14 days.':'Después de invitar vas a tener un link para mandar por email o WhatsApp. Quien ya tiene cuenta en TeroClass va a ver la invitación cuando ingrese y decide si la acepta. Las invitaciones vencen a los 14 días.',
 'Each teacher or admin uses a seat of your plan.':'Cada docente o admin ocupa un asiento de tu plan.',
-'📋 Copy link':'📋 Copiar link','💬 Copy message':'💬 Copiar mensaje','Invite someone else':'Invitar a otra persona','Done':'Listo',
+'📋 Copy link':'📋 Copiar link','📋 Copy invitation link':'📋 Copiar link de invitación','✉️ Email':'✉️ Email','Invitation to TeroClass':'Invitación a TeroClass','💬 Copy message':'💬 Copiar mensaje','Invite someone else':'Invitar a otra persona','Done':'Listo',
 'Added ✓':'Agregado ✓','That person was already part of your institution: they now belong to this unit with the role you chose.':'Esa persona ya era parte de tu institución: ahora pertenece a esta unidad con el rol que elegiste.',
 'Invitation saved ✓':'Invitación guardada ✓',
 'That person already has a TeroClass account. We sent them an email; they will also see the invitation when they sign in, and they decide whether to accept it.':'Esa persona ya tiene cuenta en TeroClass. Le mandamos un email; también va a ver la invitación cuando ingrese y decide si la acepta.',
