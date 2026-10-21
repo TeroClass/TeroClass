@@ -248,6 +248,9 @@ async function run(name, browser, opts, fn) {
     if (!(await page.isVisible('#panel-superadmin'))) throw new Error('institution screen opened without a unit');
     await page.click('.inst-card:nth-child(1) [data-action="view-inst"]');
     await page.waitForSelector('#panel-admin.active');
+    // TC-02 / P-13: "Join by link" lives in the Dashboard (not in Branding) and shows the stored value
+    await page.waitForSelector('#access-card', { state: 'visible' });
+    if (await page.isChecked('#access-open-reg')) throw new Error('open_registration not loaded');
     if (!(await page.textContent('#isw-label')).includes('Colegio Uno')) throw new Error('View did not set the switcher');
     await nav(page, '#nav-superadmin'); // the list = All institutions
     if (!(await page.textContent('#isw-label')).includes('All institutions') || await page.isVisible('#nav-branding')) throw new Error('Institutions did not select All');
@@ -255,12 +258,11 @@ async function run(name, browser, opts, fn) {
     await nav(page, '#nav-branding');
     if (await page.inputValue('#wl-name') !== 'Colegio Uno') throw new Error('branding lost the viewed institution');
     if (!(await page.textContent('#branding-ctx-badge')).includes('Colegio Uno')) throw new Error('badge');
-    if (await page.isChecked('#wl-open-reg')) throw new Error('open_registration not loaded');
     const font = await page.getAttribute('.font-option.selected', 'data-font'); if (font !== 'Georgia') throw new Error('font not highlighted: ' + font);
     await nav(page, '#nav-master');
     if (!(await page.textContent('#master-inst-badge')).includes('Colegio Uno')) throw new Error('AI settings badge');
     await nav(page, '#nav-superadmin'); await page.click('.inst-card:nth-child(2) [data-action="edit-inst"]');
-    if (await page.inputValue('#wl-name') !== 'Colegio Dos' || !(await page.isChecked('#wl-open-reg'))) throw new Error('L2 fields not reset');
+    if (await page.inputValue('#wl-name') !== 'Colegio Dos') throw new Error('L2 fields not reset');
     if ((await page.getAttribute('.font-option.selected', 'data-font')) !== 'Inter') throw new Error('L2 font not reset');
     if (!(await page.textContent('#isw-label')).includes('Colegio Dos')) throw new Error('Edit did not set the switcher');
     await page.click('#btn-new-inst'); // "＋ New institution" opens the create modal (the switcher keeps Colegio Dos)

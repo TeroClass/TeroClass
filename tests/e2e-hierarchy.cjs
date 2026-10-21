@@ -149,7 +149,11 @@ function seedTree() {
     await page.waitForSelector('#modal-invite.active');
     if (!/Madre H › Sede 2/.test(await page.textContent('#invite-org-name'))) throw new Error('invite modal target: ' + await page.textContent('#invite-org-name'));
     await page.fill('#invite-email', 'nuevo@h.com'); await page.click('#modal-invite .btn-modal-save');
-    await waitToast(page, /Invitation saved/);
+    // P-03: the result step shows the link to share (no e-mail promised without a provider)
+    await page.waitForSelector('#invite-result', { state: 'visible' });
+    if (!/Invitation saved/.test(await page.textContent('#invite-res-title'))) throw new Error('invite result: ' + await page.textContent('#invite-res-title'));
+    if (!/\/org\/sede2-h\?invite=nuevo%40h\.com$|\/org\/[a-z0-9-]+\?invite=nuevo%40h\.com$/.test(await page.inputValue('#invite-res-link'))) throw new Error('link: ' + await page.inputValue('#invite-res-link'));
+    await page.click('#invite-result .btn-modal-save');
     const inv = calls.rpc.filter(x => x.fn === 'invite_member').pop();
     if (inv.body.p_inst !== t.sede2.id) throw new Error('invited to wrong unit');
     await nodeRow(page, 'Madre H').locator('[data-h="open"]').click();

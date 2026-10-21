@@ -91,17 +91,26 @@ async function nav(page, sel) {
     const t = await page.textContent('#toast'); if (!/Playbook ready/.test(t)) throw new Error('sin aviso de éxito: ' + t);
   });
 
-  await step('Marca: editar institución, registro abierto y badge "Editing"', async () => {
+  await step('Marca: editar institución, registro por link (Panel) y badge "Editing"', async () => {
+    // TC-02 / P-13: "Join by link" is in the Dashboard, explained, and turning it on asks for confirmation
+    await nav(page, '#nav-admin');
+    await page.waitForSelector('#access-card', { state: 'visible' });
+    if (await page.isChecked('#access-open-reg') !== (db.institutions[0].open_registration === true)) throw new Error('estado del registro por link');
+    if (await page.isChecked('#access-open-reg')) { await page.uncheck('#access-open-reg'); await page.waitForFunction(() => /Join by link is off/.test(document.getElementById('toast').textContent)); }
+    if (db.institutions[0].open_registration !== false) throw new Error('open_registration no guardado');
+    await page.check('#access-open-reg');
+    await page.waitForSelector('#modal-danger.active');
+    await page.click('#dg-ok');
+    await page.waitForFunction(() => /Join by link is on/.test(document.getElementById('toast').textContent));
+    if (db.institutions[0].open_registration !== true) throw new Error('open_registration no se volvió a abrir');
     await nav(page, '#nav-branding');
     await page.waitForSelector('#panel-branding.active');
     const badge = await page.textContent('#branding-ctx-badge'); if (!badge.includes('The English Coach')) throw new Error('sin badge: ' + badge);
     if (await page.inputValue('#wl-name') !== 'The English Coach') throw new Error('no cargó la institución');
-    await page.uncheck('#wl-open-reg');
     await page.evaluate(() => saveBranding());
     await page.waitForFunction(() => /Branding saved/.test(document.getElementById('toast').textContent));
     if (!(await page.isVisible('#panel-branding'))) throw new Error('saving branding left the screen'); // the switcher keeps the institution
-    if (db.institutions[0].open_registration !== false) throw new Error('open_registration no guardado');
-    db.institutions[0].open_registration = true;
+    if (db.institutions[0].open_registration !== true) throw new Error('saving branding must not touch the join-by-link setting');
     const invs = db.invitations.filter(i => i.email === 'dire@tec.com').length; if (invs !== 1) throw new Error('invitación de admin duplicada: ' + invs);
   });
 
@@ -112,7 +121,12 @@ async function nav(page, sel) {
     await page.waitForFunction(() => /That email can't be invited\./.test(document.getElementById('toast').textContent));
     await page.fill('#invite-email', 'profe@tec.com');
     await page.click('#modal-invite .btn-modal-save');
-    await page.waitForTimeout(300);
+    // P-03: no e-mail provider → the app does not promise an e-mail; it shows the link to share (copy / WhatsApp)
+    await page.waitForSelector('#invite-result', { state: 'visible' });
+    const sub = await page.textContent('#invite-res-sub'); if (!/No email is sent/.test(sub)) throw new Error('promete un email: ' + sub);
+    const link = await page.inputValue('#invite-res-link'); if (!link.endsWith('/org/tec?invite=profe%40tec.com')) throw new Error('link: ' + link);
+    if (!/wa\.me\/\?text=/.test(await page.getAttribute('#invite-wa', 'href'))) throw new Error('sin WhatsApp');
+    await page.click('#invite-result .btn-modal-save');
     if (!db.invitations.find(i => i.email === 'profe@tec.com')) throw new Error('sin invitación');
   });
 

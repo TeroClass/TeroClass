@@ -57,7 +57,7 @@ const bill = BILL_DEFAULTS();
 let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
 const insights = { fixture: null }; // tests may set insights.fixture = (body) => json
-function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; if (typeof realtime !== 'undefined') realtime.reset(); calls.rpc = []; calls.inserts = {}; calls.otp = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; }
+function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; if (typeof realtime !== 'undefined') realtime.reset(); calls.rpc = []; calls.inserts = {}; calls.otp = []; calls.recover = []; calls.passwords = []; calls.captcha = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; }
 // Default insights: deterministic sample data shaped like public.platform_insights (smaller numbers for a unit)
 function insightsData(body) {
   const days = Math.min(Math.max(Number(body.p_days) || 30, 1), 366); const unit = body.p_unit ? instById(body.p_unit) : null;
@@ -83,7 +83,7 @@ function session(u) {
 }
 function newUser(email, meta) {
   const id = uid(); db.users[id] = { id, email, meta };
-  const inv = db.invitations.find(i => i.email === email.toLowerCase() && !i.accepted_at);
+  const inv = db.invitations.find(i => i.email === email.toLowerCase() && invPending(i)); // TC-16: only live invitations
   let bySlug = db.institutions.find(i => i.slug === meta.org_slug && i.open_registration !== false);
   let invUse = inv;
   const target = inv ? inv.institution_id : (bySlug ? bySlug.id : null);
@@ -96,6 +96,10 @@ function newUser(email, meta) {
   students.applyPending(db.profiles[db.profiles.length - 1]); // groups waiting for this email (pending teacher / substitute)
   return db.users[id];
 }
+// TC-07 / TC-16 (as 001_base.sql): pending = not accepted / declined / cancelled and not expired (14 days)
+const INV_TTL = 14 * 864e5;
+const invPending = i => !i.accepted_at && !i.declined_at && !i.cancelled_at && Date.parse(i.expires_at || i.created_at || 0) + (i.expires_at ? 0 : INV_TTL) > Date.now();
+const invStatus = i => i.accepted_at ? 'accepted' : i.declined_at ? 'declined' : i.cancelled_at ? 'cancelled' : invPending(i) ? 'pending' : 'expired';
 function seedInstitution(extra = {}) {
   const id = uid();
   const row = { id, name: 'School A', slug: 'a', color: '#7c5cbf', bg_color: '#f0eef8', font: 'Inter', admin_email: 'adm@a.com', master_prompt: '', doc_text: '', doc_name: '', logo_url: null, open_registration: true, parent_id: null, methodology_config: {}, created_at: new Date().toISOString(), ...extra };
@@ -168,6 +172,7 @@ async function handleSupabase(route) {
   const json = (status, data) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data), headers: { 'access-control-allow-origin': '*' } });
   const auth = (req.headers()['authorization'] || '').replace('Bearer ', '');
   if (m === 'OPTIONS') return route.fulfill({ status: 200, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' } });
+  if (body && body.gotrue_meta_security && body.gotrue_meta_security.captcha_token) { calls.captcha = calls.captcha || []; calls.captcha.push({ path: p, token: body.gotrue_meta_security.captcha_token }); }
   if (p === '/auth/v1/signup') {
     if (Object.values(db.users).some(u => u.email === body.email)) return json(422, { msg: 'User already registered', error_code: 'user_already_exists' });
     const u = newUser(body.email, body.data || {});
@@ -175,6 +180,9 @@ async function handleSupabase(route) {
     return json(200, session(u));
   }
   if (p === '/auth/v1/token') { const u = Object.values(db.users).find(x => x.email === body.email); return u ? json(200, session(u)) : json(400, { error: 'invalid_grant', error_description: 'Invalid login credentials', msg: 'Invalid login credentials' }); }
+  // TC-04: password recovery (e-mail with a link) and the new password (updateUser); TC-18: captcha token recorded
+  if (p === '/auth/v1/recover') { calls.recover = calls.recover || []; calls.recover.push(body); return json(200, {}); }
+  if (p === '/auth/v1/user' && m === 'PUT') { const u = tokUser(auth); if (!u) return json(401, { msg: 'bad jwt' }); calls.passwords = calls.passwords || []; calls.passwords.push({ user: u.id, password: body.password }); u.password = body.password; return json(200, session(u).user); }
   if (p === '/auth/v1/user') { const u = tokUser(auth); return u ? json(200, session(u).user) : json(401, { msg: 'bad jwt' }); }
   if (p === '/auth/v1/logout') return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*' } });
   if (p === '/auth/v1/otp') { // magic link: creates the account if needed (like Supabase with shouldCreateUser); the test then "clicks" it
@@ -237,9 +245,10 @@ async function handleSupabase(route) {
       if (db.institutions.some(i => i.slug === body.p_slug)) return json(409, { code: '23505', message: 'duplicate key value violates unique constraint "institutions_slug_key"' });
       if (body.p_parent && chainOf(body.p_parent).length >= 3) return json(400, { code: 'P0001', message: 'Máximo 3 niveles: institución madre › sede/facultad › cátedra/área' });
       const row = body.p_parent
-        ? seedInstitution({ name: body.p_name, slug: body.p_slug, color: body.p_color || null, bg_color: null, font: null, admin_email: body.p_admin_email || null, parent_id: body.p_parent })
-        : seedInstitution({ name: body.p_name, slug: body.p_slug, color: body.p_color || '#7c5cbf', admin_email: body.p_admin_email });
-      if (body.p_admin_email) db.invitations.push({ email: body.p_admin_email.toLowerCase(), institution_id: row.id, role: 'org_admin' }); return json(200, row.id);
+        ? seedInstitution({ name: body.p_name, slug: body.p_slug, color: body.p_color || null, bg_color: null, font: null, admin_email: body.p_admin_email || null, parent_id: body.p_parent, open_registration: false })
+        : seedInstitution({ name: body.p_name, slug: body.p_slug, color: body.p_color || '#7c5cbf', admin_email: body.p_admin_email, open_registration: false }); // TC-02: closed by default
+      if (body.p_admin_email) { try { inviteMember(row.id, body.p_admin_email, 'org_admin', me); } catch (e) { /* seats: invitation not created */ } }
+      return json(200, row.id);
     }
     if (fn === 'get_effective_config') { const id = body.p_inst || db.profiles.find(x => x.id === me?.id)?.institution_id; return json(200, id && instById(id) ? effectiveConfig(id) : null); }
     if (fn === 'delete_institution') {
@@ -257,7 +266,7 @@ async function handleSupabase(route) {
       const pr = db.profiles.find(x => x.email === body.p_email); const root = rootOf(body.p_inst);
       const counted = pr && ['teacher', 'org_admin'].includes(pr.role) && pr.institution_id && rootOf(pr.institution_id) === root;
       if (!counted && !seatFree(root)) return json(400, { code: 'P0001', message: `No quedan asientos disponibles en el plan de la institución (${seatsUsed(root)} de ${account(root).seats} en uso)` });
-      const r = inviteMember(body.p_inst, body.p_email, body.p_role); return json(200, r);
+      const r = inviteMember(body.p_inst, body.p_email, body.p_role, me); return json(200, r);
     }
     if (fn === 'set_member_role') {
       const pr = db.profiles.find(x => x.id === body.p_user); if (!pr || !['teacher', 'org_admin'].includes(body.p_role)) return json(400, { message: 'invalid' });
@@ -267,6 +276,53 @@ async function handleSupabase(route) {
       const pr = db.profiles.find(x => x.id === body.p_user); if (!pr) return json(400, { message: 'invalid' });
       pr.institution_id = null; pr.role = 'teacher'; return json(200, null);
     }
+    // ── invitations (TC-07 / TC-16 / P-04) ──
+    if (fn === 'my_invitations') {
+      if (!me) return NOAUTH();
+      const mine = db.invitations.filter(i => invPending(i) && (i.user_id === me.id || (!i.user_id && i.email === String(me.email).toLowerCase())));
+      return json(200, mine.map(i => ({ id: i.id, role: i.role, institution_id: i.institution_id, unit_name: instById(i.institution_id)?.name, path: chainOf(i.institution_id).map(x => x.name).join(' › '),
+        invited_by: (db.profiles.find(x => x.id === i.invited_by) || {}).name || 'TeroClass', created_at: i.created_at, expires_at: i.expires_at })));
+    }
+    if (fn === 'respond_invitation') {
+      const i = db.invitations.find(x => x.id === body.p_id && (x.user_id === me?.id || (!x.user_id && x.email === String(me?.email).toLowerCase())));
+      if (!i) return NOAUTH();
+      if (!invPending(i)) return json(400, { code: 'P0001', message: 'Esta invitación ya no está vigente' });
+      if (!body.p_accept) { i.declined_at = new Date().toISOString(); return json(200, { status: 'declined' }); }
+      const root = rootOf(i.institution_id); const counted = meP && ['teacher', 'org_admin'].includes(meP.role) && meP.institution_id && rootOf(meP.institution_id) === root;
+      if (!counted && !seatFree(root)) return json(400, { code: 'P0001', message: 'No quedan asientos disponibles en el plan de la institución' });
+      meP.institution_id = i.institution_id; meP.role = i.role; i.accepted_at = new Date().toISOString(); i.user_id = me.id; students.applyPending(meP);
+      return json(200, { status: 'accepted', institution_id: i.institution_id, role: i.role });
+    }
+    if (fn === 'list_invitations') {
+      const scope = [body.p_unit, ...descendantsOf(body.p_unit)];
+      if (!(isSA || (meP?.role === 'org_admin' && meP.institution_id && chainOf(body.p_unit).some(c => c.id === meP.institution_id)))) return NOAUTH();
+      return json(200, db.invitations.filter(i => scope.includes(i.institution_id)).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+        .map(i => ({ id: i.id, email: i.email, role: i.role, unit_id: i.institution_id, unit_name: instById(i.institution_id)?.name, unit_slug: instById(i.institution_id)?.slug, created_at: i.created_at, expires_at: i.expires_at,
+          status: invStatus(i), has_account: !!i.user_id, invited_by: (db.profiles.find(x => x.id === i.invited_by) || {}).name || 'TeroClass' })));
+    }
+    if (fn === 'cancel_invitation') { const i = db.invitations.find(x => x.id === body.p_id); if (!i) return NOAUTH(); if (i.accepted_at) return json(400, { code: 'P0001', message: 'Esta invitación ya fue aceptada' }); i.cancelled_at = new Date().toISOString(); return json(200, 'cancelled'); }
+    if (fn === 'resend_invitation') {
+      const i = db.invitations.find(x => x.id === body.p_id); if (!i) return NOAUTH();
+      if (i.accepted_at || i.declined_at) return json(400, { code: 'P0001', message: 'Esta invitación ya fue aceptada' });
+      i.cancelled_at = null; i.expires_at = new Date(Date.now() + INV_TTL).toISOString(); i.last_sent_at = new Date().toISOString();
+      return json(200, { id: i.id, email: i.email, role: i.role, unit_name: instById(i.institution_id)?.name, unit_slug: instById(i.institution_id)?.slug, expires_at: i.expires_at, has_account: !!i.user_id });
+    }
+    // ── plan of a calendar class (P-06) ──
+    if (fn === 'set_session_plan') {
+      const s = db.class_sessions.find(x => x.id === body.p_session); const g = s && s.group_id && db.class_groups.find(x => x.id === s.group_id);
+      const teaches = s && me && ((g && [g.teacher_id, g.substitute_id].includes(me.id)) || (!s.group_id && s.teacher_id === me.id));
+      if (!teaches) return NOAUTH();
+      let title = null;
+      if (body.p_planning) { const pl = db.plannings.find(x => x.id === body.p_planning && x.owner_id === me.id); if (!pl) return json(400, { code: 'P0001', message: 'Esa planificación no es tuya' }); title = pl.title; }
+      s.planning_id = body.p_planning || null; return json(200, { planning_id: s.planning_id, planning_title: title });
+    }
+    if (fn === 'session_plan') {
+      const s = db.class_sessions.find(x => x.id === body.p_session); const g = s && s.group_id && db.class_groups.find(x => x.id === s.group_id);
+      const teaches = s && me && ((g && [g.teacher_id, g.substitute_id].includes(me.id)) || (!s.group_id && s.teacher_id === me.id));
+      const pl = teaches && s.planning_id && db.plannings.find(x => x.id === s.planning_id);
+      return json(200, pl ? { id: pl.id, title: pl.title, content: pl.data?.content || '', params: pl.data?.params || {}, mine: pl.owner_id === me.id } : null);
+    }
+    if (fn === 'my_data_export') { if (!me) return NOAUTH(); return json(200, { exported_at: new Date().toISOString(), profile: { email: meP.email, name: meP.name, role: meP.role }, plannings: db.plannings.filter(x => x.owner_id === me.id).map(x => ({ title: x.title, data: x.data })) }); }
     { const r = consent.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classInsights.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classDoc.handle(fn, body, me); if (r) return json(r.status, r.data); }
@@ -300,14 +356,19 @@ async function handleSupabase(route) {
   }
   return json(404, { message: 'unmocked ' + m + ' ' + p });
 }
-// invite_member core (permission checked by the caller): existing account → added; otherwise an invitation
-function inviteMember(inst, email, role) {
+// invite_member core (permission checked by the caller), as 001_base.sql since 2026-10 (TC-07):
+// own staff of the same account → moved directly ('added'); any other existing account → pending invitation it accepts in the
+// app ('pending'); no account → invitation by e-mail ('invited'). Invitations expire after 14 days.
+function inviteMember(inst, email, role, by) {
   email = String(email).toLowerCase(); const pr = db.profiles.find(x => x.email.toLowerCase() === email); const root = rootOf(inst);
   const counted = pr && ['teacher', 'org_admin'].includes(pr.role) && pr.institution_id && rootOf(pr.institution_id) === root;
   if (!counted && !seatFree(root)) { const e = new Error(`No quedan asientos disponibles en el plan de la institución (${seatsUsed(root)} de ${account(root).seats} en uso)`); e.seats = true; throw e; }
-  if (pr) { pr.institution_id = inst; pr.role = role; students.applyPending(pr); return 'added'; }
-  db.invitations = db.invitations.filter(i => !(i.email === email && i.institution_id === inst && !i.accepted_at));
-  db.invitations.push({ id: uid(), email, institution_id: inst, role, created_at: new Date().toISOString() }); return 'invited';
+  if (pr && counted) { pr.institution_id = inst; pr.role = role; students.applyPending(pr); return 'added'; }
+  const now = new Date().toISOString(); const exp = new Date(Date.now() + INV_TTL).toISOString();
+  db.invitations = db.invitations.filter(i => !(i.institution_id === inst && !i.accepted_at && (i.email === email || (pr && i.user_id === pr.id))));
+  const byP = by && db.profiles.find(x => x.id === by.id); // the owner is never stored as "invited by" (hide_superadmin_refs)
+  db.invitations.push({ id: uid(), email, institution_id: inst, role, created_at: now, expires_at: exp, invited_by: byP && byP.role !== 'superadmin' ? byP.id : null, user_id: pr ? pr.id : null });
+  return pr ? 'pending' : 'invited';
 }
 const classInsights = require('./mock-insights.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
 const classDoc = require('./mock-classdoc.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });

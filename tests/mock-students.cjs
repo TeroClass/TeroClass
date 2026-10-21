@@ -59,7 +59,10 @@ module.exports = function install(ctx) {
       const role = g && g.teacher_id === uidv ? 'teacher' : g && g.substitute_id === uidv ? 'substitute' : !s.group_id && s.teacher_id === uidv ? 'teacher' : 'student';
       return { id: s.id, title: s.title || g?.name || '', raw_title: s.title, starts_at: s.starts_at, ends_at: s.ends_at, timezone: s.timezone, status: s.status, seq: s.seq, updated_at: s.updated_at,
         group_id: s.group_id, group_name: g?.name || null, unit_name: instById(s.institution_id)?.name, series_id: s.series_id, modified: !!s.modified, role,
-        teacher_name: personName(me, g?.teacher_id || s.teacher_id), people: people(s), can_edit: role !== 'student' };
+        teacher_name: personName(me, g?.teacher_id || s.teacher_id), people: people(s), can_edit: role !== 'student',
+        // P-06: the plan attached to the class, only for whoever teaches it (as tc_calendar_rows)
+        planning_id: role !== 'student' ? (s.planning_id || null) : null,
+        planning_title: role !== 'student' && s.planning_id ? (db.plannings.find(x => x.id === s.planning_id)?.title || null) : null };
     });
   }
   function newSession(fields) { const now = new Date().toISOString(); const s = { id: uid(), status: 'scheduled', seq: 0, modified: false, series_id: null, title: '', created_at: now, updated_at: now, ...fields }; db.class_sessions.push(s); return s; }

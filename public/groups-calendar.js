@@ -186,11 +186,12 @@
     const input = $('student-email'); const btn = $('btn-student-link'); const sent = $('student-sent');
     const email = (input?.value || '').trim();
     if (!EMAIL_RE.test(email)) { showAuthError('Write a valid email.'); input?.focus(); return; }
+    if (window.tcCaptcha && window.tcCaptcha.missing()) return; // TC-18: optional Turnstile (only with a site key)
     busy(btn, true);
     const { error } = await sb.auth.signInWithOtp({
-      email, options: { emailRedirectTo: location.origin + '/', shouldCreateUser: true, data: { via: 'student_link' } },
+      email, options: { emailRedirectTo: location.origin + '/', shouldCreateUser: true, data: { via: 'student_link' }, ...(window.tcCaptcha ? window.tcCaptcha.options() : {}) },
     });
-    busy(btn, false);
+    busy(btn, false); window.tcCaptcha?.reset();
     if (error) {
       const m = String(error.message || '');
       if (error.status === 429 || /rate limit|too many|security purposes|seconds/i.test(m)) showAuthError('Too many emails were requested. Wait a minute and try again.');

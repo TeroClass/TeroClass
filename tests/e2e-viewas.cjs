@@ -323,7 +323,8 @@ const snapshot = () => JSON.stringify({ inst: db.institutions, plans: db.plannin
     await login(page, 'madm@coach.com');
     await page.click('#nav-admin');
     await page.waitForFunction(() => /Marta Madre/.test(document.getElementById('members-table-body').textContent));
-    const dash = await page.textContent('#panel-admin');
+    // (the "Join by link" card shows this site's own address, which in the tests is http://teroclass.test)
+    const dash = await page.evaluate(() => { const c = document.getElementById('panel-admin').cloneNode(true); c.querySelector('#access-link')?.remove(); return c.textContent; });
     if (/Owner|teroclass\.test|Secret/.test(dash)) throw new Error('owner visible in dashboard');
     await page.click('#btn-invite-top'); await page.waitForSelector('#modal-invite.active');
     await page.fill('#invite-email', SUPERADMIN_EMAIL); await page.click('#modal-invite .btn-modal-save');
