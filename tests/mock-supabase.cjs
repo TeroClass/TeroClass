@@ -241,6 +241,11 @@ async function handleSupabase(route) {
       if (!isSA) return NOAUTH(); if (!(body.p_input >= 0 && body.p_input <= 1000 && body.p_output >= 0 && body.p_output <= 1000)) return json(400, { code: 'P0001', message: 'Precio de IA inválido (de 0 a 1000 USD por millón de tokens)' });
       Object.assign(bill.settings, { ai_price_input: body.p_input, ai_price_output: body.p_output }); return json(200, { ai_price_input: body.p_input, ai_price_output: body.p_output });
     }
+    if (fn === 'update_ai_guardrails') { // TC-01: daily caps on estimated AI tokens
+      if (!isSA) return NOAUTH(); if (!(body.p_institution >= 0 && body.p_user >= 0)) return json(400, { code: 'P0001', message: 'Cantidad de tokens inválida' });
+      Object.assign(bill.settings, { ai_daily_tokens_institution: body.p_institution, ai_daily_tokens_user: body.p_user });
+      return json(200, { ai_daily_tokens_institution: body.p_institution, ai_daily_tokens_user: body.p_user });
+    }
     if (fn === 'create_institution') {
       if (db.institutions.some(i => i.slug === body.p_slug)) return json(409, { code: '23505', message: 'duplicate key value violates unique constraint "institutions_slug_key"' });
       if (body.p_parent && chainOf(body.p_parent).length >= 3) return json(400, { code: 'P0001', message: 'Máximo 3 niveles: institución madre › sede/facultad › cátedra/área' });

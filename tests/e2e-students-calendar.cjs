@@ -8,6 +8,7 @@ const { db, calls, handleSupabase, HTML, SB_JS, SB } = M;
 
 let failed = 0;
 const SHOTS = process.env.SHOTS || '';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 const XSS = '<img src=x onerror="window.__xss=1">';
 const MIN = 60000;
 
@@ -199,7 +200,19 @@ async function magicLink(page, email) {
     await page.waitForSelector('#modal-danger.active');
     if (!/insights/.test(await page.textContent('#dg-list'))) throw new Error('dialog does not say what is lost');
     await page.click('#dg-ok');
-    await waitToast(page, /Student removed/);
+    // P-14: gone from the list at once, but deleted only after 10 s: "Undo" brings it back
+    await page.waitForSelector('#undo-bar:not([hidden])');
+    if (!/Student removed/.test(await page.textContent('#undo-bar'))) throw new Error('undo bar text');
+    if (!db.student_enrollments.some(e => e.email === 'eve@mail.com')) throw new Error('deleted before the undo time');
+    await page.waitForFunction(() => !document.querySelector('.gc-stable tbody tr') || !/eve@mail\.com/.test(document.querySelector('.gc-stable').textContent));
+    await page.click('#undo-btn');
+    await page.waitForFunction(() => /eve@mail\.com/.test(document.querySelector('.gc-stable')?.textContent || ''));
+    await sleep(300);
+    if (!db.student_enrollments.some(e => e.email === 'eve@mail.com')) throw new Error('undo did not keep the student');
+    await rm.click(); await page.waitForSelector('#modal-danger.active'); await page.click('#dg-ok');
+    await page.waitForSelector('#undo-bar:not([hidden])');
+    await page.waitForFunction(() => document.getElementById('undo-bar').hidden, null, { timeout: 15000 }); // 10 s later
+    await sleep(500);
     if (db.student_enrollments.some(e => e.email === 'eve@mail.com')) throw new Error('not removed');
     // Spanish: everything translated
     await page.evaluate(() => setUiLang('es'));

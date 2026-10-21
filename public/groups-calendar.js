@@ -1138,24 +1138,37 @@
       showToast('Added to the group ✓', 'ok');
     } else if (kind === 's-remove') {
       const st = (GR.students || []).find(x => x.id === e || x.enrollment_id === e);
+      const ng = st && Array.isArray(st.groups) ? st.groups.length : null;
       if (!(await danger({ title: tr('Remove this student from the unit?'), body: st ? (st.name || st.email || '') : '',
-        items: [tr('They leave all the groups of this unit'), tr('Their attendance and insights in this unit are deleted'), tr('You can load them again later, but that history does not come back')],
+        items: [ng != null ? `${tr('Groups they leave:')} ${ng}` : tr('They leave all the groups of this unit'), tr('Their attendance and insights in this unit are deleted'),
+          tr('You can undo it for 10 seconds; after that, you can load them again but that history does not come back')],
         confirmText: tr('Remove student') }, 'sr' + e, el, tr('Click again: removes them from this unit')))) return;
-      busy(el, true); const { error } = await rpc('remove_student', { p_enrollment: e }); busy(el, false);
-      if (error) { errToast(error); return; }
-      showToast('Student removed', 'ok');
+      // P-14: removed from the list now, deleted in the database after 10 s unless "Undo"
+      const keep = GR.students;
+      const run = async () => { const { error } = await rpc('remove_student', { p_enrollment: e }); if (error) errToast(error); loadGroups(); };
+      if (typeof window.undoableDelete === 'function') {
+        window.undoableDelete({ message: tr('Student removed.'), hide: () => { GR.students = (GR.students || []).filter(x => x !== st); renderGroupsBody(); },
+          restore: () => { GR.students = keep; renderGroupsBody(); }, run });
+      } else await run();
+      return;
     }
     loadGroups();
   }
   async function deleteGroup(id, btn) {
     if (blocked()) return;
     const g = GR.groups.find(x => x.id === id);
-    if (!(await danger({ title: tr('Delete this group?'), body: tr('This cannot be undone. To confirm, type the name of the group.'),
-      items: [`${tr('All its classes (past and future), with their attendance, class documents and insights')}`, g ? `${tr('Students in the group:')} ${g.students || 0} ${tr('(they stay loaded in the unit)')}` : '', tr('The teacher and substitute stop seeing those classes')],
-      typeWord: g ? g.name : '', confirmText: tr('Delete group') }, 'gd' + id, btn, tr('Click again: deletes the group and its classes')))) return;
-    busy(btn, true); const { error } = await rpc('delete_group', { p_group: id }); busy(btn, false);
-    if (error) { errToast(error); return; }
-    delete GR.open[id]; showToast('Group deleted', 'ok'); loadGroups();
+    const nc = g && Number.isFinite(Number(g.classes)) ? Number(g.classes) : null;
+    // P-14: names what is lost (classes and students); a group WITH classes asks to type its name; undo for 10 s
+    if (!(await danger({ title: tr('Delete this group?'), body: tr(nc === 0 ? 'You can undo it for 10 seconds.' : 'To confirm, type the name of the group. You can undo it for 10 seconds.'),
+      items: [nc != null ? `${tr('Classes of the group (past and future), with their attendance, class documents and insights:')} ${nc}` : tr('All its classes (past and future), with their attendance, class documents and insights'),
+        g ? `${tr('Students in the group:')} ${g.students || 0} ${tr('(they stay loaded in the unit)')}` : '', tr('The teacher and substitute stop seeing those classes')],
+      typeWord: g && nc !== 0 ? g.name : '', confirmText: tr('Delete group') }, 'gd' + id, btn, tr('Click again: deletes the group and its classes')))) return;
+    const keep = GR.groups;
+    const run = async () => { const { error } = await rpc('delete_group', { p_group: id }); if (error) errToast(error); else delete GR.open[id]; loadGroups(); };
+    if (typeof window.undoableDelete === 'function') {
+      window.undoableDelete({ message: tr('Group deleted.'), hide: () => { GR.groups = GR.groups.filter(x => x.id !== id); renderGroupsBody(); },
+        restore: () => { GR.groups = keep; renderGroupsBody(); }, run });
+    } else await run();
   }
 
   // ── CSV import (parser: public/csv-import.js → window.TCImport) ──
@@ -1668,7 +1681,11 @@
     'Future classes in view:': 'Clases futuras a la vista:', 'Classes edited one by one are cancelled too': 'También se cancelan las clases editadas una por una', 'Cancel the series': 'Cancelar la serie',
     'Remove this student from the unit?': '¿Quitar a este estudiante de la unidad?', 'They leave all the groups of this unit': 'Sale de todos los grupos de esta unidad',
     'Their attendance and insights in this unit are deleted': 'Se borran su asistencia y sus insights en esta unidad', 'You can load them again later, but that history does not come back': 'Lo podés volver a cargar después, pero ese historial no vuelve',
-    'Remove student': 'Quitar estudiante', 'Delete this group?': '¿Borrar este grupo?', 'This cannot be undone. To confirm, type the name of the group.': 'No se puede deshacer. Para confirmar, escribí el nombre del grupo.',
+    'Remove student': 'Quitar estudiante', 'Delete this group?': '¿Borrar este grupo?',
+    'Groups they leave:': 'Grupos de los que sale:', 'You can undo it for 10 seconds; after that, you can load them again but that history does not come back': 'Lo podés deshacer durante 10 segundos; después lo podés volver a cargar, pero ese historial no vuelve',
+    'Student removed.': 'Estudiante quitado.', 'Group deleted.': 'Grupo borrado.', 'You can undo it for 10 seconds.': 'Lo podés deshacer durante 10 segundos.',
+    'To confirm, type the name of the group. You can undo it for 10 seconds.': 'Para confirmar, escribí el nombre del grupo. Lo podés deshacer durante 10 segundos.',
+    'Classes of the group (past and future), with their attendance, class documents and insights:': 'Clases del grupo (pasadas y futuras), con su asistencia, documentos e insights:', 'This cannot be undone. To confirm, type the name of the group.': 'No se puede deshacer. Para confirmar, escribí el nombre del grupo.',
     'All its classes (past and future), with their attendance, class documents and insights': 'Todas sus clases (pasadas y futuras), con su asistencia, documentos e insights',
     'Students in the group:': 'Estudiantes en el grupo:', '(they stay loaded in the unit)': '(siguen cargados en la unidad)', 'The teacher and substitute stop seeing those classes': 'El docente y el suplente dejan de ver esas clases', 'Delete group': 'Borrar grupo',
     'No teachers registered yet: choose "Invite someone by email…".': 'Todavía no hay docentes registrados: elegí "Invitar a alguien por email…".',

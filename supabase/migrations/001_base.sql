@@ -2466,6 +2466,7 @@ begin
              'invited', exists (select 1 from public.invitations iv where lower(iv.email) = g.pending_substitute_email and public.tc_inv_pending(iv)
                                   and public.billing_root(iv.institution_id) = public.billing_root(g.institution_id))) end as pending_substitute,
            (select count(*) from public.group_members m where m.group_id = g.id)::int as students,
+           (select count(*) from public.class_sessions s where s.group_id = g.id)::int as classes,   -- P-14: the delete dialog says it
            (select min(s.starts_at) from public.class_sessions s
              where s.group_id = g.id and s.status = 'scheduled' and s.ends_at > now()) as next_session,
            (select json_build_object('weekdays', ss.weekdays, 'start_time', to_char(ss.start_time, 'HH24:MI'), 'duration_min', ss.duration_min,

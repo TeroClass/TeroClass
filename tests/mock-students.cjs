@@ -131,7 +131,7 @@ module.exports = function install(ctx) {
         if (!b.p_unit || !instById(b.p_unit) || !isAdminOf(me, b.p_unit)) return err('No autorizado');
         const ids = scope(b.p_unit);
         return ok(db.class_groups.filter(g => ids.includes(g.institution_id)).map(g => ({ id: g.id, name: g.name, institution_id: g.institution_id, unit_name: instById(g.institution_id)?.name, timezone: g.timezone,
-          teacher: personJson(me, g.teacher_id), substitute: personJson(me, g.substitute_id), students: members(g.id).length,
+          teacher: personJson(me, g.teacher_id), substitute: personJson(me, g.substitute_id), students: members(g.id).length, classes: db.class_sessions.filter(x => x.group_id === g.id).length,
           pending_teacher: pendingJson(g, 'pending_teacher_email'), pending_substitute: pendingJson(g, 'pending_substitute_email'), schedule: scheduleJson(g),
           next_session: db.class_sessions.filter(s => s.group_id === g.id && s.status === 'scheduled' && Date.parse(s.ends_at) > Date.now()).map(s => s.starts_at).sort()[0] || null }))
           .sort((x, y) => (x.unit_name + x.name).localeCompare(y.unit_name + y.name)));

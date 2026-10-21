@@ -373,6 +373,29 @@ input[type="range"].tc-slider::-webkit-slider-thumb{-webkit-appearance:none;widt
 .toast.show{transform:translateY(0);opacity:1;visibility:visible;pointer-events:auto;transition:transform .25s,opacity .25s,visibility 0s}
 .toast.warn{background:#fff;color:#1a1a1a;border:1.5px solid #f0d9a8;box-shadow:0 10px 30px rgba(0,0,0,.14);max-width:min(380px,calc(100vw - 36px))}
 @media(max-width:768px){.toast{top:12px;bottom:auto;right:auto;left:50%;transform:translate(-50%,-70px)}.toast.show{transform:translate(-50%,0)}}
+/* P-14: undo bar (never covers controls when hidden) */
+.undo-bar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:9999;display:flex;align-items:center;gap:10px;background:var(--black);color:#fff;padding:10px 12px 10px 16px;border-radius:10px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.25);max-width:calc(100vw - 24px)}
+.undo-bar[hidden]{display:none}
+.undo-secs{opacity:.7;font-variant-numeric:tabular-nums}
+.undo-btn{background:#fff;color:var(--black);border:none;border-radius:6px;padding:6px 12px;font:700 12.5px 'Inter',sans-serif;cursor:pointer}
+.undo-btn:focus-visible{outline:3px solid #a78bfa;outline-offset:2px}
+/* P-02: the class generator on a phone — the prompt and the class use the whole width; Smart tools open as a sheet */
+.st-mobile-btn,.st-sheet-close{display:none}
+@media(max-width:768px){
+  #panel-ai{flex-direction:column}
+  #panel-ai .ai-center{width:100%;min-width:0}
+  #panel-ai .ai-output{padding:16px 14px}
+  #panel-ai .output-head{flex-direction:column;gap:10px}
+  #panel-ai .output-btns{flex-wrap:wrap}
+  .prompt-bar{flex-wrap:wrap;gap:8px}
+  .prompt-bar .prompt-textarea{flex:1 1 100%}
+  .prompt-bar .prompt-generate-btn{flex:1 1 auto;justify-content:center}
+  .st-mobile-btn{display:inline-flex;align-items:center;gap:6px;height:38px;padding:0 14px;border-radius:20px;border:1.5px solid var(--border);background:var(--white);color:var(--ink);font:600 13px 'Inter',sans-serif;cursor:pointer}
+  .smart-tools{position:fixed;inset:0;z-index:950;width:100%;min-width:0;border-left:none;transform:translateY(100%);visibility:hidden;transition:transform .22s ease,visibility 0s linear .22s}
+  .smart-tools.open{transform:none;visibility:visible;transition:transform .22s ease}
+  .st-sheet-close{display:inline-flex;position:absolute;top:10px;right:12px;height:34px;padding:0 14px;border-radius:18px;border:none;background:var(--black);color:var(--white);font:600 13px 'Inter',sans-serif;cursor:pointer;align-items:center}
+  .smart-tools-header{padding-top:14px}
+}
 .toast.ok{background:#276749}
 .toast.err{background:#fff;color:#1a1a1a;border:1.5px solid #f3c7c7;box-shadow:0 10px 30px rgba(0,0,0,.18);display:flex;align-items:center;gap:12px;max-width:min(380px,calc(100vw - 36px));padding:12px 16px 12px 10px;cursor:pointer}
 .tero-err-bird{flex:0 0 64px;width:64px;height:64px}
@@ -926,12 +949,14 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
           <div id="va-gen-note" class="va-gen-note" style="display:none">👁 <span>View as preview: classes are generated with this unit's AI settings and learning-approach bars, but nothing is saved. AI tokens count to your own account.</span></div>
           <div class="prompt-bar">
             <textarea id="prompt-input" class="prompt-textarea" maxlength="4000" placeholder="Create a complete lesson on the passive voice for intermediate learners…" rows="1" onkeydown="handlePromptKey(event)" oninput="autoResize(this)"></textarea>
+            <button type="button" class="st-mobile-btn" id="btn-st-open" aria-controls="smart-tools" aria-expanded="false" onclick="toggleSmartTools(true)"><span aria-hidden="true">⚙</span> <span>Class settings</span></button>
             <button class="prompt-generate-btn" id="btn-generate" onclick="generatePlanning()"><span>⚡</span><span id="btn-generate-text">Generate</span></button>
           </div>
         </div>
         <!-- SMART TOOLS -->
-        <div class="smart-tools">
+        <div class="smart-tools" id="smart-tools" role="region" aria-label="Smart tools">
           <div class="smart-tools-header">
+            <button type="button" class="st-sheet-close" id="btn-st-close" onclick="toggleSmartTools(false)">Done</button>
             <div class="smart-title">Smart tools</div>
 
             <!-- TOP ROW: Language + Group size -->
@@ -1448,6 +1473,8 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 </div>
 <div id="env-badge" role="note" hidden><span>Test version</span></div>
 <div class="toast" id="toast"></div>
+<!-- P-14: "Undo" bar for deletions (they run after 10 s unless undone) -->
+<div class="undo-bar" id="undo-bar" role="status" aria-live="polite" hidden><span id="undo-msg"></span> <span class="undo-secs" id="undo-secs" data-no-i18n></span><button type="button" class="undo-btn" id="undo-btn">Undo</button></div>
 
 <!-- supabase-js 2.116.0, served from this site (TC-11: no third-party script on the page; see public/vendor/licenses) -->
 <script src="/vendor/supabase-js-2.116.0.js"></script>
@@ -1535,7 +1562,7 @@ const I18N_ES={
 'Press enter to add':'Enter para agregar','Primary':'Primaria','Primary Color':'Color principal','Reading':'Lectura','Recent':'Recientes','Register':'Registrarme',
 'Registered':'Registrados','Role':'Rol','Save Prompt':'Guardar pedido','Secondary':'Secundaria','Set the name and URL slug for your institution.':'Definí el nombre y el link de tu institución.',
 'Set up a new institution with its own admin, branding, and teacher workspace.':'Creá una institución con su propio admin, marca y espacio para docentes.',
-'Sign in':'Ingresar','Sign out':'Salir','Signing in to':'Ingresando a','Skills Priority':'Prioridad de habilidades','Smart tools':'Herramientas','Spanish':'Español',
+'Sign in':'Ingresar','Sign out':'Salir','Signing in to':'Ingresando a','Skills Priority':'Prioridad de habilidades','Smart tools':'Herramientas','Class settings':'Ajustes de la clase','Spanish':'Español',
 'Speaking':'Expresión oral','Start new presentation':'Nueva presentación','Start with AI':'Empezar con IA','Subjects':'Materias','System Prompt':'Pedido del sistema',
 'Teacher':'Docente','Teacher Activity':'Actividad docente','Teaching language':'Idioma de la clase','Technical · Precise':'Técnica · Precisa',
 'This prompt is injected into every AI generation for your institution — defining pedagogy, curriculum standards, and requirements that all teachers must follow.':'Este pedido se suma a cada generación de tu institución: define pedagogía, estándares curriculares y requisitos que todos los docentes deben seguir.',
@@ -1916,6 +1943,13 @@ window.addEventListener('storage',e=>{
   try{sessionStorage.setItem('tc_auth_msg',uid?'You signed in with another account in another tab.':'Your session ended in another tab.');}catch(x){}
   currentUser=null;location.reload();
 });
+// P-02: Smart tools as a sheet on phones (the prompt, Generate and the class stay visible)
+function toggleSmartTools(open){
+  const st=document.getElementById('smart-tools');if(!st)return;
+  st.classList.toggle('open',!!open);document.getElementById('btn-st-open')?.setAttribute('aria-expanded',String(!!open));
+  if(open)setTimeout(()=>document.getElementById('btn-st-close')?.focus(),30);else document.getElementById('btn-st-open')?.focus();
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.getElementById('smart-tools')?.classList.contains('open'))toggleSmartTools(false);});
 function normOrg(r){
   if(!r)return null;
   return {id:r.id,name:r.name,slug:r.slug,color:r.color||'#7c5cbf',bgColor:r.bg_color||'#f0eef8',font:r.font||'Inter',logo:safeImgUrl(r.logo_url),adminEmail:r.admin_email||'',openRegistration:r.open_registration===true,consentManaged:r.consent_managed_by_institution===true,
@@ -2357,6 +2391,7 @@ async function handleRegister(){
 }
 let logoutConfirm=false;
 async function handleLogout(){
+  if(undoPending)await undoRun(undoPending); // P-14: a pending deletion is applied before leaving
   if(hasUnsavedWork()&&!logoutConfirm){
     logoutConfirm=true;setTimeout(()=>{logoutConfirm=false;},5000);
     showToast('You have unsaved changes. Click "Sign out" again to discard them.','err',5000);return;
@@ -3800,6 +3835,7 @@ async function hierDeleteUnit(id,btn){
   if(vaBlocked())return;
   // P-14: a dialog that names what is lost and asks to type the unit's name (the database only deletes EMPTY units)
   const o=orgsCache[id];
+  // an EMPTY unit only (the database checks it), so it is deleted right away after typing its name
   const ok=await confirmDanger({title:'Delete this unit?',body:'This cannot be undone. To confirm, type the name of the unit.',
     items:['Its branding, AI settings, playbooks and learning-approach bars','Its invitations','Only an empty unit can be deleted: first move or remove its people, groups and sub-units'],
     typeWord:o?.name||'',confirmText:'Delete unit'});
@@ -4994,6 +5030,28 @@ async function openDeleteAccount(){
 }
 
 // ── P-14: confirmation for destructive actions (what is lost; optionally type a word/name) ──
+// P-14: a deletion that can be undone for UNDO_MS: the item disappears now (hide), the real delete runs at the end
+// (run); "Undo" brings it back (restore). Starting another one, leaving the page or signing out runs the pending one now.
+const UNDO_MS=10000;let undoPending=null;
+function undoableDelete({message,hide,run,restore,ms=UNDO_MS}){
+  undoFlush();
+  try{hide&&hide();}catch(e){console.warn(e);}
+  const bar=document.getElementById('undo-bar');const until=Date.now()+ms;
+  const p={run,restore,timer:null,tick:null,done:false};undoPending=p;
+  document.getElementById('undo-msg').textContent=trText(message);
+  const secs=()=>{const el=document.getElementById('undo-secs');if(el)el.textContent=Math.max(0,Math.ceil((until-Date.now())/1000))+' s';};
+  secs();p.tick=setInterval(secs,500);bar.hidden=false;
+  document.getElementById('undo-btn').onclick=()=>{if(p.done)return;p.done=true;clearTimeout(p.timer);clearInterval(p.tick);bar.hidden=true;undoPending=null;try{restore&&restore();}catch(e){}showToast('Restored ✓','ok');};
+  p.timer=setTimeout(()=>undoRun(p),ms);
+}
+async function undoRun(p){
+  if(!p||p.done)return;p.done=true;clearTimeout(p.timer);clearInterval(p.tick);
+  if(undoPending===p){undoPending=null;document.getElementById('undo-bar').hidden=true;}
+  try{await p.run();}catch(e){console.warn('delete failed',e);}
+}
+function undoFlush(){if(undoPending)undoRun(undoPending);}
+window.addEventListener('pagehide',undoFlush);
+window.undoableDelete=undoableDelete;window.undoFlush=undoFlush;
 function confirmDanger({title,body='',items=[],typeWord='',confirmText='Delete'}){
   return new Promise(resolve=>{
     const m=document.getElementById('modal-danger');
@@ -5253,6 +5311,7 @@ const I18N_ES_FIX={
 "Saved: students under 18 declare their guardian's consent.":'Listo: los estudiantes menores de 18 declaran el consentimiento de su tutor/a.',
 'Turn on':'Encender','Join by link is on.':'El registro por link está encendido.','Join by link is off: only invited people can join.':'El registro por link está apagado: solo se suman las personas invitadas.',
 'Delete this unit?':'¿Borrar esta unidad?','This cannot be undone. To confirm, type the name of the unit.':'No se puede deshacer. Para confirmar, escribí el nombre de la unidad.',
+'Undo':'Deshacer','Restored ✓':'Restaurado ✓',
 'Its branding, AI settings, playbooks and learning-approach bars':'Su marca, ajustes de IA, playbooks y barras de enfoque','Its invitations':'Sus invitaciones',
 'Only an empty unit can be deleted: first move or remove its people, groups and sub-units':'Solo se puede borrar una unidad vacía: primero mové o quitá a sus personas, grupos y sub-unidades','Delete unit':'Borrar unidad',
 'Who can join (invitations or a link) is set in':'Quién se puede sumar (invitaciones o link) se define en','Dashboard → Join by link':'Panel → Registro por link',
