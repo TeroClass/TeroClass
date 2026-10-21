@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 const ics = await import('../api/_lib/ics.js');
 const feedMod = await import('../api/calendar/feed.js');
-const notifyMod = await import('../api/notify/session.js');
+const notifyMod = await import('../api/_lib/notify/session.js');
 
 const TOKEN = 'a'.repeat(32) + '0123456789abcdef0123456789abcdef';
 const S1 = '11111111-2222-4333-8444-555555555555';

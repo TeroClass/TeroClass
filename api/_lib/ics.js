@@ -1,5 +1,5 @@
 // iCalendar (RFC 5545) helpers for the calendar feed (api/calendar/feed.js) and the invitation emails
-// (api/notify/session.js). No dependencies. All times are written in UTC ("…Z"), so no VTIMEZONE is needed.
+// (api/_lib/notify/session.js). No dependencies. All times are written in UTC ("…Z"), so no VTIMEZONE is needed.
 // Lines end with CRLF and are folded at 75 octets (UTF-8 safe); text values are escaped.
 
 export const PRODID = '-//TeroClass//Calendar 1.0//ES';

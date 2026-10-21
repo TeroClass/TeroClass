@@ -106,21 +106,6 @@
     "api/generate.js": {
       "maxDuration": 60
     },
-    "api/notify/session.js": {
-      "maxDuration": 30
-    },
-    "api/class/ticket.js": {
-      "maxDuration": 15
-    },
-    "api/notify/invite.js": {
-      "maxDuration": 20
-    },
-    "api/notify/consent.js": {
-      "maxDuration": 20
-    },
-    "api/class/token.js": {
-      "maxDuration": 20
-    },
     "api/calendar/feed.js": {
       "maxDuration": 20
     },
@@ -142,11 +127,11 @@
     "api/client-error.js": {
       "maxDuration": 10
     },
-    "api/class/config.js": {
-      "maxDuration": 10
-    },
-    "api/notify/lead.js": {
+    "api/class/[action].js": {
       "maxDuration": 20
+    },
+    "api/notify/[kind].js": {
+      "maxDuration": 30
     }
   },
   "headers": [

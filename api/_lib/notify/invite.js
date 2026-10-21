@@ -4,9 +4,9 @@
 //   POST /api/notify/invite  {invitation_id, lang: 'es'|'en'}     Authorization: Bearer <the admin's Supabase session token>
 // Who may send it is decided by the database (invitation_notify_payload: only admins of that unit, only a pending
 // invitation), with the admin's own token. The daily e-mail quota is taken first (TC-08, email_quota_take; fail closed).
-import { SUPABASE_URL, SUPABASE_KEY, bearer } from '../_lib/livekit.js';
-import { appOrigin, isUuid } from '../_lib/ics.js';
-import { resendKey, EMAIL_RE, timedFetch, safeSubjectText, takeQuota, sendEmails, fromAddress, escHtml } from '../_lib/mail.js';
+import { SUPABASE_URL, SUPABASE_KEY, bearer } from '../livekit.js';
+import { appOrigin, isUuid } from '../ics.js';
+import { resendKey, EMAIL_RE, timedFetch, safeSubjectText, takeQuota, sendEmails, fromAddress, escHtml } from '../mail.js';
 
 const T = {
   es: { subject: u => `Te invitaron a ${u} en TeroClass`, hi: 'Hola:', body: (who, u, role) => `${who} te invitó a sumarte a ${u} en TeroClass como ${role}.`,

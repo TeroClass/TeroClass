@@ -11,7 +11,7 @@
 //
 // Token format follows LiveKit's AccessToken (HS256 JWT): iss = API key, sub = identity,
 // nbf/exp, name, metadata (string) and the "video" grant.
-import { livekitEnv, signJwt, getUser, getProfile, bearer, SUPABASE_URL, SUPABASE_KEY } from '../_lib/livekit.js';
+import { livekitEnv, signJwt, getUser, getProfile, bearer, SUPABASE_URL, SUPABASE_KEY } from '../livekit.js';
 import { verifyTicket } from './ticket.js';
 
 export const TOKEN_TTL_S = 2 * 60 * 60;     // a class plus margin
@@ -25,7 +25,7 @@ const STAFF_ROLES = new Set(['teacher', 'org_admin', 'superadmin']);
 // Calendar classes ("sess-<uuid>") are checked against the database (live_room_role). Ad-hoc rooms (TC-13, 2026-10):
 // the database decides (adhoc_room_access): the creating teacher hosts; staff (teachers / admins) of the SAME account
 // (main institution) can join as participants; students and accounts without an institution cannot — their classes
-// go through the calendar — or with an invitation ticket the creating teacher shared (api/class/ticket.js), never just by
+// go through the calendar — or with an invitation ticket the creating teacher shared (api/_lib/class/ticket.js), never just by
 // being signed in. The display name is decided by the database too (live_display_name, TC-27), never the body.
 // P-09: the ROLE is decided here too (host of the room / teacher of the class → teacher; everyone else → student); a body
 // asking for "teacher" without being the host is refused, and the answer says which role was given.

@@ -1,7 +1,7 @@
 // Recording consent on the server (no network: fetch is mocked).
-//  · api/class/token.js: recorded / consent / minor / guardian_consent come from my_consent() (database, caller's own
+//  · api/_lib/class/token.js: recorded / consent / minor / guardian_consent come from my_consent() (database, caller's own
 //    session), never from the request body; declined / revoked / outdated / minor without guardian / DB failure → not recorded.
-//  · api/notify/consent.js: no-op without RESEND_API_KEY (or the service key); otherwise the admins' emails come from the
+//  · api/_lib/notify/consent.js: no-op without RESEND_API_KEY (or the service key); otherwise the admins' emails come from the
 //    service-only payload and are sent through Resend; keys never echoed.
 //  · The consent text version is the same in the database, the API and the browser.
 // Usage: node --no-warnings --test tests/api-consent.test.mjs
@@ -9,8 +9,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const tokenMod = await import('../api/class/token.js');
-const notifyMod = await import('../api/notify/consent.js');
+const tokenMod = await import('../api/_lib/class/token.js');
+const notifyMod = await import('../api/_lib/notify/consent.js');
 
 const USER = { id: '1a2b3c4d-5e6f-4a1b-9c8d-000000000002', email: 'alumna@tec.com', user_metadata: { name: 'Alumna' } };
 const ENV = { LIVEKIT_URL: 'wss://teroclass-br.livekit.cloud', LIVEKIT_API_KEY: 'APIdemoKey123', LIVEKIT_API_SECRET: 'super-secret-value-for-tests-0123456789' };

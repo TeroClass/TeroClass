@@ -2,13 +2,15 @@
 
 AI-powered didactic planning platform for teachers.
 
+> **Vercel Hobby: máximo 12 funciones por deploy.** Los endpoints `/api/class/*` y `/api/notify/*` se sirven con una sola función cada uno (`api/class/[action].js`, `api/notify/[kind].js`); los handlers viven en `api/_lib/` (las carpetas con `_` no se despliegan como funciones). Antes de agregar un archivo nuevo en `api/`, contá las funciones (hoy: 10).
+
 ## Tech Stack
 
 - Vanilla HTML/CSS/JS frontend (`public/index.html`)
 - Supabase: accounts, institutions, class plans, logos (`supabase/migrations/001_base.sql`)
 - Vercel serverless API (`api/generate.js`) that calls Azure OpenAI (gpt-4o). The Azure key lives only on the server.
 - Groups, students and calendar: `public/groups-calendar.js` / `.css`, `public/csv-import.js` (CSV parser, also unit-tested in node), `api/calendar/feed.js` (calendar subscription),
-  `api/notify/session.js` (email invitations, optional), `api/_lib/ics.js`.
+  `api/_lib/notify/session.js` (email invitations, optional), `api/_lib/ics.js`.
 - Class document + attendance: `public/class-doc.js` / `.css`, `public/attendance.js`, and the vendored editor
   `public/vendor/classdoc-editor.js` (Yjs 13.6.32 + TipTap 2.27.2, one pinned ES module loaded on demand; no build step —
   it is rebuilt only when upgrading, with `scripts/vendor/build-classdoc.sh`).
@@ -30,7 +32,7 @@ AI-powered didactic planning platform for teachers.
 | `NOTIFY_FROM` | (optional) Sender of those emails, e.g. `TeroClass <clases@teroclass.com>` (the domain must be verified in Resend). Default `TeroClass <no-reply@teroclass.com>`. |
 | `APP_URL` | (optional) Public https origin used in links inside calendar events, e.g. `https://teroclass.com`. Default: the request's host. |
 | `SALES_NOTIFY_EMAIL` | (optional) Where "Hablar con ventas" requests are e-mailed, e.g. `ventas@teroclass.com` (never hard-coded). Needs `RESEND_API_KEY` too. Without them requests are only in *Platform → Sales requests*, with a red badge on the Platform icon. |
-| `TURNSTILE_SECRET_KEY` | (optional) Cloudflare Turnstile **secret**, only for the sales form **without signing in** on `/planes` (verified by `api/notify/lead.js`; also needs `TURNSTILE_SITE_KEY` and `SUPABASE_SERVICE_ROLE_KEY`). Without it the form asks people to sign in or create a free account first. (The same secret stays in Supabase for sign-up.) |
+| `TURNSTILE_SECRET_KEY` | (optional) Cloudflare Turnstile **secret**, only for the sales form **without signing in** on `/planes` (verified by `api/_lib/notify/lead.js`; also needs `TURNSTILE_SITE_KEY` and `SUPABASE_SERVICE_ROLE_KEY`). Without it the form asks people to sign in or create a free account first. (The same secret stays in Supabase for sign-up.) |
 | `TURNSTILE_SITE_KEY` | (optional, public) Cloudflare Turnstile site key (TC-18). With it, sign-up, sign-in, the student magic link and "Forgot your password?" show the check and send its token to Supabase Auth (`captchaToken`). The **secret** (`TURNSTILE_SECRET_KEY`) is NOT set in Vercel: paste it in Supabase → Authentication → Bot and Abuse Protection (Turnstile). Without the site key nothing changes. |
 | `RECORDING_ENABLED` | (optional, `true` only once a real recorder is connected) Makes the room say "● Recording — only people who gave consent". Without it the room says "Recording ready to be turned on — nothing is recorded yet" (TC-23). |
 | `APP_ENV` | (optional) `production` on the production project. Any other value (e.g. `staging`) shows the thin "Versión de prueba" banner even on teroclass.com; any host other than teroclass.com / www.teroclass.com shows it anyway (P-21). |
@@ -327,7 +329,7 @@ student has a personal subscription feed: `/cal/<token>.ics` (→ `api/calendar/
 `/api/calendar/feed?token=…`). The token is random and can be reset (the old link stops working); the feed is built by the
 `calendar_feed` function called with the publishable key and contains only that person's classes (no emails, no other
 students' data, cancelled classes marked as cancelled, times in UTC). The UI offers *Subscribe in Google Calendar*, *Copy feed
-URL*, *Outlook / Apple Calendar* (webcal) and *Reset link*. **Email notifications** (`api/notify/session.js`) are a "dummy
+URL*, *Outlook / Apple Calendar* (webcal) and *Reset link*. **Email notifications** (`api/_lib/notify/session.js`) are a "dummy
 feature" like the live class: they send only when `RESEND_API_KEY` exists; otherwise the app shows "email not configured"
 and offers *Copy invitation link*.
 
@@ -345,7 +347,7 @@ days); a schedule without an end date is reported as incomplete; a pending teach
 with (with "Confirm email" ON, see the header of `001_base.sql`); with no free seats the pending email is kept but no
 invitation is sent. Editing a whole series moves only future classes that weren't edited one by one; changing a group's time
 zone doesn't move classes already scheduled; a one-off class's invitees are set when it is created; the live class is still
-the demo (real video needs LiveKit and a session-aware token: `api/class/token.js`); a student who changes their account
+the demo (real video needs LiveKit and a session-aware token: `api/_lib/class/token.js`); a student who changes their account
 email keeps the classes already linked.
 
 ## Class document (Documento de la clase)
@@ -494,14 +496,14 @@ needed for the observation report) the lobby shows a single checkbox: *"Acepto q
 y que la IA las analice para generar mis insights y mejorar las clases."* It covers recording + AI analysis + storage (original
 audio deleted after 30 days) and has a short *Más información* note. A **yes** is stored per person in the database and is
 permanent: the next classes don't ask again while it is valid and the text version matches. When the text changes, bump
-`CONSENT_VERSION` in `public/live-class.js`, `api/class/token.js` **and** `tc_consent_version()` in `001_base.sql` (a test checks
+`CONSENT_VERSION` in `public/live-class.js`, `api/_lib/class/token.js` **and** `tc_consent_version()` in `001_base.sql` (a test checks
 they match): everyone is asked again.
 - **Under 18** ("Soy menor de 18 años", same step): guardian's name + email + "Mi madre, padre o tutor/a está de acuerdo (lo
   declaro yo)" (`guardian_source = 'student'`), or nothing when the institution manages it (`guardian_source = 'institution'`).
 - **No** → a pop-up "Está bien" with an **optional** comment ("¿Querés contarnos por qué? (opcional)"; P-11) and "Entrar sin
   que me graben". The person joins **not recorded** and is asked again at their next class. Only a written comment reaches
   the admins of that person's institution (students: the unit(s) that loaded them for that class; teachers: their unit), with
-  an email when `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY` exist (`api/notify/consent.js`); an empty "no" is only counted.
+  an email when `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY` exist (`api/_lib/notify/consent.js`); an empty "no" is only counted.
 - **Revoke** — account menu → *Grabación de mis clases: Activada / Desactivada*. Turning it off asks for confirmation and sets
   `revoked_at`; the person is asked again at the next class, and can turn it back on from the same menu (same checkbox; guardian
   fields for minors).
@@ -511,7 +513,7 @@ they match): everyone is asked again.
   **CSV export** (`;` in Spanish). A red badge on *Groups* counts the justifications that arrived since the admin last opened the
   tab (remembered per browser). *View as* shows it read-only.
 - **Métricas** (super admin): a *Recording consent* tile with totals only (accepted / did not accept / pending), no names.
-- **Server-side truth:** `api/class/token.js` ignores any consent sent by the browser; it reads `my_consent()` with the user's own
+- **Server-side truth:** `api/_lib/class/token.js` ignores any consent sent by the browser; it reads `my_consent()` with the user's own
   session and puts `recorded`, `consent`, `minor`, `guardian_consent` in the LiveKit metadata from there (never guardian data). If it
   can't be read, the person joins not recorded.
 

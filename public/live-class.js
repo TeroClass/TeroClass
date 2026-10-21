@@ -21,7 +21,7 @@
  * Under 18 (P-10): guardian name + email + the student's DECLARATION that the guardian agrees (not verified; shown as
  * "declared by the student"), unless the institution manages the families' consent itself (consent_managed). Classes are recorded AUTOMATICALLY (audio only, only
  * people who consented); the teacher can pause ("Pause recording"), and it resumes by itself after PAUSE_MAX_S.
- * The LiveKit token (api/class/token.js) reads the consent from the database, never from this browser.
+ * The LiveKit token (api/_lib/class/token.js) reads the consent from the database, never from this browser.
  */
 (function () {
   'use strict';
@@ -29,7 +29,7 @@
   const LK_VERSION = '2.22.3';
   // served from this site (TC-11: no third-party script; public/vendor/licenses)
   const LK_CDN = `/vendor/livekit-client-${LK_VERSION}.umd.js`;
-  const CONSENT_VERSION = '2026-10'; // = tc_consent_version() (001_base.sql) and api/class/token.js; bump all three when the text changes
+  const CONSENT_VERSION = '2026-10'; // = tc_consent_version() (001_base.sql) and api/_lib/class/token.js; bump all three when the text changes
   const CONSENT_TEXT = 'I agree that my classes on TeroClass are recorded (audio only) and that AI analyses them to create my insights and improve the classes.';
   const CONSENT_MORE = ['Only your voice is recorded (audio), never video, and only for people who agreed.',
     'AI creates your learning insights (recap, progress and feedback) and the teacher\'s observation report, to improve the classes.',
@@ -852,7 +852,7 @@ Cierre y ticket de salida (5 min)
       hand: false, rec: { state: 'on', secs: 0, resumeAt: 0 }, secs: 0, remoteScreens: [],
       chat: [], unread: 0, side: isNarrow() ? null : (L.role === 'teacher' ? 'plan' : 'chat'),
       speaking: new Set(), talk: { teacher: 0, students: 0 }, plan, running: -1, participants: [],
-      // A calendar session → one room for its teacher and students. TODO(live): api/class/token.js grants
+      // A calendar session → one room for its teacher and students. TODO(live): api/_lib/class/token.js grants
       // roomAdmin by "<ownerKey>-…" rooms; with real LiveKit, look the session up (teacher → admin) instead.
       roomName: S.sessionId ? `sess-${String(S.sessionId).replace(/[^A-Za-z0-9]/g, '').slice(0, 32)}`
         : S.adhocRoom ? S.adhocRoom

@@ -5,9 +5,9 @@ import assert from 'node:assert/strict';
 import { createHmac, createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 
-const tokenMod = await import('../api/class/token.js');
-const ticketMod = await import('../api/class/ticket.js');
-const configMod = await import('../api/class/config.js');
+const tokenMod = await import('../api/_lib/class/token.js');
+const ticketMod = await import('../api/_lib/class/ticket.js');
+const configMod = await import('../api/_lib/class/config.js');
 const webhookMod = await import('../api/livekit/webhook.js');
 const lib = await import('../api/_lib/livekit.js');
 

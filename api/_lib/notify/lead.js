@@ -11,11 +11,11 @@
 // · E-mail to the owner: only with RESEND_API_KEY and SALES_NOTIFY_EMAIL (never hard-coded). Without them nothing is sent
 //   and the lead is only in Plataforma → Pedidos de ventas (with a "new" badge).
 // The lead is never echoed back beyond {ok, id}; the owner's address never reaches the browser.
-import { getUser, bearer, SUPABASE_URL, SUPABASE_KEY } from '../_lib/livekit.js';
-import { serviceKey, serviceRpc } from '../_lib/billing.js';
-import { resendKey, timedFetch, EMAIL_RE, escHtml, fromAddress, safeSubjectText } from '../_lib/mail.js';
-import { clientIp, ipKey, memRateHit } from '../_lib/guard.js';
-import { appOrigin } from '../_lib/ics.js';
+import { getUser, bearer, SUPABASE_URL, SUPABASE_KEY } from '../livekit.js';
+import { serviceKey, serviceRpc } from '../billing.js';
+import { resendKey, timedFetch, EMAIL_RE, escHtml, fromAddress, safeSubjectText } from '../mail.js';
+import { clientIp, ipKey, memRateHit } from '../guard.js';
+import { appOrigin } from '../ics.js';
 
 const SOURCES = new Set(['popup_gen2', 'popup_gen4', 'paywall', 'plans_page', 'plan_usage']);
 const FIELDS = ['name', 'institution', 'role', 'country', 'teachers_count', 'contact_channel', 'whatsapp', 'email', 'preferred_plan', 'message', 'lang'];

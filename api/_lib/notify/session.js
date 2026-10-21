@@ -10,9 +10,9 @@
 // fail closed), at most 100 recipients per send, and the class title is cleaned before it goes into the subject
 // (one line, no links or addresses, 60 characters). Only people the institution loaded (or who already signed in) are
 // e-mailed; addresses a teacher typed for a one-off class are "skipped" (the app offers the link to share).
-import { SUPABASE_URL, SUPABASE_KEY, bearer } from '../_lib/livekit.js';
-import { buildCalendar, appOrigin, isUuid } from '../_lib/ics.js';
-import { resendKey, EMAIL_RE, timedFetch, safeSubjectText, takeQuota, sendEmails, fromAddress, escHtml } from '../_lib/mail.js';
+import { SUPABASE_URL, SUPABASE_KEY, bearer } from '../livekit.js';
+import { buildCalendar, appOrigin, isUuid } from '../ics.js';
+import { resendKey, EMAIL_RE, timedFetch, safeSubjectText, takeQuota, sendEmails, fromAddress, escHtml } from '../mail.js';
 
 export { resendKey };
 const KINDS = new Set(['invite', 'update', 'cancel']);

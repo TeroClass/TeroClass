@@ -11,9 +11,9 @@ en Vercel (más el grabador y la transcripción, para tener insights reales).
 |---|---|
 | `public/live-class.js` | Toda la pantalla: inicio (sesiones), sala de espera con cámara real y el consentimiento (una casilla, se pide una sola vez; "Justificá tu respuesta" si no acepta), sala con video, plan con temporizadores, chat, indicador de grabación automática con pausa del docente, procesamiento e insights; y en el menú del perfil "Grabación de mis clases". Textos en español en un bloque `Object.assign(I18N_ES, …)`. |
 | `public/live-class.css` | Estilos (sin librerías). Funciona desde 768 px de ancho. |
-| `api/class/config.js` | `GET` → `{configured: true/false}`. Nunca devuelve claves. |
-| `api/class/token.js` | `POST` → token de LiveKit (JWT HS256 firmado con `node:crypto`). Verifica la sesión de Supabase. Lee el consentimiento de la base (`my_consent()` con la sesión del usuario; **nunca** lo que manda el navegador) y pone `recorded` / `consent` / `minor` / `guardian_consent` en la metadata. Devuelve **501** mientras falten las variables. |
-| `api/notify/consent.js` | `POST` → avisa por email a los admins cuando alguien no acepta la grabación (solo con `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY`; si no, no hace nada). |
+| `api/_lib/class/config.js` | `GET` → `{configured: true/false}`. Nunca devuelve claves. |
+| `api/_lib/class/token.js` | `POST` → token de LiveKit (JWT HS256 firmado con `node:crypto`). Verifica la sesión de Supabase. Lee el consentimiento de la base (`my_consent()` con la sesión del usuario; **nunca** lo que manda el navegador) y pone `recorded` / `consent` / `minor` / `guardian_consent` en la metadata. Devuelve **501** mientras falten las variables. |
+| `api/_lib/notify/consent.js` | `POST` → avisa por email a los admins cuando alguien no acepta la grabación (solo con `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY`; si no, no hace nada). |
 | `api/livekit/webhook.js` | Recibe los eventos de LiveKit y verifica la firma. Por ahora solo registra (TODOs para el grabador y Supabase). |
 | `api/_lib/livekit.js` | Firma/verificación de JWT y consulta de usuario en Supabase (compartido). |
 | `supabase/migrations/001_base.sql` | Consentimiento único por persona (`user_consents`, `consent_declines`, `my_consent`, …): ver README → *Recording consent*. |
@@ -82,7 +82,7 @@ Un servicio pequeño, en la misma región que el almacenamiento (Brazil South):
 2. Entra a la sala como participante oculto (token con `hidden: true`, `canSubscribe: true`,
    `canPublish: false`) usando el SDK de servidor de LiveKit.
 3. **Graba automáticamente desde que la sala está en vivo** (no hay botón REC): se suscribe **solo**
-   a las pistas de audio de quienes tienen `recorded: true` en su metadata (lo pone `api/class/token.js`
+   a las pistas de audio de quienes tienen `recorded: true` en su metadata (lo pone `api/_lib/class/token.js`
    leyendo `my_consent()` de la base; un "no" o un consentimiento revocado o de otra versión → `false`).
    Nunca graba video.
 4. Respeta la **pausa** del docente: mensajes de datos `{type:"rec", state:"paused"}` y `{type:"rec", state:"on"}`
@@ -130,7 +130,7 @@ Hoy, en modo Demo: **US$ 0**.
 
 ## Privacidad — checklist antes de activar
 
-- [ ] Texto de consentimiento revisado por un abogado (Uruguay: Ley 18.331; España: RGPD/LOPDGDD) y versión cargada en `CONSENT_VERSION` (`api/class/token.js`, `live-class.js`) y `tc_consent_version()` (`001_base.sql`).
+- [ ] Texto de consentimiento revisado por un abogado (Uruguay: Ley 18.331; España: RGPD/LOPDGDD) y versión cargada en `CONSENT_VERSION` (`api/_lib/class/token.js`, `live-class.js`) y `tc_consent_version()` (`001_base.sql`).
 - [ ] Decisión del producto (2026-10): **un solo consentimiento** (grabación + análisis con IA + almacenamiento), se pide una vez y un "sí" queda guardado; un "no" ofrece un comentario OPCIONAL ("¿Querés contarnos por qué? (opcional)"; solo si se escribe algo le llega a la institución, en gris neutro) y se vuelve a preguntar en la próxima clase. Sin consentimiento se participa igual, sin grabar. Confirmar con el abogado que agrupar los tres fines en una casilla es válido.
 - [ ] Menores de 18: hoy el estudiante escribe nombre y email del tutor/a y **declara** que está de acuerdo (se muestra "declarado por el estudiante", no está verificado), o la institución enciende "Nuestra institución junta el consentimiento de las familias" (`consent_managed_by_institution`) y entonces no se piden datos del tutor/a.
 - [ ] **PENDIENTE (TODO): verificación real del tutor/a por email** (link firmado al email del tutor/a; el "sí" del menor cuenta recién cuando confirma). Decidirlo con el abogado antes de grabar a menores.

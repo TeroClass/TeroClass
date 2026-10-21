@@ -4,7 +4,7 @@
 // APP_ENV / VERCEL_ENV) and whether the sales form works without signing in (salesAnon).
 import { resendKey } from './_lib/mail.js';
 import { livekitEnv } from './_lib/livekit.js';
-import { anonLeadsEnabled } from './notify/lead.js';
+import { anonLeadsEnabled } from './_lib/notify/lead.js';
 
 export function publicConfig(env = process.env) {
   const site = String(env.TURNSTILE_SITE_KEY || '').trim();

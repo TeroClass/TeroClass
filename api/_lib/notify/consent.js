@@ -5,9 +5,9 @@
 // only the service role can execute), so they never reach the browser. No key ever leaves the server.
 //   POST /api/notify/consent  {lang: 'es'|'en'}   Authorization: Bearer <the person's Supabase session token>
 // Only the caller's own declines of the last 15 minutes that were not notified yet are sent (each one once).
-import { getUser, bearer } from '../_lib/livekit.js';
-import { serviceRpc, serviceKey } from '../_lib/billing.js';
-import { appOrigin } from '../_lib/ics.js';
+import { getUser, bearer } from '../livekit.js';
+import { serviceRpc, serviceKey } from '../billing.js';
+import { appOrigin } from '../ics.js';
 import { resendKey } from './session.js';
 
 const EMAIL_RE = /^[^\s@<>"',;()]{1,64}@[^\s@<>"',;()]{1,190}\.[A-Za-z]{2,24}$/;

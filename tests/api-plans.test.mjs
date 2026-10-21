@@ -1,4 +1,4 @@
-// Unit tests for plans / free trial / model choice in api/generate.js and the sales form API (api/notify/lead.js).
+// Unit tests for plans / free trial / model choice in api/generate.js and the sales form API (api/_lib/notify/lead.js).
 // No network: fetch is mocked. Usage: node --no-warnings --test tests/api-plans.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +12,7 @@ delete process.env.RESEND_API_KEY; delete process.env.SALES_NOTIFY_EMAIL;
 delete process.env.TURNSTILE_SITE_KEY; delete process.env.TURNSTILE_SECRET_KEY;
 const genMod = await import('../api/generate.js');
 const gen = genMod.default;
-const leadMod = await import('../api/notify/lead.js');
+const leadMod = await import('../api/_lib/notify/lead.js');
 const lead = leadMod.default;
 const config = await import('../api/config.js');
 const { appBody } = await import('./ai-fixtures.mjs');

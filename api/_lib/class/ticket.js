@@ -4,11 +4,11 @@
 //
 // Ad-hoc rooms ("<ownerKey>-<random>", started with "▶ Start live class" outside the calendar) are not in the database.
 // Being signed in is NOT enough to join one: the teacher who created it shares a link with a short-lived signed ticket
-// (HS256, a secret derived from LIVEKIT_API_SECRET, or ROOM_TICKET_SECRET), and api/class/token.js lets a student in only
+// (HS256, a secret derived from LIVEKIT_API_SECRET, or ROOM_TICKET_SECRET), and api/_lib/class/token.js lets a student in only
 // with a valid ticket for THAT room. Staff of the same account still join without one (adhoc_room_access 'guest').
 // Classes of the calendar never use tickets: the database decides who is in them (live_room_role).
 import { createHmac } from 'node:crypto';
-import { livekitEnv, signJwt, verifyJwt, getUser, bearer, SUPABASE_URL, SUPABASE_KEY } from '../_lib/livekit.js';
+import { livekitEnv, signJwt, verifyJwt, getUser, bearer, SUPABASE_URL, SUPABASE_KEY } from '../livekit.js';
 
 export const TICKET_TTL_S = 6 * 60 * 60;   // a class day; the teacher can always make a new link
 const ROOM_RE = /^([0-9a-f]{12})-[A-Za-z0-9_-]{1,51}$/;
