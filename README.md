@@ -23,11 +23,14 @@ AI-powered didactic planning platform for teachers.
 | `AZURE_OPENAI_ENDPOINT` | `https://<resource>.openai.azure.com/` |
 | `AZURE_OPENAI_API_KEY` | (secret) |
 | `AZURE_OPENAI_DEPLOYMENT` | `gpt-4o` |
+| `AZURE_OPENAI_DEPLOYMENT_MINI` | (optional) `gpt-4.1-mini` — the name of a second deployment in the same Azure resource (owner checklist below). Used by *Platform → Compare models* and by the kinds of request switched to "Mini model" in *Platform → AI model*. Without it, "mini" falls back to `AZURE_OPENAI_DEPLOYMENT` (the screens say so). |
 | `AZURE_OPENAI_API_VERSION` | `2024-12-01-preview` |
 | `SUPABASE_SERVICE_ROLE_KEY` | (secret) Supabase → Project Settings → API Keys → `service_role` (or a new `sb_secret_…` key). Server only: turns on AI token limits and usage recording. Without it the app works without token limits and Platform shows a warning. |
 | `RESEND_API_KEY` | (secret, **optional**) Turns on class invitation / update / cancellation emails with the event attached ([resend.com](https://resend.com)), and the email to the institution admins when someone does not agree to be recorded (that one also needs `SUPABASE_SERVICE_ROLE_KEY`, to read the admins' emails on the server). Without it nothing is sent: the app offers "Copy invitation link" and the justifications are only in Groups → Consents. |
 | `NOTIFY_FROM` | (optional) Sender of those emails, e.g. `TeroClass <clases@teroclass.com>` (the domain must be verified in Resend). Default `TeroClass <no-reply@teroclass.com>`. |
 | `APP_URL` | (optional) Public https origin used in links inside calendar events, e.g. `https://teroclass.com`. Default: the request's host. |
+| `SALES_NOTIFY_EMAIL` | (optional) Where "Hablar con ventas" requests are e-mailed, e.g. `ventas@teroclass.com` (never hard-coded). Needs `RESEND_API_KEY` too. Without them requests are only in *Platform → Sales requests*, with a red badge on the Platform icon. |
+| `TURNSTILE_SECRET_KEY` | (optional) Cloudflare Turnstile **secret**, only for the sales form **without signing in** on `/planes` (verified by `api/notify/lead.js`; also needs `TURNSTILE_SITE_KEY` and `SUPABASE_SERVICE_ROLE_KEY`). Without it the form asks people to sign in or create a free account first. (The same secret stays in Supabase for sign-up.) |
 | `TURNSTILE_SITE_KEY` | (optional, public) Cloudflare Turnstile site key (TC-18). With it, sign-up, sign-in, the student magic link and "Forgot your password?" show the check and send its token to Supabase Auth (`captchaToken`). The **secret** (`TURNSTILE_SECRET_KEY`) is NOT set in Vercel: paste it in Supabase → Authentication → Bot and Abuse Protection (Turnstile). Without the site key nothing changes. |
 | `RECORDING_ENABLED` | (optional, `true` only once a real recorder is connected) Makes the room say "● Recording — only people who gave consent". Without it the room says "Recording ready to be turned on — nothing is recorded yet" (TC-23). |
 | `APP_ENV` | (optional) `production` on the production project. Any other value (e.g. `staging`) shows the thin "Versión de prueba" banner even on teroclass.com; any host other than teroclass.com / www.teroclass.com shows it anyway (P-21). |
@@ -39,8 +42,11 @@ AI-powered didactic planning platform for teachers.
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for the class whiteboard
-(2026-10-21, see *Class whiteboard*): run it again** — tested from git 3c0ef7b with data, then twice; `002_live_class.sql` did not
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for plans and the free
+trial (2026-10-21, see *Plans, free trial and sales*): run it again** — tested from git a4f00d3 with data, then twice; `002_live_class.sql`
+did not change and still applies after it. **The first run marks every existing institution as "Pilot"** (nothing stops working);
+set the ones that are not paying to "No plan" in *Platform*. Before that it changed for the class whiteboard
+(2026-10-21, see *Class whiteboard*) — tested from git 3c0ef7b with data, then twice; `002_live_class.sql` did not
 change and still applies after it. Before that it changed with the pre-launch
 fix sprint (2026-10, see *Pre-launch fix sprint*) — tested from git 203e2e1 with data, then twice; earlier: (it upgrades the
 previous version in place and keeps all data; tested from git 9993462 — and c198c60, d063eb0 — with data, then twice).
@@ -145,15 +151,93 @@ purchase/approval is blocked ("View as is read-only"), also at the Supabase-clie
 class is allowed as a preview with that unit's settings; it is never saved and the AI tokens count to the owner.
 A persistent banner shows who you are viewing as; *Exit* restores your session; a reload always starts normally.
 
-## Plan & usage (seats + AI tokens)
+## Plan & usage (seats + monthly classes)
 
-Each main institution is a billing account: **seats** (teachers + admins in its whole tree) and a **monthly AI token
-allowance** (calendar month, UTC). When the allowance is used up, purchased **token packs** (extra balance, no expiry)
-are used. There are no payments in the app: an admin of the main institution requests a pack in *Plan & usage*, the
-super admin charges outside the app (transfer / Mercado Pago) and approves it in *Platform*, which adds the tokens.
-Pack size/price/currency, the free monthly allowance for users without an institution and the defaults for new
-institutions are set in *Platform → Plans & pricing*. Token accounting happens only on the server
-(`api/generate.js` → `ai_budget_check` / `ai_record_usage`, executable only with the service key).
+Each main institution is a billing account: **seats** (teachers + admins in its whole tree) and a **monthly allowance** of AI
+tokens (calendar month, UTC), shown to admins as **classes** (1 class = 25,000 tokens; see *Plans, free trial and sales*). When the
+allowance is used up, purchased **class packs** (extra balance, no expiry yet) are used. There are no payments in the app: an
+admin of the main institution requests a pack (50 classes = USD 25, 200 = USD 85) in *Plan & usage*, the super admin charges
+outside the app (transfer / Mercado Pago) and approves it in *Platform*, which adds the classes. Pack prices live in the plans
+(*Platform → Plans & pricing*); the free monthly allowance for users without an institution and the defaults for new institutions
+are in *Platform → Defaults*. Token accounting happens only on the server (`api/generate.js` → `ai_budget_check` /
+`ai_record_usage`, executable only with the service key).
+
+## Plans, free trial and sales (2026-10-21)
+
+Pricing proposal v1 (`plans.json`), as decided by the owner: **Free trial** 5 classes in total · **Docente** USD 12/month or
+USD 99/year (EUR 11.99 / 99, VAT incl.) · **Institución** per teacher per month, billed yearly: USD 14 (3–9), 12 (10–29), 10 (30–99);
+monthly ≈ 20% more (17 / 14.50 / 12) · **Institución+** custom (reference USD 9 + onboarding) · class packs 50 = USD 25, 200 = USD 85,
+analyzed-class packs, AI tracking, classroom-hour pack · launch offers (off until switched on). **There is no online payment yet**:
+a plan is activated by hand in *Platform* once paid (Uruguayan SAS: transfer + e-invoice; Paddle / Polar later for self-serve).
+
+- **Plans as data.** `platform_settings.plans` (seeded once from `plans.json`, never overwritten by a re-run) → `get_plans()`
+  (public, also without a session). *Platform → Plans & pricing* edits prices, limits, packs and the launch-offer switches
+  (`update_plans`, super admin only, validated). Texts live in `public/plans.js` (Spanish "vos" + English) and always take the
+  numbers from the data.
+- **"Clases", not tokens.** 1 class = 25,000 tokens (`credit_tokens`). *Plan & usage* shows classes this month / left, extra
+  classes from packs, the account's plan status and the class packs to request (`request_token_pack(p_pack)`; the old 10M-token
+  pack for USD 11.99, sold at a loss, is gone; old requests and balances are kept and shown as ≈ classes). Server messages talk
+  about classes and class packs.
+- **Who is on trial.** Teachers and admins (never students, never the super admin) with no institution, or whose institution
+  (main institution = billing account) has no **active plan**: `billing_accounts.plan_status` ∈ `pilot`, `active`, `founder`,
+  `enterprise` (others: `none`, `cancelled`), set by the super admin in *Platform → Institutions: plan and usage* ("Apply plan" also
+  sets the monthly classes to seats × classes per teacher). People without an institution get a **Teacher plan** in *Platform →
+  Teacher plans* (`individual_plans`; 25 classes/month).
+- **Trial rules, enforced in the database with the user's own token** (works without the server key): `consume_ai_quota`
+  counts completed main generations (`ai_events` kind `generate`, `ok`), lifetime; in-flight ones count too (two requests at once
+  can't pass the limit; one advisory lock per person); failed ones don't — and only the server can mark a request as failed (it
+  holds the request's `finish_key`). At the 6th → `trial_limit` → `/api/generate` **402** `{code:'trial_limit'}`. Follow-up
+  requests (continuation, calculation check, student handout) are allowed only right after a counted class (2 h, max 6), so
+  "continue" can't be used to get classes for free.
+- **What people see** (`public/plans.js`): a persistent banner "Te quedan N clases de prueba · Ver planes" (amber at the last
+  one, red when used up); after the **2nd** completed class, 3 s after the class is on screen, the plans pop-up (once:
+  `trial_state`, `trial_mark`); after the **4th**, a short reminder; when the **6th** is attempted the app opens the plans pop-up
+  (and the server refuses it anyway). Everything already created can still be viewed and exported; trial PDFs carry the watermark
+  "Creado con TeroClass — versión de prueba". A teacher of an institution without a plan gets the variant "Tu institución todavía
+  no tiene un plan activo" with *Avisarle a mi admin* (copies a short message with the /planes link). After a sales request, no
+  more pop-ups (banner only). Copy is honest: no countdowns, no invented scarcity, no "most popular" claim; the Founding offer only
+  says "N places left" when real accounts already have it.
+- **`/planes` (`/plans`)** — `public/planes.html` + `plans.js` + `plans.css`: works without signing in; monthly / yearly toggle,
+  USD / EUR (EUR by default for Spain / EU browsers; Docente "IVA incluido", Institución "+ IVA"), the Institución tier table,
+  add-ons, launch offers (only when on), FAQ (students free, what a class is, classroom hours, transfer, running out, privacy).
+  Linked from the user menu (*Planes y precios*) and *Plan & usage*. `?lang=en`, `?currency=EUR`, `?contact=sales` work.
+- **"Hablar con ventas"** (pop-up, /planes, "Quiero el plan Docente" = the same form preselected with "El pago online llega
+  pronto"): name, institution, role, country, teachers, WhatsApp / e-mail, preferred plan, message, consent →
+  `POST /api/notify/lead` → `submit_sales_lead` with the person's session (validated, 3 per hour / 10 per day per person, per-IP
+  limit) or, without a session, only with Turnstile fully configured (`submit_sales_lead_service`, per-IP HMAC limits). Table
+  `sales_leads`: no direct access; only the super admin reads it (*Platform → Sales requests*: status nuevo / contactado /
+  ganado / perdido, notes, CSV export with formula-safe cells, a red badge for new ones). E-mail to `SALES_NOTIFY_EMAIL` when
+  `RESEND_API_KEY` exists (reply-to = the lead). The person's own requests are in *Download my data*.
+- **AI model** (*Platform → AI model*): per kind of request (class + continuation / student handout / playbook summary /
+  calculation check) "Default model" or "Mini model" (`ai_model_default`); `/api/generate` uses `AZURE_OPENAI_DEPLOYMENT_MINI`
+  for "mini" and falls back to the default deployment if it is missing. Mini prices (USD per 1M tokens, defaults 0.40 / 1.60 from
+  the proposal — **to verify** against the Azure price sheet) next to the default model's (*AI cost estimate*).
+- **Compare models** (*Platform*, super admin only): type a topic (with the generator's current settings) or load the last 20
+  saved classes; each pair runs the **same full pipeline** (guide, continuation, calculation check, handout) through
+  `/api/generate` with `model: 'default' | 'mini'` — accepted **only from the super admin** (decided by the database:
+  `consume_ai_quota` → `reason:'model'` → 403 for anyone else). Random left/right order, model names hidden until rated; time,
+  tokens and estimated cost per side; rate A better / B better / same + note → `model_comparisons` (super admin only; cost
+  recomputed with the stored prices); summary with win rates and average cost per class per model.
+- **Métricas → Free trial → plans:** new accounts in the period, on trial, reached the 2nd class, saw the plans pop-up, used the
+  whole trial, sales requests, converted (institutions / Teacher plans moved to an active plan in the period). Totals only.
+
+**Database (`001_base.sql`).** `platform_settings.plans`, `ai_model_default`, `ai_price_input_mini`, `ai_price_output_mini`;
+`billing_accounts.plan_status / plan_id / plan_activated_at / plan_changed_at`; `token_purchase_requests.pack_id / pack_credits`;
+`ai_events.finish_key`; tables `individual_plans`, `trial_state`, `sales_leads`, `model_comparisons` (RLS on, no grants:
+security-definer functions only). Functions: `get_plans`, `update_plans`, `my_trial_status`, `trial_mark`,
+`set_institution_plan_status`, `set_individual_plan`, `list_individual_plans`, `submit_sales_lead`, `submit_sales_lead_service`,
+`sales_lead_notified(_service)`, `list_sales_leads`, `update_sales_lead`, `sales_leads_new_count`, `save_model_comparison`,
+`model_comparison_summary`, `get_model_comparison`, `update_ai_model_default`, `update_ai_prices_mini`, `platform_funnel`;
+`consume_ai_quota(p_meta, p_est_tokens, p_model)` and `finish_ai_event(p_event, p_ok, p_key)` replace the old signatures (calls
+with the old arguments keep working).
+
+**Limitations (plans).** No online payment or invoicing: plans, Teacher plans and packs are activated by hand. Packs still don't
+expire (one balance per account; the 12-month expiry of the proposal needs pack lots). Only the class limits are enforced: video
+hours, analyzed classes, storage, methodologies, participants and the per-plan feature switches (calendar, CSV import…) are
+shown on the plans page but not limited in the app yet. The trial is per person (5 classes); the proposal's pooled 15-class trial
+for an institution without a plan was not built. The 24-hour gap between pop-ups and the e-mail sequence of the proposal were
+not built. The watermark is added by the browser's print view (a determined user can remove it). Prices by purchasing power
+(zone C) are not shown. A trial person can still get up to 6 follow-up requests right after each counted class.
 
 ## Groups, students and calendar
 
@@ -507,6 +591,30 @@ Findings TC-xx (technical audit) and P-xx (product audit). Summary of the behavi
       DPA with Supabase, Microsoft, Vercel, LiveKit, Resend; register the database with the URCDP (Uruguay); consent
       model for minors (and whether guardian verification by email is required before recording minors).
 - [ ] Uptime monitor (Better Stack / UptimeRobot) on `/api/health`.
+- [ ] **Plans (2026-10-21):** run the new `001_base.sql`; then in *Platform → Institutions: plan and usage* set each institution's
+      plan status (every existing one starts as **Pilot**; "No plan" puts its teachers on the 5-class trial); check prices in
+      *Platform → Plans & pricing*; switch on the launch offers you want.
+- [ ] **Sales e-mails:** Vercel env `SALES_NOTIFY_EMAIL=<your sales inbox>` (+ `RESEND_API_KEY`, already used for invitations).
+      Optional, for the form without signing in on /planes: `TURNSTILE_SECRET_KEY` in Vercel (same secret as in Supabase) +
+      `TURNSTILE_SITE_KEY` + `SUPABASE_SERVICE_ROLE_KEY`.
+- [ ] **gpt-4.1-mini deployment (Azure AI Foundry), for Compare models:**
+      1. Go to https://ai.azure.com, open the **same project / Azure OpenAI resource** that has the `gpt-4o` deployment (the one
+         whose endpoint is `AZURE_OPENAI_ENDPOINT`).
+      2. Left menu → **Models + endpoints** (older UI: *Deployments*) → **+ Deploy model** → **Deploy base model**.
+      3. Search **gpt-4.1-mini**, select it → **Confirm**.
+      4. **Deployment name:** `gpt-4.1-mini` (any name works; it must be exactly what you put in Vercel). **Deployment type:**
+         *Global Standard* (or *Standard* in your region if data residency matters). Model version: the latest offered.
+      5. **Customize** → *Tokens per Minute Rate Limit*: start with ~50K TPM (enough for the comparison; raise it if you switch kinds
+         to mini). Leave content filter = Default. **Deploy**.
+      6. Check the API version: the deployment page shows a sample with `api-version=…`; `AZURE_OPENAI_API_VERSION`
+         (`2024-12-01-preview`) works for gpt-4.1-mini. Same endpoint and key as gpt-4o — no new key.
+      7. Vercel → Settings → Environment Variables → add `AZURE_OPENAI_DEPLOYMENT_MINI` = `gpt-4.1-mini` (Production + Preview) →
+         **Redeploy**.
+      8. In TeroClass: *Platform* → the "mini model is not configured" warning disappears → *Compare models* → load the last 20 saved
+         classes (e.g. The English Coach) → compare and rate each pair. Only after deciding, switch kinds to "Mini model" in
+         *Platform → AI model*.
+      9. Verify the price: Azure portal → Cost Management, or the Azure OpenAI pricing page → gpt-4.1-mini input / output per 1M
+         tokens → update *Platform → AI model → Mini model price*. Add the new deployment to the budget alert.
 
 ## Tests
 
@@ -515,6 +623,15 @@ against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/
 Pre-launch fixes: `tests/e2e-launch-fixes.cjs`, `tests/e2e-sprint-fixes.cjs` (`SHOTS=<dir>` saves `fix-*.png`) and
 `tests/e2e-csp.cjs` (the app under the real `vercel.json` headers / CSP); `tests/api-launch.test.mjs` and
 `tests/sql/launch_fixes.sql` (also run after an upgrade from git 203e2e1 with data).
+Plans and free trial (2026-10-21): `tests/e2e-plans.cjs` (trial pop-up at the 2nd class, reminder at the 4th, hard block at the 6th
+with the plans pop-up — also when the server refuses it —, watermark, active-plan teachers / super admin / students never see it,
+/planes ES + EN desktop + mobile, sales form → the super admin's list (status, notes, CSV, badge), "Quiero el plan Docente", Plan &
+usage in classes + packs, plans editor + launch offers + plan status + Teacher plan, compare models with two mock outputs and the
+rating saved, the per-kind model setting; `SHOTS=<dir>` saves `pay-*.png`), `tests/api-plans.test.mjs` (`trial_limit` 402, finish
+key, model accepted only from the super admin, mini deployment + fallback, sales form API: session / Turnstile / e-mail / errors)
+and `tests/sql/plans.sql` (get_plans, trial counting with the user token, in-flight and failed classes, follow-ups, active plans,
+Docente plan, model override, update_plans validation, sales_leads and model_comparisons privacy + rate limits, funnel; also after
+an upgrade from git a4f00d3 with data). `tests/e2e-csp.cjs` opens the plans pop-up and /planes under the real headers.
 
 `tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage, insights, students & calendar privacy, and the upgrade path from the previous `001`) on a local
 Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql`, `class_insights.sql`,
