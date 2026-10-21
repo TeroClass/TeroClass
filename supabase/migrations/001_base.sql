@@ -197,6 +197,9 @@ create table if not exists public.ai_events (
 create index if not exists ai_events_created_idx on public.ai_events (created_at);
 create index if not exists ai_events_inst_idx on public.ai_events (inst_id, created_at);
 create index if not exists ai_events_user_idx on public.ai_events (user_id, created_at);
+-- 2026-10-21: clave al azar de cada pedido (solo la conoce el servidor; ver finish_ai_event)
+alter table public.ai_events add column if not exists finish_key text;
+create index if not exists ai_events_trial_idx on public.ai_events (user_id, kind, created_at);
 
 -- ========== PLAN Y CONSUMO: tablas ==========
 -- Cada institución madre (parent_id null) es una "cuenta": compra ASIENTOS y recibe una
@@ -1261,9 +1264,24 @@ revoke all on function public.ai_daily_token_limit(uuid) from public, anon, auth
 -- madre); si no alcanza, no se cuenta nada y vuelve {allowed:false, reason:'tokens'|'institution'}. Llamarla a mano solo
 -- gasta el cupo propio (el de la cuenta, como mucho hasta el tope de la persona).
 -- Las versiones viejas (sin argumentos / solo p_meta) se reemplazan: llamarla como antes sigue funcionando.
+-- 2026-10-21 (planes y prueba gratis):
+--   · PRUEBA GRATIS en el servidor (funciona sin la clave del servidor): quien está en prueba (tc_is_trial: sin institución,
+--     o con una institución sin plan activo, y sin plan Docente propio) tiene N clases en total (platform_settings.plans →
+--     trial.generations_lifetime, 5). Cuentan los pedidos "generate" terminados bien (ai_events.ok) y los que están en curso
+--     (ok null, < 15 min: dos pedidos a la vez no pasan el límite; un candado por persona los ordena). Al llegar al límite →
+--     {allowed:false, reason:'trial_limit', trial_used, trial_limit} (api/generate.js → 402 code 'trial_limit').
+--     Los pedidos de seguimiento (continuar, verificar, material del alumno) van siempre detrás de una clase contada: se
+--     permiten dentro de las 2 h siguientes y como mucho 6 por clase (si no, 'trial_limit'), así "continuar" no sirve para
+--     generar clases sin contarlas. Los resúmenes de playbook (admins) no cuentan.
+--   · MODELO: p_model ('default' | 'mini') lo puede pedir SOLO el súper admin (comparar modelos); a cualquier otra persona
+--     se le responde {allowed:false, reason:'model'} sin gastar nada. Sin p_model vale platform_settings.ai_model_default
+--     por tipo (main = generate/continue, student, summary = playbook, verify). Vuelve en 'model'.
+--   · 'finish_key': clave al azar del pedido anotado; finish_ai_event la pide para marcarlo como fallido (así nadie puede
+--     "descontar" una clase de prueba marcando su propio pedido como fallido mientras la IA escribe).
 drop function if exists public.consume_ai_quota();
 drop function if exists public.consume_ai_quota(jsonb);
-create or replace function public.consume_ai_quota(p_meta jsonb default null, p_est_tokens integer default null) returns json
+drop function if exists public.consume_ai_quota(jsonb, integer);
+create or replace function public.consume_ai_quota(p_meta jsonb default null, p_est_tokens integer default null, p_model text default null) returns json
 language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare
@@ -1277,12 +1295,45 @@ declare
   v_est   bigint := least(greatest(coalesce(p_est_tokens, 0), 0), 25000);
   v_tlim  bigint;
   v_ilim  bigint;
+  v_kind  text;
+  v_model text;
+  v_key   text;
+  v_trial_lim int; v_trial_cnt int; v_trial_done int; v_last_gen timestamptz;
   m       jsonb;
 begin
   if v_uid is null then raise exception 'No autorizado'; end if;
   v_limit := public.ai_daily_limit(v_uid);
   if v_limit <= 0 then -- estudiantes: nunca generan (ni se anota nada en ai_events)
     return json_build_object('allowed', false, 'used', 0, 'limit', 0);
+  end if;
+  v_kind := case when p_meta is null then 'generate' else public.ai_meta_clean(p_meta)->>'kind' end;
+  -- modelo: el pedido explícito solo del súper admin; si no, el ajuste de la plataforma por tipo de pedido
+  if p_model is not null then
+    if not public.is_superadmin() or p_model not in ('default', 'mini') then
+      return json_build_object('allowed', false, 'reason', 'model', 'used', 0, 'limit', v_limit);
+    end if;
+    v_model := p_model;
+  else
+    select s.ai_model_default ->> (case v_kind when 'student' then 'student' when 'verify' then 'verify'
+                                               when 'playbook' then 'summary' else 'main' end)
+      into v_model from public.platform_settings s where s.id;
+    if v_model is null or v_model not in ('default', 'mini') then v_model := 'default'; end if;
+  end if;
+  -- prueba gratis (5 clases en total): se controla acá, con el token del usuario
+  if public.tc_is_trial(v_uid) then
+    perform pg_advisory_xact_lock(hashtextextended('tc_trial:' || v_uid::text, 0)); -- un pedido a la vez por persona
+    v_trial_lim := public.tc_trial_limit();
+    select count(*) filter (where e.ok or (e.ok is null and e.created_at > now() - interval '15 minutes')),
+           count(*) filter (where e.ok), max(e.created_at) filter (where e.ok is distinct from false)
+      into v_trial_cnt, v_trial_done, v_last_gen
+      from public.ai_events e where e.user_id = v_uid and e.kind = 'generate';
+    if (v_kind = 'generate' and v_trial_cnt >= v_trial_lim)
+       or (v_kind in ('continue', 'verify', 'student') and (
+             v_last_gen is null or v_last_gen < now() - interval '2 hours'
+             or (select count(*) from public.ai_events e where e.user_id = v_uid and e.kind <> 'generate' and e.created_at >= v_last_gen) >= 6)) then
+      return json_build_object('allowed', false, 'reason', 'trial_limit', 'trial_used', v_trial_done, 'trial_limit', v_trial_lim,
+                               'used', coalesce((select count from public.ai_usage where user_id = v_uid and day = v_day), 0), 'limit', v_limit);
+    end if;
   end if;
   select institution_id into v_inst from public.profiles where id = v_uid;
   v_root := case when v_inst is not null then public.billing_root(v_inst) end;
@@ -1314,20 +1365,21 @@ begin
     return json_build_object('allowed', false, 'reason', 'requests', 'used', v_used, 'limit', v_limit);
   end if;
   if p_meta is null then
-    return json_build_object('allowed', true, 'used', v_used, 'limit', v_limit);
+    return json_build_object('allowed', true, 'used', v_used, 'limit', v_limit, 'model', v_model);
   end if;
   begin
     m := public.ai_meta_clean(p_meta);
-    insert into public.ai_events (user_id, inst_id, root_id, kind, subjects, language, age_band, level, bars)
+    v_key := replace(gen_random_uuid()::text, '-', '');
+    insert into public.ai_events (user_id, inst_id, root_id, kind, subjects, language, age_band, level, bars, finish_key)
     values (v_uid, v_inst, v_root, m->>'kind',
-            array(select jsonb_array_elements_text(m->'subjects')), m->>'language', m->>'age_band', m->>'level', m->'bars')
+            array(select jsonb_array_elements_text(m->'subjects')), m->>'language', m->>'age_band', m->>'level', m->'bars', v_key)
     returning id into v_event;
-  exception when others then v_event := null;
+  exception when others then v_event := null; v_key := null;
   end;
-  return json_build_object('allowed', true, 'used', v_used, 'limit', v_limit, 'event', v_event);
+  return json_build_object('allowed', true, 'used', v_used, 'limit', v_limit, 'event', v_event, 'finish_key', v_key, 'model', v_model);
 end $$;
-revoke all on function public.consume_ai_quota(jsonb, integer) from public, anon;
-grant execute on function public.consume_ai_quota(jsonb, integer) to authenticated;
+revoke all on function public.consume_ai_quota(jsonb, integer, text) from public, anon;
+grant execute on function public.consume_ai_quota(jsonb, integer, text) to authenticated;
 
 -- Súper admin: topes diarios de IA (tokens estimados) por cuenta y por docente (TC-01)
 create or replace function public.update_ai_guardrails(p_institution bigint, p_user bigint) returns json
@@ -1347,20 +1399,24 @@ revoke all on function public.update_ai_guardrails(bigint, bigint) from public, 
 grant execute on function public.update_ai_guardrails(bigint, bigint) to authenticated;
 
 -- api/generate.js (con el token del usuario) marca cómo terminó su pedido: una sola vez, solo los propios,
--- dentro de los 15 minutos. Devuelve true si lo marcó.
-create or replace function public.finish_ai_event(p_event bigint, p_ok boolean) returns boolean
+-- dentro de los 15 minutos. Devuelve true si lo marcó. 2026-10-21: marcarlo como FALLIDO necesita p_key (la finish_key
+-- que devolvió consume_ai_quota al servidor; la persona no la ve), para que nadie se "devuelva" una clase de prueba.
+-- Marcarlo como terminado bien no la necesita (solo puede sumar).
+drop function if exists public.finish_ai_event(bigint, boolean);
+create or replace function public.finish_ai_event(p_event bigint, p_ok boolean, p_key text default null) returns boolean
 language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_n integer;
 begin
   if auth.uid() is null then raise exception 'No autorizado'; end if;
   update public.ai_events set ok = coalesce(p_ok, false), finished_at = now()
-   where id = p_event and user_id = auth.uid() and ok is null and created_at > now() - interval '15 minutes';
+   where id = p_event and user_id = auth.uid() and ok is null and created_at > now() - interval '15 minutes'
+     and (coalesce(p_ok, false) or finish_key is null or finish_key = p_key);
   get diagnostics v_n = row_count;
   return v_n > 0;
 end $$;
-revoke all on function public.finish_ai_event(bigint, boolean) from public, anon;
-grant execute on function public.finish_ai_event(bigint, boolean) to authenticated;
+revoke all on function public.finish_ai_event(bigint, boolean, text) from public, anon;
+grant execute on function public.finish_ai_event(bigint, boolean, text) to authenticated;
 
 -- Consultar el uso de hoy sin gastar (para mostrar en la app)
 create or replace function public.get_ai_quota() returns json
@@ -1484,7 +1540,11 @@ begin
       'is_admin', true, 'can_buy', false, 'month', v_month, 'resets_on', (v_month + interval '1 month')::date);
   end if;
   if p.institution_id is null then
-    v_allow := s.personal_monthly_tokens;
+    -- 2026-10-21: con un plan Docente activo, sus clases por mes (25 × 25.000 tokens); si no, la asignación gratuita
+    v_allow := case when exists (select 1 from public.individual_plans x where x.user_id = p_user and x.plan_status in ('active','pilot'))
+                    then coalesce((select (x->'limits'->>'generations_per_month')::bigint from jsonb_array_elements(coalesce(s.plans->'plans', '[]'::jsonb)) x
+                                    where x->>'id' = 'docente'), 25) * coalesce((s.plans->>'credit_tokens')::bigint, 25000)
+                    else s.personal_monthly_tokens end;
     select coalesce(sum(used), 0) into v_used from public.token_usage_monthly
      where scope = 'personal' and account_id = p_user and month = v_month;
   else
@@ -1619,9 +1679,17 @@ begin
     'monthly_tokens', v_allow, 'used_month', v_used, 'extra_used_month', v_xused,
     'extra_balance', v_extra, 'remaining', greatest(v_allow - v_used, 0) + v_extra,
     'pack_tokens', s.pack_tokens, 'pack_price', s.pack_price, 'currency', s.currency,
+    -- 2026-10-21: "clases" (1 clase = credit_tokens) y los packs de clases de los planes; estado del plan de la cuenta
+    'credit_tokens', coalesce((s.plans->>'credit_tokens')::int, 25000),
+    'packs', coalesce((select json_agg(json_build_object('id', x->>'id', 'credits', (x->>'credits')::int, 'usd', (x->>'usd')::numeric,
+                                                         'name_es', x->>'name_es', 'name_en', x->>'name_en') order by (x->>'credits')::int)
+                         from jsonb_array_elements(coalesce(s.plans->'addons', '[]'::jsonb)) x where x->>'kind' = 'classes'), '[]'::json),
+    'plan_status', (select a.plan_status from public.billing_accounts a where a.root_id = v_root),
+    'plan_id', (select a.plan_id from public.billing_accounts a where a.root_id = v_root),
     'can_request', public.my_role() = 'org_admin' and public.my_institution() = v_root,
     'full_detail', coalesce(array_length(v_scope, 1), 0) > 0 and v_root = any(v_scope),
-    'pending', (select json_build_object('id', r.id, 'pack_tokens', r.pack_tokens, 'price', r.price, 'currency', r.currency, 'created_at', r.created_at)
+    'pending', (select json_build_object('id', r.id, 'pack_tokens', r.pack_tokens, 'price', r.price, 'currency', r.currency, 'created_at', r.created_at,
+                                         'pack_id', r.pack_id, 'pack_credits', r.pack_credits)
                   from public.token_purchase_requests r where r.root_id = v_root and r.status = 'pending' limit 1),
     'by_unit', coalesce((select json_agg(x order by x.used desc) from (
         select l.inst_id as id, i.name, sum(l.total_tokens)::bigint as used, count(*)::int as requests
@@ -1640,7 +1708,7 @@ begin
          group by 1, 2, 3, 4
          order by sum(l.total_tokens) desc limit 10) x), '[]'::json),
     'requests', coalesce((select json_agg(x order by x.created_at desc) from (
-        select r.id, r.pack_tokens, r.price, r.currency, r.status, r.note, r.created_at, r.decided_at,
+        select r.id, r.pack_tokens, r.price, r.currency, r.status, r.note, r.created_at, r.decided_at, r.pack_id, r.pack_credits,
                case when m.masked then '' else coalesce(nullif(p.name, ''), p.email, '') end as requested_by_name, m.masked
           from public.token_purchase_requests r left join public.profiles p on p.id = r.requested_by
           cross join lateral (select coalesce(p.role = 'superadmin', false) and not public.is_superadmin() as masked) m
@@ -1649,12 +1717,16 @@ end $$;
 revoke all on function public.get_billing_summary(uuid) from public, anon;
 grant execute on function public.get_billing_summary(uuid) to authenticated;
 
--- Pedir un paquete de tokens (queda pendiente hasta que el súper admin confirme el pago).
+-- Pedir un pack (queda pendiente hasta que el súper admin confirme el pago).
 -- Solo los admins de la institución madre. Una solicitud pendiente a la vez.
-create or replace function public.request_token_pack() returns json
+-- 2026-10-21: los packs son de "clases" (platform_settings.plans → addons de tipo 'classes': Pack 50 clases USD 25,
+-- Pack 200 clases USD 85; 1 clase = 25.000 tokens). Sin p_pack: el pack más chico. El viejo pack de tokens (10M por
+-- USD 11,99, a pérdida) ya no se ofrece; sus solicitudes y saldos siguen igual.
+drop function if exists public.request_token_pack();
+create or replace function public.request_token_pack(p_pack text default null) returns json
 language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
-declare v_root uuid := public.my_institution(); s public.platform_settings%rowtype; r public.token_purchase_requests%rowtype;
+declare v_root uuid := public.my_institution(); s public.platform_settings%rowtype; r public.token_purchase_requests%rowtype; a jsonb; v_credit bigint;
 begin
   if public.my_role() is distinct from 'org_admin' or v_root is null
      or exists (select 1 from public.institutions where id = v_root and parent_id is not null) then
@@ -1665,13 +1737,20 @@ begin
     raise exception 'Ya hay una solicitud de compra pendiente para esta institución';
   end if;
   select * into s from public.platform_settings where id;
-  insert into public.token_purchase_requests (root_id, root_name, requested_by, pack_tokens, price, currency)
-  values (v_root, (select name from public.institutions where id = v_root), auth.uid(), s.pack_tokens, s.pack_price, s.currency)
+  select x into a from jsonb_array_elements(coalesce(s.plans->'addons', '[]'::jsonb)) x
+   where x->>'kind' = 'classes' and (p_pack is null or x->>'id' = p_pack)
+   order by (x->>'credits')::int limit 1;
+  if a is null then raise exception 'Ese pack no existe'; end if;
+  v_credit := coalesce((s.plans->>'credit_tokens')::bigint, 25000);
+  insert into public.token_purchase_requests (root_id, root_name, requested_by, pack_tokens, price, currency, pack_id, pack_credits)
+  values (v_root, (select name from public.institutions where id = v_root), auth.uid(), (a->>'credits')::bigint * v_credit,
+          (a->>'usd')::numeric, 'USD', a->>'id', (a->>'credits')::int)
   returning * into r;
-  return json_build_object('id', r.id, 'pack_tokens', r.pack_tokens, 'price', r.price, 'currency', r.currency, 'status', r.status, 'created_at', r.created_at);
+  return json_build_object('id', r.id, 'pack_tokens', r.pack_tokens, 'price', r.price, 'currency', r.currency, 'status', r.status, 'created_at', r.created_at,
+                           'pack_id', r.pack_id, 'pack_credits', r.pack_credits);
 end $$;
-revoke all on function public.request_token_pack() from public, anon;
-grant execute on function public.request_token_pack() to authenticated;
+revoke all on function public.request_token_pack(text) from public, anon;
+grant execute on function public.request_token_pack(text) to authenticated;
 
 -- Solicitudes de compra: súper admin todas (o por estado); admins, las de su cuenta.
 create or replace function public.list_purchase_requests(p_status text default null) returns json
@@ -1686,7 +1765,7 @@ begin
   end if;
   return coalesce((select json_agg(x order by (x.status = 'pending') desc, x.created_at desc) from (
     select r.id, r.root_id, coalesce(i.name, r.root_name) as root_name, i.slug as root_slug, r.pack_tokens, r.price, r.currency,
-           r.status, r.note, r.created_at, r.decided_at,
+           r.status, r.note, r.created_at, r.decided_at, r.pack_id, r.pack_credits,
            case when m.masked then '' else coalesce(nullif(p.name, ''), p.email, '') end as requested_by_name,
            case when m.masked then null else p.email end as requested_by_email, m.masked
       from public.token_purchase_requests r
@@ -1783,14 +1862,17 @@ begin
     'settings', json_build_object('pack_tokens', s.pack_tokens, 'pack_price', s.pack_price, 'currency', s.currency,
       'personal_monthly_tokens', s.personal_monthly_tokens, 'default_seats', s.default_seats, 'default_monthly_tokens', s.default_monthly_tokens,
       'ai_price_input', s.ai_price_input, 'ai_price_output', s.ai_price_output,
-      'ai_daily_tokens_institution', s.ai_daily_tokens_institution, 'ai_daily_tokens_user', s.ai_daily_tokens_user),
+      'ai_daily_tokens_institution', s.ai_daily_tokens_institution, 'ai_daily_tokens_user', s.ai_daily_tokens_user,
+      'ai_price_input_mini', s.ai_price_input_mini, 'ai_price_output_mini', s.ai_price_output_mini, 'ai_model_default', s.ai_model_default,
+      'plans', s.plans),
     'accounts', coalesce((select json_agg(x order by x.name) from (
       select i.id, i.name, i.slug,
              coalesce(a.seats, s.default_seats) as seats, public.seats_used(i.id) as seats_used,
              coalesce(a.monthly_tokens, s.default_monthly_tokens) as monthly_tokens,
              coalesce(a.extra_tokens_balance, 0) as extra_balance,
              coalesce(u.used, 0) as used_month, coalesce(u.extra_used, 0) as extra_used_month,
-             exists (select 1 from public.token_purchase_requests r where r.root_id = i.id and r.status = 'pending') as pending
+             exists (select 1 from public.token_purchase_requests r where r.root_id = i.id and r.status = 'pending') as pending,
+             coalesce(a.plan_status, 'none') as plan_status, a.plan_id, a.plan_activated_at
         from public.institutions i
         left join public.billing_accounts a on a.root_id = i.id
         left join public.token_usage_monthly u on u.scope = 'institution' and u.account_id = i.id and u.month = v_month
@@ -5474,6 +5556,11 @@ begin
                   from public.profiles p where p.id = auth.uid()),
     'plannings', coalesce((select json_agg(json_build_object('title', pl.title, 'created_at', pl.created_at, 'updated_at', pl.updated_at, 'data', pl.data)
                                            order by pl.created_at) from public.plannings pl where pl.owner_id = auth.uid()), '[]'::json),
+    'sales_requests', coalesce((select json_agg(json_build_object('created_at', l.created_at, 'name', l.name, 'institution', l.institution, 'role', l.role,
+                                                                  'country', l.country, 'teachers_count', l.teachers_count, 'contact_channel', l.contact_channel,
+                                                                  'whatsapp', l.whatsapp, 'email', l.email, 'preferred_plan', l.preferred_plan,
+                                                                  'message', l.message) order by l.created_at)
+                                  from public.sales_leads l where l.user_id = auth.uid()), '[]'::json),
     'enrollments', coalesce((select json_agg(json_build_object('institution', i.name, 'name', e.name, 'email', e.email, 'created_at', e.created_at))
                                from public.student_enrollments e join public.institutions i on i.id = e.institution_id
                               where e.user_id = auth.uid()), '[]'::json),
@@ -5513,6 +5600,786 @@ begin
 end $$;
 revoke all on function public.account_delete_check() from public, anon;
 grant execute on function public.account_delete_check() to authenticated;
+
+-- ══════════ PLANES, PRUEBA GRATIS, VENTAS Y COMPARACIÓN DE MODELOS (2026-10-21) ══════════
+-- Propuesta de pricing v1 (plans.json): Prueba gratis (5 clases en total), Docente (USD 12/mes o 99/año), Institución
+-- (por docente/mes en tramos), Institución+ (a medida), packs de "clases" (1 clase = 25.000 tokens) y ofertas de lanzamiento.
+-- Todavía no hay cobro online: un plan "activo" lo pone el súper admin a mano (Plataforma).
+--   · platform_settings.plans: planes, límites, packs y ofertas (los edita el súper admin con update_plans; get_plans es
+--     público, para la página /planes).
+--   · billing_accounts.plan_status: 'none' (sin plan → sus docentes y admins están en prueba) | 'pilot' | 'active' |
+--     'founder' | 'enterprise' (activos) | 'cancelled'. La PRIMERA vez que corre este script, las cuentas que ya existían
+--     quedan en 'pilot' (todo sigue funcionando como antes); las nuevas empiezan en 'none'.
+--   · individual_plans: plan Docente de una persona sin institución (lo activa el súper admin).
+--   · Prueba gratis: consume_ai_quota (arriba) bloquea la clase N+1 con el token del usuario; trial_state guarda qué
+--     avisos ya vio cada persona (my_trial_status / trial_mark). Estudiantes y súper admin: nunca.
+--   · sales_leads: "Hablar con ventas" (sin acceso directo; insertar con submit_sales_lead, con límite por persona / IP;
+--     leer y actualizar solo el súper admin).
+--   · model_comparisons: comparaciones ciegas gpt-4o vs mini que hace el súper admin (solo él las ve).
+--   · platform_funnel: embudo de conversión para Métricas (solo totales).
+
+-- ── Ajustes nuevos ──
+alter table public.platform_settings add column if not exists plans jsonb not null default '{}'::jsonb;
+-- Precio por millón de tokens (USD) del modelo "mini" (gpt-4.1-mini, referencia de la propuesta: POR VERIFICAR en Azure).
+-- El modelo por defecto usa ai_price_input / ai_price_output (GPT-4o 2,50 / 10,00).
+alter table public.platform_settings add column if not exists ai_price_input_mini numeric(10,4) not null default 0.40
+  check (ai_price_input_mini >= 0 and ai_price_input_mini <= 1000);
+alter table public.platform_settings add column if not exists ai_price_output_mini numeric(10,4) not null default 1.60
+  check (ai_price_output_mini >= 0 and ai_price_output_mini <= 1000);
+-- Modelo por tipo de pedido: main (clase + continuación), student (material del alumno), summary (playbook), verify (chequeo)
+alter table public.platform_settings add column if not exists ai_model_default jsonb not null
+  default '{"main":"default","student":"default","summary":"default","verify":"default"}'::jsonb;
+
+-- Planes iniciales (plans.json 2026-10-21, sin los textos: esos viven en la app en español e inglés). Solo si está vacío:
+-- volver a correr el script nunca pisa lo que editó el súper admin.
+update public.platform_settings set plans = $plans$
+{"version":"2026-10-21","credit_tokens":25000,"fx_usd_to_eur":0.891,
+ "trial":{"generations_lifetime":5,"paywall_at":2,"reminder_at":4,"pdf_watermark":true,"video_trial_minutes":40,"video_max_participants":4},
+ "plans":[
+  {"id":"trial","name_es":"Prueba gratis","name_en":"Free trial","self_serve":true,
+   "prices":{"usd":{"monthly":0,"annual":0},"eur":{"monthly":0,"annual":0}},
+   "limits":{"generations_lifetime":5,"video_trial_minutes_lifetime":40,"video_max_participants":4,"methodologies_max":1,"daily_request_limit":15},
+   "features":{"pdf_watermark":true}},
+  {"id":"docente","name_es":"Docente","name_en":"Teacher","self_serve":true,
+   "prices":{"usd":{"monthly":12,"annual":99},"eur":{"monthly":11.99,"annual":99,"vat_included":true}},
+   "limits":{"generations_per_month":25,"video_hours_per_month":1,"video_max_participants":10,"methodologies_max":5,"daily_request_limit":60},
+   "features":{"pdf_watermark":false}},
+  {"id":"institucion","name_es":"Institución","name_en":"Institution","self_serve":false,"pricing_model":"per_seat_per_month",
+   "tiers":[{"seats_from":3,"seats_to":9,"usd":{"monthly":17,"annual_per_month":14},"eur":{"monthly":17,"annual_per_month":14}},
+            {"seats_from":10,"seats_to":29,"usd":{"monthly":14.5,"annual_per_month":12},"eur":{"monthly":14.5,"annual_per_month":12}},
+            {"seats_from":30,"seats_to":99,"usd":{"monthly":12,"annual_per_month":10},"eur":{"monthly":12,"annual_per_month":10}}],
+   "eur_vat_included":false,
+   "limits":{"generations_per_seat_month":30,"video_hours_per_seat_month":5,"insights_classes_per_seat_month":1,"video_max_participants":30,"seats_min":3,"seats_max":99},
+   "features":{"pdf_watermark":false}},
+  {"id":"institucion_plus","name_es":"Institución+","name_en":"Institution+","self_serve":false,"pricing_model":"custom",
+   "prices":{"usd":{"reference_per_seat_month_annual":9},"eur":{"reference_per_seat_month_annual":9}},
+   "limits":{"seats_min":100,"generations_per_seat_month":40,"video_hours_per_seat_month":8},
+   "features":{"pdf_watermark":false}}],
+ "addons":[
+  {"id":"pack_clases_50","kind":"classes","credits":50,"name_es":"Pack 50 clases","name_en":"50-class pack","usd":25,"eur":22,"expires_months":12},
+  {"id":"pack_clases_200","kind":"classes","credits":200,"name_es":"Pack 200 clases","name_en":"200-class pack","usd":85,"eur":76,"expires_months":12},
+  {"id":"pack_analizadas_10","kind":"analyzed","credits":10,"name_es":"Pack 10 clases analizadas","name_en":"10 analyzed classes","usd":25,"eur":22,"expires_months":12},
+  {"id":"pack_analizadas_50","kind":"analyzed","credits":50,"name_es":"Pack 50 clases analizadas","name_en":"50 analyzed classes","usd":110,"eur":98,"expires_months":12},
+  {"id":"seguimiento_ia_alumno","kind":"tracking","credits":8,"name_es":"Seguimiento IA por alumno","name_en":"AI tracking per student","usd":2,"eur":1.8,"billing":"per_active_student_per_month"},
+  {"id":"pack_aula_20h","kind":"video","credits":20,"name_es":"Pack 20 horas de aula","name_en":"20 classroom-hour pack","usd":49,"eur":44,"expires_months":12}],
+ "launch_offers":[
+  {"id":"founder","enabled":false,"name_es":"Instituciones Fundadoras","name_en":"Founding Institutions","max_accounts":10,"discount_pct_year1":30,"price_lock_months":24,"onboarding_free":true},
+  {"id":"pilot_60d","enabled":false,"name_es":"Piloto 60 días","name_en":"60-day pilot","price_usd":150,"max_seats":10,"duration_days":60,"credit_to_annual_pct":100},
+  {"id":"pilot_anii","enabled":false,"name_es":"Piloto ANII 6 meses","name_en":"6-month ANII pilot","price_usd_min":4000,"price_usd_max":8000,"max_seats":15,"analyzed_classes_included":30,"duration_months":6},
+  {"id":"trial_email_coupon","enabled":false,"name_es":"Cupón TERO20","name_en":"TERO20 coupon","code":"TERO20","discount_pct_year1":20,"valid_days":7}]}
+$plans$::jsonb
+ where id and (plans is null or plans = '{}'::jsonb);
+
+-- Packs de "clases" (2026-10-21): la solicitud guarda qué pack se pidió; las viejas (por tokens) quedan con pack_id null.
+alter table public.token_purchase_requests add column if not exists pack_id text;
+alter table public.token_purchase_requests add column if not exists pack_credits integer;
+grant select (pack_id, pack_credits) on public.token_purchase_requests to authenticated;
+
+-- ── Estado del plan de cada cuenta (institución madre) ──
+do $$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'billing_accounts' and column_name = 'plan_status') then
+    alter table public.billing_accounts add column plan_status text not null default 'none';
+    -- Primera vez: las cuentas que ya existían siguen como hasta hoy ("piloto"; el súper admin las cambia en Plataforma)
+    insert into public.billing_accounts (root_id, seats, monthly_tokens)
+    select i.id, s.default_seats, s.default_monthly_tokens
+      from public.institutions i cross join public.platform_settings s
+     where i.parent_id is null and s.id
+    on conflict (root_id) do nothing;
+    update public.billing_accounts set plan_status = 'pilot';
+  end if;
+end $$;
+alter table public.billing_accounts drop constraint if exists billing_accounts_plan_status_check;
+alter table public.billing_accounts add constraint billing_accounts_plan_status_check
+  check (plan_status in ('none','pilot','active','founder','enterprise','cancelled'));
+alter table public.billing_accounts add column if not exists plan_id text;
+alter table public.billing_accounts drop constraint if exists billing_accounts_plan_id_check;
+alter table public.billing_accounts add constraint billing_accounts_plan_id_check
+  check (plan_id is null or plan_id in ('institucion','institucion_plus'));
+alter table public.billing_accounts add column if not exists plan_activated_at timestamptz;  -- última vez que pasó a un plan activo
+alter table public.billing_accounts add column if not exists plan_changed_at timestamptz;
+
+-- Plan Docente de una persona (sin institución). Sin acceso directo: set_individual_plan / list_individual_plans.
+create table if not exists public.individual_plans (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  plan_id text not null default 'docente' check (plan_id in ('docente')),
+  plan_status text not null default 'active' check (plan_status in ('active','pilot','cancelled')),
+  note text not null default '' check (length(note) <= 500),
+  activated_at timestamptz,
+  updated_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table public.individual_plans enable row level security;
+revoke all on public.individual_plans from anon, authenticated;
+
+-- Avisos de la prueba que ya vio cada persona (una fila por persona; sin acceso directo)
+create table if not exists public.trial_state (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  paywall_shown_at timestamptz,   -- pop-up de la 2ª clase
+  reminder_shown_at timestamptz,  -- recordatorio de la 4ª
+  limit_shown_at timestamptz,     -- muro al intentar la 6ª
+  dismissed_at timestamptz,
+  dismiss_count integer not null default 0,
+  sales_clicked_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+alter table public.trial_state enable row level security;
+revoke all on public.trial_state from anon, authenticated;
+
+-- ── Funciones internas de la prueba ──
+create or replace function public.tc_plan_active(p_status text) returns boolean
+language sql immutable set search_path = public, pg_temp as
+$$ select coalesce(p_status in ('active','pilot','founder','enterprise'), false) $$;
+
+create or replace function public.tc_trial_limit() returns integer
+language sql stable security definer set search_path = public, pg_temp as
+$$ select coalesce((select least(greatest((s.plans #>> '{trial,generations_lifetime}')::int, 0), 1000)
+                      from public.platform_settings s where s.id and jsonb_typeof(s.plans #> '{trial,generations_lifetime}') = 'number'), 5) $$;
+
+-- ¿Está en prueba? Docentes y admins (nunca estudiantes ni el súper admin) sin plan Docente propio activo y sin
+-- institución, o con una institución cuya cuenta no tiene un plan activo.
+create or replace function public.tc_is_trial(p_uid uuid) returns boolean
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare p public.profiles%rowtype; v_st text;
+begin
+  select * into p from public.profiles where id = p_uid;
+  if p.id is null or p.role not in ('teacher','org_admin') then return false; end if;
+  if exists (select 1 from public.individual_plans x where x.user_id = p_uid and x.plan_status in ('active','pilot')) then return false; end if;
+  if p.institution_id is null then return true; end if;
+  select a.plan_status into v_st from public.billing_accounts a where a.root_id = public.billing_root(p.institution_id);
+  return not public.tc_plan_active(v_st);
+end $$;
+revoke all on function public.tc_plan_active(text) from public, anon, authenticated;
+revoke all on function public.tc_trial_limit() from public, anon, authenticated;
+revoke all on function public.tc_is_trial(uuid) from public, anon, authenticated;
+
+-- Clases completas generadas por una persona (en toda su vida; las fallidas no cuentan)
+create or replace function public.tc_trial_used(p_uid uuid) returns integer
+language sql stable security definer set search_path = public, pg_temp as
+$$ select count(*)::int from public.ai_events e where e.user_id = p_uid and e.kind = 'generate' and e.ok $$;
+revoke all on function public.tc_trial_used(uuid) from public, anon, authenticated;
+
+-- ── Para la app: mi estado de prueba ──
+-- {trial, used, limit, remaining, paywall_at, reminder_at, watermark, in_institution, is_admin, plan_status,
+--  lead_sent, paywall_shown_at, reminder_shown_at, limit_shown_at}. Estudiantes y súper admin: {trial:false}.
+create or replace function public.my_trial_status() returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare
+  v_uid uuid := auth.uid(); p public.profiles%rowtype; t public.trial_state%rowtype; s public.platform_settings%rowtype;
+  v_lim int; v_used int; v_st text;
+begin
+  if v_uid is null then raise exception 'No autorizado'; end if;
+  select * into p from public.profiles where id = v_uid;
+  if p.id is null or p.role not in ('teacher','org_admin') or not public.tc_is_trial(v_uid) then
+    return json_build_object('trial', false);
+  end if;
+  select * into s from public.platform_settings where id;
+  select * into t from public.trial_state where user_id = v_uid;
+  if p.institution_id is not null then
+    select a.plan_status into v_st from public.billing_accounts a where a.root_id = public.billing_root(p.institution_id);
+  end if;
+  v_lim := public.tc_trial_limit(); v_used := public.tc_trial_used(v_uid);
+  return json_build_object(
+    'trial', true, 'used', v_used, 'limit', v_lim, 'remaining', greatest(v_lim - v_used, 0),
+    'paywall_at', coalesce((s.plans #>> '{trial,paywall_at}')::int, 2), 'reminder_at', coalesce((s.plans #>> '{trial,reminder_at}')::int, 4),
+    'watermark', coalesce((s.plans #>> '{trial,pdf_watermark}')::boolean, true),
+    'in_institution', p.institution_id is not null, 'is_admin', p.role = 'org_admin', 'plan_status', v_st,
+    'lead_sent', exists (select 1 from public.sales_leads l where l.user_id = v_uid),
+    'paywall_shown_at', t.paywall_shown_at, 'reminder_shown_at', t.reminder_shown_at, 'limit_shown_at', t.limit_shown_at,
+    'dismissed_at', t.dismissed_at);
+end $$;
+
+-- La app anota qué aviso mostró (una vez cada uno; 'dismiss' suma) — para no repetirlo y para el embudo de Métricas.
+create or replace function public.trial_mark(p_what text) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_uid uuid := auth.uid();
+begin
+  if v_uid is null then raise exception 'No autorizado'; end if;
+  if p_what is null or p_what not in ('paywall','reminder','limit','dismiss','sales') then raise exception 'Aviso inválido'; end if;
+  if not public.tc_is_trial(v_uid) then return json_build_object('trial', false); end if;
+  insert into public.trial_state as t (user_id) values (v_uid) on conflict (user_id) do nothing;
+  update public.trial_state set
+    paywall_shown_at  = case when p_what = 'paywall'  then coalesce(paywall_shown_at, now())  else paywall_shown_at end,
+    reminder_shown_at = case when p_what = 'reminder' then coalesce(reminder_shown_at, now()) else reminder_shown_at end,
+    limit_shown_at    = case when p_what = 'limit'    then coalesce(limit_shown_at, now())    else limit_shown_at end,
+    sales_clicked_at  = case when p_what = 'sales'    then coalesce(sales_clicked_at, now())  else sales_clicked_at end,
+    dismissed_at      = case when p_what = 'dismiss'  then now() else dismissed_at end,
+    dismiss_count     = dismiss_count + case when p_what = 'dismiss' then 1 else 0 end,
+    updated_at = now()
+   where user_id = v_uid;
+  return public.my_trial_status();
+end $$;
+
+-- ── Planes: lectura pública (página /planes, también sin sesión) ──
+-- Las ofertas de lanzamiento salen solo si están activadas. 'founder_taken' = cuentas que ya tienen el plan Fundadoras
+-- (dato real: la página puede decir cuántos lugares quedan, nunca una escasez inventada).
+create or replace function public.get_plans() returns json
+language sql stable security definer set search_path = public, pg_temp as
+$$ select (s.plans - 'launch_offers'
+           || jsonb_build_object('launch_offers', coalesce((select jsonb_agg(o) from jsonb_array_elements(coalesce(s.plans->'launch_offers', '[]'::jsonb)) o
+                                                             where (o->>'enabled')::boolean), '[]'::jsonb),
+                                 'founder_taken', (select count(*) from public.billing_accounts a where a.plan_status = 'founder')))::json
+     from public.platform_settings s where s.id $$;
+revoke all on function public.get_plans() from public;
+grant execute on function public.get_plans() to anon, authenticated;
+
+-- Número de un objeto de ajustes (validado). Uso interno de update_plans.
+create or replace function public.tc_plan_num(p jsonb, p_key text, p_min numeric, p_max numeric, p_int boolean default false) returns numeric
+language plpgsql immutable set search_path = public, pg_temp as
+$$
+declare v numeric;
+begin
+  if p is null or not (p ? p_key) then return null; end if;
+  if jsonb_typeof(p->p_key) <> 'number' then raise exception 'Valor inválido en los planes: %', p_key; end if;
+  v := (p->>p_key)::numeric;
+  if v < p_min or v > p_max or (p_int and v <> trunc(v)) then raise exception 'Valor inválido en los planes: %', p_key; end if;
+  return trim_scale(round(v, 2));
+end $$;
+revoke all on function public.tc_plan_num(jsonb, text, numeric, numeric, boolean) from public, anon, authenticated;
+
+-- Súper admin: editar precios y límites (solo estos campos; el resto de la estructura no cambia):
+-- {trial:{generations_lifetime, paywall_at, reminder_at, pdf_watermark},
+--  docente:{usd_monthly, usd_annual, eur_monthly, eur_annual, generations_per_month, video_hours_per_month},
+--  institucion:{tiers:[{usd_monthly, usd_annual_per_month, eur_monthly, eur_annual_per_month} ×3],
+--               generations_per_seat_month, video_hours_per_seat_month, insights_classes_per_seat_month},
+--  institucion_plus:{usd_reference, eur_reference}, addons:{<id>:{usd, eur}}, launch_offers:{<id>: true|false}}
+create or replace function public.update_plans(p jsonb) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare
+  v jsonb; pl jsonb; i int; k text; x jsonb; n numeric; idx int; t jsonb;
+  pf int; rm int; lt int;
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p is null or jsonb_typeof(p) <> 'object' then raise exception 'Valor inválido en los planes: %', 'p'; end if;
+  select plans into v from public.platform_settings where id for update;
+  -- prueba gratis
+  if jsonb_typeof(p->'trial') = 'object' then
+    for k in select unnest(array['generations_lifetime','paywall_at','reminder_at']) loop
+      n := public.tc_plan_num(p->'trial', k, 1, 1000, true);
+      if n is not null then v := jsonb_set(v, array['trial', k], to_jsonb(n::int)); end if;
+    end loop;
+    if jsonb_typeof(p #> '{trial,pdf_watermark}') = 'boolean' then v := jsonb_set(v, '{trial,pdf_watermark}', p #> '{trial,pdf_watermark}'); end if;
+    lt := (v #>> '{trial,generations_lifetime}')::int; pf := (v #>> '{trial,paywall_at}')::int; rm := (v #>> '{trial,reminder_at}')::int;
+    if not (pf < rm and rm <= lt) then raise exception 'La prueba: el pop-up va antes que el recordatorio, y el recordatorio no después del límite'; end if;
+  end if;
+  -- planes (por posición en el arreglo)
+  for i in 0 .. jsonb_array_length(v->'plans') - 1 loop
+    pl := v->'plans'->i;
+    if pl->>'id' = 'trial' and jsonb_typeof(p->'trial') = 'object' then
+      v := jsonb_set(v, array['plans', i::text, 'limits', 'generations_lifetime'], v #> '{trial,generations_lifetime}');
+      if jsonb_typeof(p #> '{trial,pdf_watermark}') = 'boolean' then
+        v := jsonb_set(v, array['plans', i::text, 'features', 'pdf_watermark'], p #> '{trial,pdf_watermark}');
+      end if;
+    elsif pl->>'id' = 'docente' and jsonb_typeof(p->'docente') = 'object' then
+      x := p->'docente';
+      n := public.tc_plan_num(x, 'usd_monthly', 0, 100000); if n is not null then v := jsonb_set(v, array['plans', i::text, 'prices', 'usd', 'monthly'], to_jsonb(n)); end if;
+      n := public.tc_plan_num(x, 'usd_annual', 0, 100000);  if n is not null then v := jsonb_set(v, array['plans', i::text, 'prices', 'usd', 'annual'], to_jsonb(n)); end if;
+      n := public.tc_plan_num(x, 'eur_monthly', 0, 100000); if n is not null then v := jsonb_set(v, array['plans', i::text, 'prices', 'eur', 'monthly'], to_jsonb(n)); end if;
+      n := public.tc_plan_num(x, 'eur_annual', 0, 100000);  if n is not null then v := jsonb_set(v, array['plans', i::text, 'prices', 'eur', 'annual'], to_jsonb(n)); end if;
+      n := public.tc_plan_num(x, 'generations_per_month', 0, 100000, true); if n is not null then v := jsonb_set(v, array['plans', i::text, 'limits', 'generations_per_month'], to_jsonb(n::int)); end if;
+      n := public.tc_plan_num(x, 'video_hours_per_month', 0, 10000); if n is not null then v := jsonb_set(v, array['plans', i::text, 'limits', 'video_hours_per_month'], to_jsonb(n)); end if;
+    elsif pl->>'id' = 'institucion' and jsonb_typeof(p->'institucion') = 'object' then
+      x := p->'institucion';
+      n := public.tc_plan_num(x, 'generations_per_seat_month', 0, 100000, true); if n is not null then v := jsonb_set(v, array['plans', i::text, 'limits', 'generations_per_seat_month'], to_jsonb(n::int)); end if;
+      n := public.tc_plan_num(x, 'video_hours_per_seat_month', 0, 10000); if n is not null then v := jsonb_set(v, array['plans', i::text, 'limits', 'video_hours_per_seat_month'], to_jsonb(n)); end if;
+      n := public.tc_plan_num(x, 'insights_classes_per_seat_month', 0, 10000, true); if n is not null then v := jsonb_set(v, array['plans', i::text, 'limits', 'insights_classes_per_seat_month'], to_jsonb(n::int)); end if;
+      if jsonb_typeof(x->'tiers') = 'array' then
+        if jsonb_array_length(x->'tiers') <> jsonb_array_length(pl->'tiers') then raise exception 'Valor inválido en los planes: %', 'tiers'; end if;
+        for idx in 0 .. jsonb_array_length(x->'tiers') - 1 loop
+          t := x->'tiers'->idx;
+          n := public.tc_plan_num(t, 'usd_monthly', 0, 100000);          if n is not null then v := jsonb_set(v, array['plans', i::text, 'tiers', idx::text, 'usd', 'monthly'], to_jsonb(n)); end if;
+          n := public.tc_plan_num(t, 'usd_annual_per_month', 0, 100000); if n is not null then v := jsonb_set(v, array['plans', i::text, 'tiers', idx::text, 'usd', 'annual_per_month'], to_jsonb(n)); end if;
+          n := public.tc_plan_num(t, 'eur_monthly', 0, 100000);          if n is not null then v := jsonb_set(v, array['plans', i::text, 'tiers', idx::text, 'eur', 'monthly'], to_jsonb(n)); end if;
+          n := public.tc_plan_num(t, 'eur_annual_per_month', 0, 100000); if n is not null then v := jsonb_set(v, array['plans', i::text, 'tiers', idx::text, 'eur', 'annual_per_month'], to_jsonb(n)); end if;
+        end loop;
+      end if;
+    elsif pl->>'id' = 'institucion_plus' and jsonb_typeof(p->'institucion_plus') = 'object' then
+      x := p->'institucion_plus';
+      n := public.tc_plan_num(x, 'usd_reference', 0, 100000); if n is not null then v := jsonb_set(v, array['plans', i::text, 'prices', 'usd', 'reference_per_seat_month_annual'], to_jsonb(n)); end if;
+      n := public.tc_plan_num(x, 'eur_reference', 0, 100000); if n is not null then v := jsonb_set(v, array['plans', i::text, 'prices', 'eur', 'reference_per_seat_month_annual'], to_jsonb(n)); end if;
+    end if;
+  end loop;
+  -- packs y extras
+  if jsonb_typeof(p->'addons') = 'object' then
+    for i in 0 .. jsonb_array_length(v->'addons') - 1 loop
+      x := p->'addons'->(v->'addons'->i->>'id');
+      if jsonb_typeof(x) = 'object' then
+        n := public.tc_plan_num(x, 'usd', 0, 100000); if n is not null then v := jsonb_set(v, array['addons', i::text, 'usd'], to_jsonb(n)); end if;
+        n := public.tc_plan_num(x, 'eur', 0, 100000); if n is not null then v := jsonb_set(v, array['addons', i::text, 'eur'], to_jsonb(n)); end if;
+      end if;
+    end loop;
+  end if;
+  -- ofertas de lanzamiento: encendidas / apagadas
+  if jsonb_typeof(p->'launch_offers') = 'object' then
+    for i in 0 .. jsonb_array_length(v->'launch_offers') - 1 loop
+      x := p->'launch_offers'->(v->'launch_offers'->i->>'id');
+      if x is not null then
+        if jsonb_typeof(x) <> 'boolean' then raise exception 'Valor inválido en los planes: %', 'launch_offers'; end if;
+        v := jsonb_set(v, array['launch_offers', i::text, 'enabled'], x);
+      end if;
+    end loop;
+  end if;
+  update public.platform_settings set plans = v, updated_by = auth.uid(), updated_at = now() where id;
+  return v::json;
+end $$;
+revoke all on function public.update_plans(jsonb) from public, anon;
+grant execute on function public.update_plans(jsonb) to authenticated;
+
+-- Súper admin: el plan de una cuenta (institución madre). p_apply_limits: además pone las clases por mes del plan
+-- (asientos × clases por asiento × 25.000 tokens).
+create or replace function public.set_institution_plan_status(p_root uuid, p_status text, p_plan text default null, p_apply_limits boolean default false)
+returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare a public.billing_accounts%rowtype; s public.platform_settings%rowtype; v_per int; v_credit int;
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if not exists (select 1 from public.institutions where id = p_root and parent_id is null) then
+    raise exception 'El plan se define en la institución madre';
+  end if;
+  if p_status is null or p_status not in ('none','pilot','active','founder','enterprise','cancelled') then raise exception 'Estado de plan inválido'; end if;
+  if p_plan is not null and p_plan not in ('institucion','institucion_plus') then raise exception 'Plan inválido'; end if;
+  perform public.ensure_billing_account(p_root);
+  select * into a from public.billing_accounts where root_id = p_root for update;
+  update public.billing_accounts
+     set plan_status = p_status, plan_id = coalesce(p_plan, plan_id), plan_changed_at = now(),
+         plan_activated_at = case when public.tc_plan_active(p_status) and not public.tc_plan_active(a.plan_status) then now() else plan_activated_at end,
+         updated_at = now()
+   where root_id = p_root;
+  if coalesce(p_apply_limits, false) and coalesce(p_plan, a.plan_id) is not null then
+    select * into s from public.platform_settings where id;
+    select (x->'limits'->>'generations_per_seat_month')::int into v_per
+      from jsonb_array_elements(s.plans->'plans') x where x->>'id' = coalesce(p_plan, a.plan_id);
+    v_credit := coalesce((s.plans->>'credit_tokens')::int, 25000);
+    if v_per is not null then
+      update public.billing_accounts set monthly_tokens = least(seats::bigint * v_per * v_credit, 100000000000) where root_id = p_root;
+    end if;
+  end if;
+  return (select json_build_object('root_id', root_id, 'plan_status', plan_status, 'plan_id', plan_id, 'seats', seats, 'monthly_tokens', monthly_tokens,
+                                   'plan_activated_at', plan_activated_at) from public.billing_accounts where root_id = p_root);
+end $$;
+revoke all on function public.set_institution_plan_status(uuid, text, text, boolean) from public, anon;
+grant execute on function public.set_institution_plan_status(uuid, text, text, boolean) to authenticated;
+
+-- Súper admin: plan Docente de una persona sin institución ('none' lo quita). Por email de su cuenta.
+create or replace function public.set_individual_plan(p_email text, p_status text, p_note text default '') returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare p public.profiles%rowtype; old_st text;
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_status is null or p_status not in ('none','active','pilot','cancelled') then raise exception 'Estado de plan inválido'; end if;
+  select * into p from public.profiles where email = lower(trim(coalesce(p_email, '')));
+  if p.id is null then raise exception 'No hay ninguna cuenta con ese email'; end if;
+  if p.role not in ('teacher','org_admin') then raise exception 'Esta cuenta no se puede modificar'; end if;
+  if p_status = 'none' then
+    delete from public.individual_plans where user_id = p.id;
+    return json_build_object('email', p.email, 'plan_status', 'none');
+  end if;
+  select plan_status into old_st from public.individual_plans where user_id = p.id;
+  insert into public.individual_plans as x (user_id, plan_status, note, activated_at, updated_by)
+  values (p.id, p_status, left(trim(coalesce(p_note, '')), 500), case when p_status in ('active','pilot') then now() end, auth.uid())
+  on conflict (user_id) do update set plan_status = excluded.plan_status, note = excluded.note, updated_by = auth.uid(), updated_at = now(),
+    activated_at = case when excluded.plan_status in ('active','pilot') and coalesce(x.plan_status, 'cancelled') not in ('active','pilot') then now() else x.activated_at end;
+  return json_build_object('email', p.email, 'plan_status', p_status);
+end $$;
+revoke all on function public.set_individual_plan(text, text, text) from public, anon;
+grant execute on function public.set_individual_plan(text, text, text) to authenticated;
+
+create or replace function public.list_individual_plans() returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(json_build_object('email', p.email, 'name', p.name, 'plan_id', x.plan_id, 'plan_status', x.plan_status,
+                                                     'note', x.note, 'activated_at', x.activated_at, 'updated_at', x.updated_at,
+                                                     'institution', (select i.name from public.institutions i where i.id = p.institution_id))
+                                   order by x.updated_at desc)
+                     from public.individual_plans x join public.profiles p on p.id = x.user_id), '[]'::json);
+end $$;
+revoke all on function public.list_individual_plans() from public, anon;
+grant execute on function public.list_individual_plans() to authenticated;
+
+-- ── "Hablar con ventas" ──
+create table if not exists public.sales_leads (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  user_id uuid references auth.users(id) on delete set null,   -- null = enviado sin sesión (API + Turnstile)
+  anonymous boolean not null default false,
+  source text not null default 'plans_page' check (source in ('popup_gen2','popup_gen4','paywall','plans_page','plan_usage','other')),
+  lang text not null default 'es' check (lang in ('es','en')),
+  name text not null check (length(name) between 1 and 120),
+  institution text not null check (length(institution) between 1 and 160),
+  role text not null check (role in ('direccion','coordinacion','docente','administracion','otro')),
+  country text not null check (country ~ '^[A-Z]{2}$'),
+  teachers_count text not null check (teachers_count in ('1-2','3-9','10-29','30-99','100+')),
+  contact_channel text not null check (contact_channel in ('whatsapp','email')),
+  whatsapp text not null default '' check (whatsapp ~ '^(\+[0-9]{7,16})?$'),
+  email text not null check (length(email) <= 254 and email ~ '^[^\s@<>"'',;()]+@[^\s@<>"'',;()]+\.[A-Za-z]{2,24}$'),
+  preferred_plan text not null default 'unsure' check (preferred_plan in ('docente','institucion','institucion_plus','unsure')),
+  message text not null default '' check (length(message) <= 1000),
+  consent boolean not null check (consent),
+  status text not null default 'nuevo' check (status in ('nuevo','contactado','ganado','perdido')),
+  notes text not null default '' check (length(notes) <= 2000),
+  notified_at timestamptz,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id) on delete set null
+);
+create index if not exists sales_leads_created_idx on public.sales_leads (created_at desc);
+create index if not exists sales_leads_user_idx on public.sales_leads (user_id);
+alter table public.sales_leads enable row level security;
+revoke all on public.sales_leads from anon, authenticated;
+
+-- Valida y limpia un pedido (texto en una línea, sin < >; email / WhatsApp con formato). Uso interno.
+create or replace function public.tc_lead_clean(p jsonb) returns jsonb
+language plpgsql immutable set search_path = public, pg_temp as
+$$
+declare
+  f text; v text; o jsonb := '{}'::jsonb; ch text; wa text;
+  line constant text := '[[:cntrl:]<>]';
+begin
+  if p is null or jsonb_typeof(p) <> 'object' then raise exception 'Pedido inválido'; end if;
+  foreach f in array array['name','institution','role','country','teachers_count','contact_channel','whatsapp','email','preferred_plan','message'] loop
+    if p ? f and jsonb_typeof(p->f) not in ('string','null') then raise exception 'Pedido inválido: %', f; end if;
+  end loop;
+  v := left(btrim(regexp_replace(regexp_replace(coalesce(p->>'name', ''), line, ' ', 'g'), '\s+', ' ', 'g')), 120);
+  if v = '' then raise exception 'Pedido inválido: %', 'name'; end if; o := o || jsonb_build_object('name', v);
+  v := left(btrim(regexp_replace(regexp_replace(coalesce(p->>'institution', ''), line, ' ', 'g'), '\s+', ' ', 'g')), 160);
+  if v = '' then raise exception 'Pedido inválido: %', 'institution'; end if; o := o || jsonb_build_object('institution', v);
+  v := coalesce(p->>'role', '');
+  if v not in ('direccion','coordinacion','docente','administracion','otro') then raise exception 'Pedido inválido: %', 'role'; end if;
+  o := o || jsonb_build_object('role', v);
+  v := upper(coalesce(p->>'country', ''));
+  if v !~ '^[A-Z]{2}$' then raise exception 'Pedido inválido: %', 'country'; end if; o := o || jsonb_build_object('country', v);
+  v := coalesce(p->>'teachers_count', '');
+  if v not in ('1-2','3-9','10-29','30-99','100+') then raise exception 'Pedido inválido: %', 'teachers_count'; end if;
+  o := o || jsonb_build_object('teachers_count', v);
+  ch := coalesce(p->>'contact_channel', '');
+  if ch not in ('whatsapp','email') then raise exception 'Pedido inválido: %', 'contact_channel'; end if;
+  o := o || jsonb_build_object('contact_channel', ch);
+  wa := regexp_replace(coalesce(p->>'whatsapp', ''), '[\s().-]', '', 'g');
+  if wa <> '' and wa !~ '^\+[0-9]{7,16}$' then raise exception 'Pedido inválido: %', 'whatsapp'; end if;
+  if ch = 'whatsapp' and wa = '' then raise exception 'Pedido inválido: %', 'whatsapp'; end if;
+  o := o || jsonb_build_object('whatsapp', wa);
+  v := lower(btrim(coalesce(p->>'email', '')));
+  if length(v) > 254 or v !~ '^[^\s@<>"'',;()]+@[^\s@<>"'',;()]+\.[A-Za-z]{2,24}$' then raise exception 'Pedido inválido: %', 'email'; end if;
+  o := o || jsonb_build_object('email', v);
+  v := coalesce(nullif(p->>'preferred_plan', ''), 'unsure');
+  if v not in ('docente','institucion','institucion_plus','unsure') then raise exception 'Pedido inválido: %', 'preferred_plan'; end if;
+  o := o || jsonb_build_object('preferred_plan', v);
+  v := regexp_replace(replace(coalesce(p->>'message', ''), E'\r\n', E'\n'), '[\x01-\x08\x0b-\x1f\x7f<>]', ' ', 'g');
+  if length(v) > 1000 then raise exception 'Pedido inválido: %', 'message'; end if;
+  o := o || jsonb_build_object('message', btrim(v));
+  if jsonb_typeof(p->'consent') <> 'boolean' or not (p->>'consent')::boolean then raise exception 'Hace falta el consentimiento para contactarte'; end if;
+  o := o || jsonb_build_object('lang', case when p->>'lang' = 'en' then 'en' else 'es' end);
+  return o;
+end $$;
+revoke all on function public.tc_lead_clean(jsonb) from public, anon, authenticated;
+
+create or replace function public.tc_lead_insert(c jsonb, p_user uuid, p_source text) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare r public.sales_leads%rowtype;
+begin
+  insert into public.sales_leads (user_id, anonymous, source, lang, name, institution, role, country, teachers_count, contact_channel,
+                                  whatsapp, email, preferred_plan, message, consent)
+  values (p_user, p_user is null,
+          case when p_source in ('popup_gen2','popup_gen4','paywall','plans_page','plan_usage') then p_source else 'other' end,
+          c->>'lang', c->>'name', c->>'institution', c->>'role', c->>'country', c->>'teachers_count', c->>'contact_channel',
+          c->>'whatsapp', c->>'email', c->>'preferred_plan', c->>'message', true)
+  returning * into r;
+  return json_build_object('id', r.id, 'created_at', r.created_at, 'source', r.source, 'lang', r.lang, 'name', r.name, 'institution', r.institution,
+    'role', r.role, 'country', r.country, 'teachers_count', r.teachers_count, 'contact_channel', r.contact_channel, 'whatsapp', r.whatsapp,
+    'email', r.email, 'preferred_plan', r.preferred_plan, 'message', r.message, 'anonymous', r.anonymous);
+end $$;
+revoke all on function public.tc_lead_insert(jsonb, uuid, text) from public, anon, authenticated;
+
+-- Con sesión (la app y /planes): hasta 3 pedidos por hora y 10 por día por persona. Los estudiantes no.
+-- Devuelve el pedido guardado (lo que la persona mandó: el servidor lo usa para el email al dueño).
+create or replace function public.submit_sales_lead(p_lead jsonb, p_source text default 'plans_page') returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_uid uuid := auth.uid(); c jsonb; r json;
+begin
+  if v_uid is null then raise exception 'No autorizado'; end if;
+  if coalesce((select role from public.profiles where id = v_uid), 'student') = 'student' then raise exception 'No autorizado'; end if;
+  c := public.tc_lead_clean(p_lead);
+  if not public.tc_rate_take('lead:u:' || v_uid::text, 1, 3, 3600) then raise exception 'Demasiados pedidos seguidos: probá de nuevo más tarde'; end if;
+  if not public.tc_rate_take('lead:ud:' || v_uid::text, 1, 10, 86400) then raise exception 'Demasiados pedidos seguidos: probá de nuevo más tarde'; end if;
+  r := public.tc_lead_insert(c, v_uid, p_source);
+  if public.tc_is_trial(v_uid) then perform public.trial_mark('sales'); end if;
+  return r;
+end $$;
+revoke all on function public.submit_sales_lead(jsonb, text) from public, anon;
+grant execute on function public.submit_sales_lead(jsonb, text) to authenticated;
+
+-- Sin sesión: SOLO el servidor (api/notify/lead.js, con la clave del servidor y Turnstile verificado). p_ip_key = HMAC
+-- de la IP (nunca la IP): 3 por hora y 10 por día por IP, y 200 por día en total.
+create or replace function public.submit_sales_lead_service(p_lead jsonb, p_source text, p_ip_key text) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare c jsonb;
+begin
+  if p_ip_key is null or length(p_ip_key) < 8 then raise exception 'Pedido inválido'; end if;
+  c := public.tc_lead_clean(p_lead);
+  if not public.tc_rate_take('lead:ip:' || left(p_ip_key, 120), 1, 3, 3600) or not public.tc_rate_take('lead:ipd:' || left(p_ip_key, 120), 1, 10, 86400)
+     or not public.tc_rate_take('lead:anon', 1, 200, 86400) then
+    raise exception 'Demasiados pedidos seguidos: probá de nuevo más tarde';
+  end if;
+  return public.tc_lead_insert(c, null, p_source);
+end $$;
+revoke all on function public.submit_sales_lead_service(jsonb, text, text) from public, anon, authenticated;
+grant execute on function public.submit_sales_lead_service(jsonb, text, text) to service_role;
+
+-- El servidor anota que ya avisó por email: con la sesión de quien lo mandó (dentro de los 15 minutos) o, para los
+-- pedidos sin sesión, con la clave del servidor (sales_lead_notified_service).
+create or replace function public.sales_lead_notified(p_id uuid) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_n int;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  update public.sales_leads set notified_at = now()
+   where id = p_id and user_id = auth.uid() and notified_at is null and created_at > now() - interval '15 minutes';
+  get diagnostics v_n = row_count;
+  return v_n > 0;
+end $$;
+revoke all on function public.sales_lead_notified(uuid) from public, anon;
+grant execute on function public.sales_lead_notified(uuid) to authenticated;
+create or replace function public.sales_lead_notified_service(p_id uuid) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_n int;
+begin
+  update public.sales_leads set notified_at = now() where id = p_id and notified_at is null and created_at > now() - interval '15 minutes';
+  get diagnostics v_n = row_count;
+  return v_n > 0;
+end $$;
+revoke all on function public.sales_lead_notified_service(uuid) from public, anon, authenticated;
+grant execute on function public.sales_lead_notified_service(uuid) to service_role;
+
+-- Súper admin: pedidos de ventas (más nuevos primero), filtro opcional por estado
+create or replace function public.list_sales_leads(p_status text default null) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_status is not null and p_status not in ('nuevo','contactado','ganado','perdido') then raise exception 'Estado inválido'; end if;
+  return coalesce((select json_agg(x order by x.created_at desc) from (
+    select l.id, l.created_at, l.source, l.lang, l.name, l.institution, l.role, l.country, l.teachers_count, l.contact_channel, l.whatsapp,
+           l.email, l.preferred_plan, l.message, l.status, l.notes, l.notified_at, l.updated_at, l.anonymous,
+           p.email as account_email, (select i.name from public.institutions i where i.id = p.institution_id) as account_institution,
+           case when l.user_id is null then null else public.tc_trial_used(l.user_id) end as classes_generated
+      from public.sales_leads l left join public.profiles p on p.id = l.user_id
+     where p_status is null or l.status = p_status
+     order by l.created_at desc limit 1000) x), '[]'::json);
+end $$;
+revoke all on function public.list_sales_leads(text) from public, anon;
+grant execute on function public.list_sales_leads(text) to authenticated;
+
+create or replace function public.update_sales_lead(p_id uuid, p_status text, p_notes text default null) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_status is null or p_status not in ('nuevo','contactado','ganado','perdido') then raise exception 'Estado inválido'; end if;
+  if p_notes is not null and length(p_notes) > 2000 then raise exception 'La nota es demasiado larga (máximo 2.000 caracteres)'; end if;
+  update public.sales_leads set status = p_status, notes = coalesce(p_notes, notes), updated_at = now(), updated_by = auth.uid() where id = p_id;
+  if not found then raise exception 'Pedido no encontrado'; end if;
+  return (select json_build_object('id', id, 'status', status, 'notes', notes, 'updated_at', updated_at) from public.sales_leads where id = p_id);
+end $$;
+revoke all on function public.update_sales_lead(uuid, text, text) from public, anon;
+grant execute on function public.update_sales_lead(uuid, text, text) to authenticated;
+
+-- Súper admin: pedidos "nuevos" (globito en Plataforma)
+create or replace function public.sales_leads_new_count() returns integer
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  return (select count(*)::int from public.sales_leads where status = 'nuevo');
+end $$;
+revoke all on function public.sales_leads_new_count() from public, anon;
+grant execute on function public.sales_leads_new_count() to authenticated;
+
+-- ── Comparar modelos (súper admin) ──
+create table if not exists public.model_comparisons (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  created_by uuid references auth.users(id) on delete set null,
+  title text not null default '' check (length(title) <= 200),
+  params jsonb not null default '{}'::jsonb check (octet_length(params::text) <= 8000),
+  left_model text not null check (left_model in ('default','mini')),   -- qué modelo se mostró como "A"
+  winner text not null check (winner in ('default','mini','tie')),
+  note text not null default '' check (length(note) <= 1000),
+  results jsonb not null default '{}'::jsonb check (octet_length(results::text) <= 8000), -- {default:{ms,prompt_tokens,completion_tokens,usd,deployment,fallback}, mini:{…}}
+  default_guide text not null default '' check (length(default_guide) <= 120000),
+  default_handout text not null default '' check (length(default_handout) <= 120000),
+  mini_guide text not null default '' check (length(mini_guide) <= 120000),
+  mini_handout text not null default '' check (length(mini_handout) <= 120000)
+);
+create index if not exists model_comparisons_created_idx on public.model_comparisons (created_at desc);
+alter table public.model_comparisons enable row level security;
+revoke all on public.model_comparisons from anon, authenticated;
+
+-- Guarda un par ya calificado. El costo se calcula acá con los precios por modelo de platform_settings.
+-- p = {title, params, left_model, winner ('a'|'b'|'tie'), note, results:{default:{ms,prompt_tokens,completion_tokens,deployment,fallback}, mini:{…}},
+--      texts:{default:{guide,handout}, mini:{guide,handout}}}
+create or replace function public.save_model_comparison(p jsonb) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare
+  s public.platform_settings%rowtype; v_left text; v_win text; res jsonb := '{}'::jsonb; m text; r jsonb; pt bigint; ct bigint; ms bigint; r2 public.model_comparisons%rowtype;
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p is null or jsonb_typeof(p) <> 'object' then raise exception 'Comparación inválida'; end if;
+  v_left := p->>'left_model';
+  if v_left is null or v_left not in ('default','mini') then raise exception 'Comparación inválida'; end if;
+  v_win := case p->>'winner' when 'a' then v_left when 'b' then case v_left when 'default' then 'mini' else 'default' end when 'tie' then 'tie' end;
+  if v_win is null then raise exception 'Elegí cuál es mejor (A, B o igual)'; end if;
+  select * into s from public.platform_settings where id;
+  foreach m in array array['default','mini'] loop
+    r := p->'results'->m;
+    if r is null or jsonb_typeof(r) <> 'object' then raise exception 'Comparación inválida'; end if;
+    pt := least(greatest(coalesce((r->>'prompt_tokens')::bigint, 0), 0), 10000000);
+    ct := least(greatest(coalesce((r->>'completion_tokens')::bigint, 0), 0), 10000000);
+    ms := least(greatest(coalesce((r->>'ms')::bigint, 0), 0), 3600000);
+    res := res || jsonb_build_object(m, jsonb_build_object('ms', ms, 'prompt_tokens', pt, 'completion_tokens', ct,
+      'fallback', coalesce((r->>'fallback')::boolean, false),
+      'deployment', left(regexp_replace(coalesce(r->>'deployment', ''), '[^A-Za-z0-9._-]', '', 'g'), 64),
+      'usd', round((pt * case m when 'mini' then s.ai_price_input_mini else s.ai_price_input end
+                  + ct * case m when 'mini' then s.ai_price_output_mini else s.ai_price_output end) / 1000000.0, 5)));
+  end loop;
+  insert into public.model_comparisons (created_by, title, params, left_model, winner, note, results, default_guide, default_handout, mini_guide, mini_handout)
+  values (auth.uid(), left(coalesce(p->>'title', ''), 200), case when jsonb_typeof(p->'params') = 'object' then p->'params' else '{}'::jsonb end,
+          v_left, v_win, left(coalesce(p->>'note', ''), 1000), res,
+          left(coalesce(p #>> '{texts,default,guide}', ''), 120000), left(coalesce(p #>> '{texts,default,handout}', ''), 120000),
+          left(coalesce(p #>> '{texts,mini,guide}', ''), 120000), left(coalesce(p #>> '{texts,mini,handout}', ''), 120000))
+  returning * into r2;
+  return json_build_object('id', r2.id, 'winner', r2.winner, 'left_model', r2.left_model, 'results', r2.results);
+end $$;
+revoke all on function public.save_model_comparison(jsonb) from public, anon;
+grant execute on function public.save_model_comparison(jsonb) to authenticated;
+
+-- Súper admin: resumen (victorias, costo promedio por clase por modelo) + los últimos pares (sin los textos)
+create or replace function public.model_comparison_summary() returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  return (select json_build_object(
+    'total', count(*),
+    'wins', json_build_object('default', count(*) filter (where winner = 'default'), 'mini', count(*) filter (where winner = 'mini'),
+                              'tie', count(*) filter (where winner = 'tie')),
+    'win_rate', json_build_object('default', case when count(*) > 0 then round(100.0 * count(*) filter (where winner = 'default') / count(*), 1) end,
+                                  'mini', case when count(*) > 0 then round(100.0 * count(*) filter (where winner = 'mini') / count(*), 1) end,
+                                  'tie', case when count(*) > 0 then round(100.0 * count(*) filter (where winner = 'tie') / count(*), 1) end),
+    'avg_usd', json_build_object('default', round(avg((results #>> '{default,usd}')::numeric), 5), 'mini', round(avg((results #>> '{mini,usd}')::numeric), 5)),
+    'avg_ms', json_build_object('default', round(avg((results #>> '{default,ms}')::numeric)), 'mini', round(avg((results #>> '{mini,ms}')::numeric))),
+    'avg_tokens', json_build_object('default', round(avg((results #>> '{default,prompt_tokens}')::numeric + (results #>> '{default,completion_tokens}')::numeric)),
+                                    'mini', round(avg((results #>> '{mini,prompt_tokens}')::numeric + (results #>> '{mini,completion_tokens}')::numeric))),
+    'recent', coalesce((select json_agg(json_build_object('id', c.id, 'created_at', c.created_at, 'title', c.title, 'winner', c.winner, 'note', c.note,
+                                                          'left_model', c.left_model, 'results', c.results) order by c.created_at desc)
+                          from (select * from public.model_comparisons order by created_at desc limit 50) c), '[]'::json))
+    from public.model_comparisons);
+end $$;
+revoke all on function public.model_comparison_summary() from public, anon;
+grant execute on function public.model_comparison_summary() to authenticated;
+
+create or replace function public.get_model_comparison(p_id uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  return (select row_to_json(c) from (select id, created_at, title, params, left_model, winner, note, results,
+                                             default_guide, default_handout, mini_guide, mini_handout
+                                        from public.model_comparisons where id = p_id) c);
+end $$;
+revoke all on function public.get_model_comparison(uuid) from public, anon;
+grant execute on function public.get_model_comparison(uuid) to authenticated;
+
+-- Súper admin: modelo por tipo de pedido ('default' | 'mini'); api/generate.js usa el despliegue "mini" solo si existe
+-- AZURE_OPENAI_DEPLOYMENT_MINI (si no, el de siempre).
+create or replace function public.update_ai_model_default(p jsonb) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare k text; v jsonb;
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p is null or jsonb_typeof(p) <> 'object' then raise exception 'Modelo inválido'; end if;
+  select ai_model_default into v from public.platform_settings where id;
+  foreach k in array array['main','student','summary','verify'] loop
+    if p ? k then
+      if p->>k not in ('default','mini') then raise exception 'Modelo inválido'; end if;
+      v := v || jsonb_build_object(k, p->>k);
+    end if;
+  end loop;
+  update public.platform_settings set ai_model_default = v, updated_by = auth.uid(), updated_at = now() where id;
+  return v::json;
+end $$;
+revoke all on function public.update_ai_model_default(jsonb) from public, anon;
+grant execute on function public.update_ai_model_default(jsonb) to authenticated;
+
+-- Súper admin: precios del modelo "mini" (USD por millón de tokens)
+create or replace function public.update_ai_prices_mini(p_input numeric, p_output numeric) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p_input is null or p_input < 0 or p_input > 1000 or p_output is null or p_output < 0 or p_output > 1000 then
+    raise exception 'Precio de IA inválido (de 0 a 1000 USD por millón de tokens)';
+  end if;
+  update public.platform_settings set ai_price_input_mini = round(p_input, 4), ai_price_output_mini = round(p_output, 4),
+         updated_by = auth.uid(), updated_at = now() where id;
+  return (select json_build_object('ai_price_input_mini', ai_price_input_mini, 'ai_price_output_mini', ai_price_output_mini) from public.platform_settings where id);
+end $$;
+revoke all on function public.update_ai_prices_mini(numeric, numeric) from public, anon;
+grant execute on function public.update_ai_prices_mini(numeric, numeric) to authenticated;
+
+-- ── Métricas: embudo de la prueba (súper admin; solo totales) ──
+-- Cohorte = cuentas de docentes / admins creadas en los últimos p_days días (sin el súper admin):
+-- signups, trial (todavía en prueba), first_class, reached_2nd (2+ clases), saw_paywall, hit_limit, leads (del período,
+-- con o sin cuenta; by_source), converted_institutions (cuentas que pasaron a un plan activo en el período) y
+-- converted_individuals (planes Docente activados en el período). trial_now = todas las cuentas en prueba hoy.
+create or replace function public.platform_funnel(p_days integer default 30) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_days int := least(greatest(coalesce(p_days, 30), 1), 366); v_since timestamptz; v_lim int := public.tc_trial_limit();
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  v_since := ((now() at time zone 'utc')::date - (v_days - 1))::timestamp at time zone 'utc';
+  return (with c as (
+      select p.id, public.tc_is_trial(p.id) as trial, public.tc_trial_used(p.id) as used, t.paywall_shown_at, t.limit_shown_at
+        from public.profiles p left join public.trial_state t on t.user_id = p.id
+       where p.role in ('teacher','org_admin') and p.created_at >= v_since)
+    select json_build_object(
+      'days', v_days, 'limit', v_lim,
+      'signups', (select count(*) from c),
+      'trial', (select count(*) from c where trial),
+      'first_class', (select count(*) from c where used >= 1),
+      'reached_2nd', (select count(*) from c where used >= 2),
+      'saw_paywall', (select count(*) from c where paywall_shown_at is not null),
+      'hit_limit', (select count(*) from c where used >= v_lim or limit_shown_at is not null),
+      'leads', (select count(*) from public.sales_leads l where l.created_at >= v_since),
+      'leads_by_source', coalesce((select json_object_agg(source, n) from (select source, count(*) as n from public.sales_leads
+                                    where created_at >= v_since group by source) x), '{}'::json),
+      'converted_institutions', (select count(*) from public.billing_accounts a where a.plan_activated_at >= v_since and public.tc_plan_active(a.plan_status)),
+      'converted_individuals', (select count(*) from public.individual_plans x where x.activated_at >= v_since and x.plan_status in ('active','pilot')),
+      'trial_now', (select count(*) from public.profiles p where p.role in ('teacher','org_admin') and public.tc_is_trial(p.id))));
+end $$;
+revoke all on function public.platform_funnel(integer) from public, anon;
+grant execute on function public.platform_funnel(integer) to authenticated;
+
+revoke all on function public.my_trial_status() from public, anon;
+grant execute on function public.my_trial_status() to authenticated;
+revoke all on function public.trial_mark(text) from public, anon;
+grant execute on function public.trial_mark(text) to authenticated;
 
 -- Que la API de Supabase vea enseguida las funciones nuevas
 notify pgrst, 'reload schema';

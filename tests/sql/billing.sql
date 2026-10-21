@@ -126,7 +126,9 @@ set role authenticated; select qb.as_user(current_setting('qb.adma'));
 select qb.eq('B: root admin summary totals', $$select (j->>'used_month')||'/'||(j->>'monthly_tokens')||'/'||(j->>'remaining')||'/'||(j->>'seats_used')||'/'||(j->>'seats')||'/'||(j->>'can_request') from (select public.get_billing_summary(null) j) x$$, '1100/1000/0/4/10/true');
 select qb.eq('B: root admin sees all teachers of the account', $$select (select string_agg(x->>'email', ',' order by x->>'email') from json_array_elements(public.get_billing_summary(null)->'by_teacher') x)$$, 'ta1@x.com,ts1@x.com');
 select qb.eq('B: root admin get_seat_status', $$select (j->>'used')||'/'||(j->>'seats')||'/'||(j->>'full') from (select public.get_seat_status(null) j) x$$, '4/10/false');
-select qb.eq('B: root admin requests a pack (snapshot 5000 / 9.50 EUR)', $$select (j->>'pack_tokens')||'/'||(j->>'price')||'/'||(j->>'currency')||'/'||(j->>'status') from (select public.request_token_pack() j) x$$, '5000/9.50/EUR/pending');
+-- 2026-10-21: packs of "classes" from the plans (the old token pack settings are no longer used for new requests)
+select qb.fails('B: an unknown pack is refused', $$select public.request_token_pack('pack_gratis')$$, 'no existe');
+select qb.eq('B: root admin requests a pack (default: Pack 50 clases = 1.25M tokens / 25.00 USD)', $$select (j->>'pack_tokens')||'/'||(j->>'price')||'/'||(j->>'currency')||'/'||(j->>'status')||'/'||(j->>'pack_id')||'/'||(j->>'pack_credits') from (select public.request_token_pack() j) x$$, '1250000/25.00/USD/pending/pack_clases_50/50');
 select qb.fails('B: only one pending request at a time', $$select public.request_token_pack()$$, 'pendiente');
 select qb.eq('B: root admin lists own requests', $$select json_array_length(public.list_purchase_requests(null))$$, '1');
 select qb.fails('B: org admin cannot approve', $$select public.decide_purchase_request((select id from public.token_purchase_requests where root_id=qb.inst('bill-a') and status='pending'),true,'')$$, 'No autorizado');
@@ -150,17 +152,20 @@ select qb.fails('B: list validates status', $$select public.list_purchase_reques
 select qb.eq('B: approve A request', $$select public.decide_purchase_request((select id from public.token_purchase_requests where root_id=qb.inst('bill-a') and status='pending'),true,'paid by transfer')$$, 'approved');
 select qb.fails('B: approving twice is refused', $$select public.decide_purchase_request((select id from public.token_purchase_requests where root_id=qb.inst('bill-a') order by created_at desc limit 1),true,'')$$, 'ya fue resuelta');
 select qb.fails('B: rejecting an approved request is refused', $$select public.decide_purchase_request((select id from public.token_purchase_requests where root_id=qb.inst('bill-a') order by created_at desc limit 1),false,'')$$, 'ya fue resuelta');
-select qb.eq('B: overview shows A extra balance + no pending', $$select (x->>'extra_balance')||'/'||(x->>'pending')||'/'||(x->>'used_month') from json_array_elements(public.platform_billing_overview()->'accounts') x where x->>'slug'='bill-a'$$, '5000/false/1100');
+select qb.eq('B: overview shows A extra balance + no pending', $$select (x->>'extra_balance')||'/'||(x->>'pending')||'/'||(x->>'used_month') from json_array_elements(public.platform_billing_overview()->'accounts') x where x->>'slug'='bill-a'$$, '1250000/false/1100');
 select qb.eq('B: reject B request with note', $$select public.decide_purchase_request((select id from public.token_purchase_requests where root_id=qb.inst('bill-b') and status='pending'),false,'  no payment received  ')$$, 'rejected');
 reset role;
-select qb.eq('B: approval added the pack exactly once', $$select qb.bal('bill-a')$$, '5000');
+select qb.eq('B: approval added the pack exactly once', $$select qb.bal('bill-a')$$, '1250000');
 select qb.eq('B: rejection adds nothing', $$select qb.bal('bill-b')$$, '0');
 set role authenticated; select qb.as_user(current_setting('qb.admb'));
 select qb.eq('B: admin B sees the rejection note', $$select (x->>'status')||':'||(x->>'note') from json_array_elements(public.list_purchase_requests(null)) x$$, 'rejected:no payment received');
-select qb.eq('B: admin B can request again after a rejection', $$select public.request_token_pack()->>'status'$$, 'pending');
+select qb.eq('B: admin B can request again after a rejection (a bigger pack)', $$select (j->>'status')||'/'||(j->>'pack_tokens')||'/'||(j->>'price') from (select public.request_token_pack('pack_clases_200') j) x$$, 'pending/5000000/85.00');
+select qb.eq('B: the pending request shows the pack in the summary', $$select (public.get_billing_summary(null)->'pending'->>'pack_credits')$$, '200');
+select qb.eq('B: the summary lists the class packs (50, 200)', $$select string_agg(x->>'credits', ',') from json_array_elements(public.get_billing_summary(null)->'packs') x$$, '50,200');
 reset role;
 
 -- ===== extra balance is used after the monthly allowance =====
+update public.billing_accounts set extra_tokens_balance = 5000 where root_id = qb.inst('bill-a'); -- small balance for the arithmetic below
 set role service_role;
 select qb.eq('B: allowance gone, extra 5000 → allowed again', $$select (j->>'allowed')||'/'||(j->>'remaining')||'/'||(j->>'extra_balance') from (select public.ai_budget_check(qb.uid('ta1@x.com')) j) x$$, 'true/5000/5000');
 select qb.eq('B: record 1000 → paid from extra', $$select public.ai_record_usage(qb.uid('ta1@x.com'),700,300,'generate')->>'extra_balance'$$, '4000');

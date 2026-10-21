@@ -28,6 +28,11 @@
 # Class whiteboard (classboard.sql: access matrix, element validation / images refused, last-writer-wins per element, lock,
 # 2 MB cap, versions / restore, Realtime policies, group card + student dashboard) runs with the other suites and after an
 # upgrade from git 3c0ef7b (before the whiteboard) with data (+ the current 001 twice; the data must survive; then 002 applies).
+# Plans, free trial, sales leads, model comparison (plans.sql: public get_plans, trial counted in consume_ai_quota with the user's
+# token, active plans / Docente / super admin never limited, model override only for the super admin, sales_leads and
+# model_comparisons privacy, funnel) runs with the other suites and after an upgrade from git a4f00d3 (before the plans) with
+# data: the existing accounts become 'pilot' ONCE (nothing stops working; a re-run keeps what the owner changed), new
+# accounts start without a plan, the seed plans are not overwritten by a re-run; then 002 still applies.
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -37,7 +42,7 @@ trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null' EXIT
 $PSQL -d $DB -f tests/sql/supabase-stub.sql >/dev/null 2>&1
 for i in 1 2; do $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; done
 fail=0
-for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance consent launch_fixes classboard; do
+for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance consent launch_fixes classboard plans; do
   out=$($PSQL -d $DB -f tests/sql/$t.sql 2>&1)
   echo "$out" | grep -E '\*\*FAIL\*\*' || true
   sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
@@ -239,5 +244,41 @@ if git cat-file -e 3c0ef7b:supabase/migrations/001_base.sql 2>/dev/null; then
       done
     else echo "upgrade: **FAIL** could not upgrade from 3c0ef7b"; fail=1; fi
   else echo "upgrade: **FAIL** could not load 3c0ef7b + data"; fail=1; fi
+fi
+# Upgrade from a4f00d3 (before plans / free trial) with data, then the current 001 twice and 002
+if git cat-file -e a4f00d3:supabase/migrations/001_base.sql 2>/dev/null; then
+  UP8=${DB}_up8
+  $PSQL -d postgres -c "create database $UP8" >/dev/null
+  trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null; for x in _up _up2 _live _up3 _up4 _up5 _up6 _up7 _up8; do $PSQL -d postgres -c "drop database if exists ${DB}$x" >/dev/null; done' EXIT
+  $PSQL -d $UP8 -f tests/sql/supabase-stub.sql >/dev/null 2>&1
+  DATA="select (select count(*) from public.class_groups)||'/'||(select count(*) from public.student_enrollments)||'/'||(select count(*) from public.class_sessions)||'/'||(select count(*) from public.profiles)||'/'||(select count(*) from public.billing_accounts)||'/'||(select count(*) from public.token_purchase_requests)||'/'||(select count(*) from public.ai_events)||'/'||(select count(*) from public.class_boards)||'/'||(select count(*) from public.user_consents)"
+  if git show a4f00d3:supabase/migrations/001_base.sql | $PSQL -d $UP8 >/dev/null 2>&1 \
+     && git show a4f00d3:tests/sql/billing.sql | $PSQL -d $UP8 >/dev/null 2>&1 && git show a4f00d3:tests/sql/insights.sql | $PSQL -d $UP8 >/dev/null 2>&1 \
+     && git show a4f00d3:tests/sql/students.sql | $PSQL -d $UP8 >/dev/null 2>&1 && git show a4f00d3:tests/sql/consent.sql | $PSQL -d $UP8 >/dev/null 2>&1 \
+     && git show a4f00d3:tests/sql/classboard.sql | $PSQL -d $UP8 >/dev/null 2>&1; then
+    before=$($PSQL -At -d $UP8 -c "$DATA")
+    roots=$($PSQL -At -d $UP8 -c "select count(*) from public.institutions where parent_id is null")
+    if $PSQL -d $UP8 -f supabase/migrations/001_base.sql >/dev/null 2>&1; then
+      pilot=$($PSQL -At -d $UP8 -c "select count(*) filter (where plan_status = 'pilot')||'/'||count(*) from public.billing_accounts")
+      # the owner changes one account and edits a price: a re-run must keep both
+      $PSQL -d $UP8 -c "update public.billing_accounts set plan_status = 'none' where root_id = (select id from public.institutions where parent_id is null order by created_at limit 1)" >/dev/null
+      $PSQL -d $UP8 -c "update public.platform_settings set plans = jsonb_set(plans, '{plans,1,prices,usd,monthly}', '13')" >/dev/null
+      if $PSQL -d $UP8 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP8 -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
+        after=$($PSQL -At -d $UP8 -c "$DATA")
+        kept=$($PSQL -At -d $UP8 -c "select count(*) filter (where plan_status = 'none')||'/'||(select plans #>> '{plans,1,prices,usd,monthly}' from public.platform_settings)||'/'||(select count(*) from public.token_purchase_requests where pack_id is null) from public.billing_accounts")
+        if [[ "$before" == "$after" && "$before" != *"/0/0/0/0/0" && "$pilot" == "$roots/$roots" && "$kept" == "1/13/"* ]]; then
+          echo "upgrade (a4f00d3 + data → current 001 ×2 → 002): data kept ($after), $pilot existing accounts → pilot once, owner changes kept on re-run ($kept)"
+        else echo "upgrade: **FAIL** a4f00d3 before=$before after=$after pilot=$pilot roots=$roots kept=$kept"; fail=1; fi
+        $PSQL -d $UP8 -c "update public.platform_settings set plans = jsonb_set(plans, '{plans,1,prices,usd,monthly}', '12')" >/dev/null
+        for t in plans; do
+          out=$($PSQL -d $UP8 -f tests/sql/$t.sql 2>&1)
+          echo "$out" | grep -E '\*\*FAIL\*\*' || true
+          sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
+          echo "upgrade (a4f00d3 → current ×2) + $t: passed | failed = $sum"
+          [[ "$sum" =~ \|\ +0$ ]] || fail=1
+        done
+      else echo "upgrade: **FAIL** could not re-run the current 001 / 002 after a4f00d3"; fail=1; fi
+    else echo "upgrade: **FAIL** could not upgrade from a4f00d3"; fail=1; fi
+  else echo "upgrade: **FAIL** could not load a4f00d3 + data"; fail=1; fi
 fi
 exit $fail
