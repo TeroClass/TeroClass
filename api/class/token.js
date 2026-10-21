@@ -12,6 +12,7 @@
 // Token format follows LiveKit's AccessToken (HS256 JWT): iss = API key, sub = identity,
 // nbf/exp, name, metadata (string) and the "video" grant.
 import { livekitEnv, signJwt, getUser, getProfile, bearer, SUPABASE_URL, SUPABASE_KEY } from '../_lib/livekit.js';
+import { verifyTicket } from './ticket.js';
 
 export const TOKEN_TTL_S = 2 * 60 * 60;     // a class plus margin
 // = tc_consent_version() in 001_base.sql and CONSENT_VERSION in public/live-class.js (tests/api-consent.test.mjs checks
@@ -24,7 +25,10 @@ const STAFF_ROLES = new Set(['teacher', 'org_admin', 'superadmin']);
 // Calendar classes ("sess-<uuid>") are checked against the database (live_room_role). Ad-hoc rooms (TC-13, 2026-10):
 // the database decides (adhoc_room_access): the creating teacher hosts; staff (teachers / admins) of the SAME account
 // (main institution) can join as participants; students and accounts without an institution cannot — their classes
-// go through the calendar. The display name is decided by the database too (live_display_name, TC-27), never the body.
+// go through the calendar — or with an invitation ticket the creating teacher shared (api/class/ticket.js), never just by
+// being signed in. The display name is decided by the database too (live_display_name, TC-27), never the body.
+// P-09: the ROLE is decided here too (host of the room / teacher of the class → teacher; everyone else → student); a body
+// asking for "teacher" without being the host is refused, and the answer says which role was given.
 // "sess-" + 32 hex chars (uuid without dashes) → uuid, or null for ad-hoc rooms.
 export function sessionIdFromRoom(room) {
   const m = /^sess-([0-9a-f]{32})$/i.exec(String(room || ''));
@@ -95,10 +99,11 @@ export function validateBody(body) {
   const b = body && typeof body === 'object' ? body : {};
   const room = String(b.room || '');
   if (!ROOM_RE.test(room)) return { error: 'Invalid room name.' };
-  const role = b.role === 'teacher' ? 'teacher' : b.role === 'student' ? 'student' : null;
-  if (!role) return { error: 'Invalid role.' };
+  // role: optional wish (the server decides, P-09); anything else than teacher / student is refused
+  const role = b.role == null || b.role === '' ? null : b.role === 'teacher' ? 'teacher' : b.role === 'student' ? 'student' : undefined;
+  if (role === undefined) return { error: 'Invalid role.' };
   // consent / minor / guardian fields in the body are ignored on purpose (see myConsent)
-  return { room, role, name: b.name };
+  return { room, role, name: b.name, ...(typeof b.ticket === 'string' ? { ticket: b.ticket } : {}) };
 }
 
 export default async function handler(req, res) {
@@ -115,15 +120,15 @@ export default async function handler(req, res) {
   const v = validateBody(req.body);
   if (v.error) return res.status(400).json({ error: v.error, code: 'invalid' });
 
-  let isAdmin = false;
+  let isAdmin = false; let role = 'student';
   // Calendar classes: room "sess-<session uuid without dashes>". Access is decided by the database
   // (teacher/substitute host, enrolled or invited students join); nobody else gets a token.
   const sessId = sessionIdFromRoom(v.room);
   if (sessId) {
-    let role = null;
+    role = null;
     try { role = await liveRoomRole(token, sessId); } catch { role = undefined; }
     if (role === undefined) return res.status(503).json({ error: 'Could not check your access to this class. Please try again.', code: 'access_check' });
-    if (role === 'teacher') isAdmin = v.role === 'teacher';
+    if (role === 'teacher') { isAdmin = true; }
     else if (role === 'student') { if (v.role === 'teacher') return res.status(403).json({ error: 'Only the teacher of this class can host it.', code: 'owner' }); }
     else return res.status(403).json({ error: 'You are not part of this class.', code: 'not_member' });
   } else {
@@ -132,14 +137,16 @@ export default async function handler(req, res) {
     if (!key) return res.status(403).json({ error: 'You are not part of this class.', code: 'not_member' });
     const access = await userRpcValue(token, 'adhoc_room_access', { p_owner_key: key[1].toLowerCase() });
     if (access === undefined) return res.status(503).json({ error: 'Could not check your access to this class. Please try again.', code: 'access_check' });
-    if (access === 'host') isAdmin = v.role === 'teacher';
+    if (access === 'host') { isAdmin = true; role = 'teacher'; }
     else if (access === 'guest') { if (v.role === 'teacher') return res.status(403).json({ error: 'Only the teacher who created this class can host it.', code: 'owner' }); }
+    else if (v.ticket && v.role !== 'teacher' && verifyTicket(v.ticket, v.room)) { role = 'student'; } // invited by the room's creator
+    else if (v.ticket && v.role !== 'teacher') return res.status(403).json({ error: 'This invitation link expired or is not valid. Ask your teacher for a new one.', code: 'ticket' });
     else if (v.role === 'teacher') {
       let profile = null;
       try { profile = await getProfile(token, user.id); } catch { profile = null; }
       if (!profile || !STAFF_ROLES.has(profile.role)) return res.status(403).json({ error: 'Only teachers can host a class.', code: 'role' });
       return res.status(403).json({ error: 'Only the teacher who created this class can host it.', code: 'owner' });
-    } else return res.status(403).json({ error: 'Only people of the same institution can join this class. Join your classes from the calendar.', code: 'not_member' });
+    } else return res.status(403).json({ error: 'You need the invitation link from your teacher to join this class. Your scheduled classes are in the calendar.', code: 'not_member' });
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -151,7 +158,7 @@ export default async function handler(req, res) {
   const f = consentFlags(await myConsent(token));
   const recorded = f.recorded;
   const metadata = JSON.stringify({
-    role: v.role,
+    role,
     consent: f.consent,
     recorded,
     minor: f.minor,
@@ -182,6 +189,7 @@ export default async function handler(req, res) {
     token: signJwt(claims, env.apiSecret),
     identity,
     room: v.room,
+    role,
     recorded,
   });
 }

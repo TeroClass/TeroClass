@@ -30,6 +30,7 @@ async function newCtx(browser, opts = {}) {
     const u = new URL(r.request().url());
     if (u.pathname === '/vendor/classdoc-editor.js') return M.serveVendor(r);
     if (u.pathname === '/api/class/config') return r.fulfill({ contentType: 'application/json', body: '{"configured":false}' });
+    if (u.pathname === '/api/config') return r.fulfill({ contentType: 'application/json', body: '{"recording":true}' }); // TC-23: a connected recorder
     if (u.pathname === '/api/notify/consent') { net.notify++; net.notifyAuth = r.request().headers().authorization; return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ configured: false, sent: 0 }) }); }
     if (u.pathname === '/api/notify/session') return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ configured: false, sent: 0 }) });
     if (u.pathname === '/api/billing/status') return r.fulfill({ contentType: 'application/json', body: '{"billing_configured":true,"billing_ok":true}' });

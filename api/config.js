@@ -1,6 +1,7 @@
 // Vercel serverless: public app configuration for the browser (2026-10). Only what the page may know: the Cloudflare
 // Turnstile SITE key (public by design; the secret lives in Supabase Auth), whether e-mail sending is on (so the app never
-// promises an e-mail that won't arrive, P-03), whether client errors are reported, and the deployment kind (staging badge).
+// promises an e-mail that won't arrive, P-03), whether client errors are reported, whether a recorder is connected, and the deployment kind (staging badge:
+// APP_ENV / VERCEL_ENV).
 import { resendKey } from './_lib/mail.js';
 import { livekitEnv } from './_lib/livekit.js';
 
@@ -11,7 +12,11 @@ export function publicConfig(env = process.env) {
     email: !!String(env.RESEND_API_KEY || '').trim(),
     live: livekitEnv().configured,
     errorReporting: true,
+    // TC-23: the room says "Recording" only when a real recorder is connected (RECORDING_ENABLED=true); otherwise
+    // "Recording ready to be turned on" (the consent logic is the same either way)
+    recording: /^(1|true|yes|on)$/i.test(String(env.RECORDING_ENABLED || '').trim()),
     env: env.VERCEL_ENV || 'development',
+    appEnv: String(env.APP_ENV || '').trim().toLowerCase(),
   };
 }
 export default function handler(req, res) {

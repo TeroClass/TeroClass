@@ -52,8 +52,10 @@ body:not(.js-ready) #screen-auth .auth-box{visibility:hidden}
 .auth-error.ok{background:rgba(72,187,120,.15);border-color:rgba(72,187,120,.35);color:#9ae6b4}
 #tab-forgot .auth-student-sub{color:#aaa;font-size:12.5px;line-height:1.5;margin:0 0 14px}
 /* "Versión de prueba" badge outside production (P-21) */
-#env-badge{position:fixed;left:10px;bottom:10px;z-index:9998;background:#b7791f;color:#fff;font:600 11px/1 'Inter',sans-serif;padding:6px 10px;border-radius:999px;box-shadow:0 4px 14px rgba(0,0,0,.18);pointer-events:none;letter-spacing:.2px}
-@media(max-width:768px){#env-badge{bottom:auto;top:6px;left:50%;transform:translateX(-50%);font-size:10px;padding:4px 8px;opacity:.92}}
+/* P-21: thin top banner outside production (never clickable, never covers controls) */
+#env-badge{position:fixed;left:0;right:0;top:0;z-index:9998;height:3px;background:#b7791f;pointer-events:none}
+#env-badge[hidden]{display:none}
+#env-badge span{position:absolute;top:0;left:50%;transform:translateX(-50%);background:#b7791f;color:#fff;font:600 10.5px/1 'Inter',sans-serif;padding:3px 10px 4px;border-radius:0 0 8px 8px;letter-spacing:.2px;white-space:nowrap}
 
 /* ── APP ── */
 #screen-app{display:none;height:100vh;flex-direction:column}
@@ -1444,7 +1446,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
     <div class="modal-actions"><button class="btn-modal-cancel" type="button" onclick="closeModal('modal-my-inv')">Decide later</button></div>
   </div>
 </div>
-<div id="env-badge" hidden>Test version</div>
+<div id="env-badge" role="note" hidden><span>Test version</span></div>
 <div class="toast" id="toast"></div>
 
 <!-- supabase-js 2.116.0, served from this site (TC-11: no third-party script on the page; see public/vendor/licenses) -->
@@ -2457,6 +2459,7 @@ async function enterAppInner(){
   if(currentUser.orgId)loadPlaybooks(currentUser.orgId).then(()=>buildSystemPrompt());
   hierLoadContext();
   window.GC?.afterEnter?.(); // deep link ?session=<id> (from a calendar event)
+  window.LiveClass?.consumeRoomLink?.(); // TC-13: a teacher's invitation link to a quick room (?room=…&t=…)
   checkMyInvitations(/[?&]invitations\b/.test(location.search)); // TC-07: pending invitations for an existing account
 }
 
@@ -4847,15 +4850,16 @@ const I18N_ES_NAV={
 Object.assign(I18N_ES,I18N_ES_NAV);
 // ══ LAUNCH FIXES (2026-10, pre-launch audit) ══════════════════════════════════════════════════════════════════
 // Public app config (/api/config): optional Cloudflare Turnstile (TC-18), whether e-mail sending exists (P-03), env.
-const APP_CONFIG={turnstileSiteKey:null,email:false,live:false,env:''};
+const APP_CONFIG={turnstileSiteKey:null,email:false,live:false,env:'',appEnv:'',recording:false};
 let appConfigReady=null;
 function loadAppConfig(){
   if(appConfigReady)return appConfigReady;
   appConfigReady=(async()=>{
     try{const r=await fetch('/api/config',{cache:'no-store'});const ct=r.headers.get('content-type')||'';
-      if(r.ok&&/json/i.test(ct)){const j=await r.json();if(j&&typeof j==='object')Object.assign(APP_CONFIG,{turnstileSiteKey:typeof j.turnstileSiteKey==='string'?j.turnstileSiteKey:null,email:j.email===true,live:j.live===true,env:String(j.env||'')});}
+      if(r.ok&&/json/i.test(ct)){const j=await r.json();if(j&&typeof j==='object')Object.assign(APP_CONFIG,{turnstileSiteKey:typeof j.turnstileSiteKey==='string'?j.turnstileSiteKey:null,email:j.email===true,live:j.live===true,env:String(j.env||''),appEnv:String(j.appEnv||''),recording:j.recording===true});}
     }catch(e){/* offline / old deployment: defaults (no captcha, no e-mail) */}
     if(APP_CONFIG.turnstileSiteKey)initCaptcha();
+    renderEnvBadge(); // APP_ENV may mark a deployment as a test one
     return APP_CONFIG;
   })();
   return appConfigReady;
@@ -4884,11 +4888,13 @@ window.tcCaptcha={options:captchaOptions,missing:captchaMissing,reset:captchaRes
 // ── P-21: "Test version" badge anywhere that is not production (teroclass.com) ──
 const PROD_HOSTS=['teroclass.com','www.teroclass.com'];
 function isProductionHost(h){return PROD_HOSTS.includes(String(h||location.hostname).toLowerCase());}
+// shown on any host that is not teroclass.com / www.teroclass.com, or when APP_ENV is set to something else than "production"
+function isTestDeployment(){return !isProductionHost(location.hostname)||(!!APP_CONFIG.appEnv&&APP_CONFIG.appEnv!=='production');}
 function renderEnvBadge(){
   const b=document.getElementById('env-badge');if(!b)return;
-  const prod=isProductionHost(location.hostname);
-  b.hidden=prod;
-  if(!prod)b.title=location.hostname;
+  const test=isTestDeployment();
+  b.hidden=!test;document.body.classList.toggle('env-test',test);
+  if(test)b.title=location.hostname+(APP_CONFIG.appEnv?' · '+APP_CONFIG.appEnv:'');
 }
 
 // ── TC-12: lightweight client error reporter → /api/client-error (Sentry on the server if SENTRY_DSN) ──

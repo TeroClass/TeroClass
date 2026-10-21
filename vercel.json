@@ -85,6 +85,9 @@
     "api/notify/session.js": {
       "maxDuration": 30
     },
+    "api/class/ticket.js": {
+      "maxDuration": 15
+    },
     "api/notify/invite.js": {
       "maxDuration": 20
     },

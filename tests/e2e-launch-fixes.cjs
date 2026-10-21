@@ -207,6 +207,16 @@ const shot = async (page, n) => { if (SHOTS) await page.screenshot({ path: `${SH
     await page.goto(base + '/'); await page.waitForSelector('#tab-login', { state: 'visible' });
     if (await page.isVisible('#env-badge')) throw new Error('badge visible in production');
     await ctx.close();
+    // APP_ENV=staging on the production host name → shown; APP_ENV=production → hidden
+    ({ ctx, page, base } = await setup(browser, { host: 'teroclass.com', api: u => u.pathname === '/api/config' ? { contentType: 'application/json', body: JSON.stringify({ appEnv: 'staging' }) } : null }));
+    await page.goto(base + '/'); await page.waitForSelector('#tab-login', { state: 'visible' });
+    await page.waitForSelector('#env-badge', { state: 'visible' });
+    if (!/Versión de prueba|Test version/.test(await page.textContent('#env-badge'))) throw new Error('badge text');
+    await ctx.close();
+    ({ ctx, page, base } = await setup(browser, { host: 'teroclass.com', api: u => u.pathname === '/api/config' ? { contentType: 'application/json', body: JSON.stringify({ appEnv: 'production' }) } : null }));
+    await page.goto(base + '/'); await page.waitForSelector('#tab-login', { state: 'visible' }); await sleep(300);
+    if (await page.isVisible('#env-badge')) throw new Error('badge visible with APP_ENV=production');
+    await ctx.close();
   });
 
   // ── TC-18: Cloudflare Turnstile only when a site key is configured ──

@@ -33,6 +33,9 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     const u = new URL(r.request().url());
     if (u.pathname === '/api/class/config') { net.config++; return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ configured: false }) }); }
     if (u.pathname === '/api/class/token') { net.token++; return r.fulfill({ status: 501, contentType: 'application/json', body: JSON.stringify({ configured: false }) }); }
+    if (u.pathname === '/api/class/ticket') { net.ticket = (net.ticket || 0) + 1; return r.fulfill({ status: 501, contentType: 'application/json', body: JSON.stringify({ configured: false }) }); }
+    // TC-23: this suite runs with a "connected recorder" (RECORDING_ENABLED); the honest label without it is checked below
+    if (u.pathname === '/api/config') return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ recording: true }) });
     if (u.pathname === '/live-class.js') return r.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(PUB, 'live-class.js')) });
     if (u.pathname === '/live-class.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(path.join(PUB, 'live-class.css')) });
     if (/^\/insights-(view|panel)\.(js|css)$/.test(u.pathname)) return r.fulfill({ contentType: u.pathname.endsWith('.css') ? 'text/css' : 'application/javascript', body: fs.readFileSync(path.join(PUB, u.pathname.slice(1))) });
@@ -68,25 +71,26 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.waitForSelector('#screen-app.active');
   });
 
-  await step('Sidebar: "Live class" abre el panel con banner Demo y SUS clases (sin sesiones inventadas, P-07)', async () => {
+  await step('Sidebar: "Live class" abre el panel con SUS clases (sin sesiones inventadas ni banner demo, P-07); la demo solo en "Try the demo"', async () => {
     await page.click('#nav-live');
     await page.waitForSelector('#panel-live.active .lc-wrap');
     if (!(await page.isVisible('#nav-live'))) throw new Error('nav oculto');
     const h1 = await text('#lc-root h1'); if (!/Live class/.test(h1)) throw new Error(h1);
-    const b = await text('#lc-root .lc-banner'); if (!/Demo data — real insights activate when the live classroom is connected/.test(b)) throw new Error('banner: ' + b);
+    if (await page.$('#lc-root .lc-banner, #lc-root .lc-chip-demo')) throw new Error('banner / chip demo en el inicio real');
+    if (!/Try the demo/.test(await text('#lc-demo-card'))) throw new Error('falta "Try the demo"');
     await page.waitForFunction(() => /No classes in the next two weeks/.test(document.getElementById('lc-up-list')?.textContent || ''));
     if ((await page.$$('.lc-session')).length !== 0) throw new Error('sesiones inventadas');
     if (/Making plans|Reacciones químicas: balanceo|Insights ready/.test(await text('#lc-root'))) throw new Error('contenido de demo inventado en el inicio');
-    if (await page.isChecked('#lc-simulate')) throw new Error('participantes de ejemplo encendidos por defecto');
+    if (await page.$('#lc-simulate')) throw new Error('casilla de participantes de ejemplo (ahora: "Try the demo")');
     const opts = await page.$$eval('#lc-plan-select option', os => os.map(o => o.textContent));
+    if (opts[0] !== 'No plan' || opts.some(o => /Sample/.test(o))) throw new Error('opciones: ' + opts);
     if (!opts.some(o => o.includes('Reacciones químicas 3°B <script>'))) throw new Error('la clase guardada no aparece: ' + opts);
     await page.waitForFunction(() => true);
   });
   await shot('1-home');
 
   await step('Lobby: vista previa real de cámara/micrófono y selectores de dispositivo', async () => {
-    await page.check('#lc-simulate'); // sample participants only when asked for (P-07)
-    await page.click('#lc-start-btn');
+    await page.click('#lc-try-demo'); // sample participants / plan / insights only in the explicit demo (P-07)
     await page.waitForSelector('#lc-preview-video');
     await page.waitForFunction(() => { const v = document.getElementById('lc-preview-video'); return v && v.srcObject && v.srcObject.getVideoTracks().length && v.readyState >= 2; }, null, { timeout: 8000 });
     await page.waitForFunction(() => document.querySelectorAll('#lc-cam-select option').length >= 1 && document.querySelectorAll('#lc-mic-select option').length >= 1);
@@ -315,8 +319,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
 
   await step('Como estudiante: indicador de grabación visible, sin control de pausa; plan parseado y escapado', async () => {
     // P-09: there is no role picker (the role comes from the class); the student UI is checked by setting it here
-    await page.check('#lc-simulate').catch(() => {});
-    await page.evaluate(() => { LiveClass.state.lobby.role = 'student'; LiveClass.state.simulate = true; });
+    await page.evaluate(() => { LiveClass.state.lobby.role = 'student'; LiveClass.state.demo = true; });
     if (!/You will be recorded/.test(await text('#lc-consent-summary'))) throw new Error('resumen');
     await page.click('#lc-join');
     await page.waitForSelector('#lc-room');
@@ -348,7 +351,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
   await step('Sin permiso de cámara/micrófono: aviso claro y se puede entrar igual', async () => {
     await page.click('[data-lc="back-home"]');
     await page.evaluate(() => { window.__gum = navigator.mediaDevices.getUserMedia; navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('denied', 'NotAllowedError')); });
-    await page.click('#lc-start-btn');
+    await page.click('#lc-try-demo');
     await page.waitForSelector('#lc-media-msg.show');
     if (!/blocked/.test(await text('#lc-media-msg'))) throw new Error(await text('#lc-media-msg'));
     if (!(await page.isVisible('#lc-preview-off'))) throw new Error('sin placeholder');
@@ -375,10 +378,28 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.waitForSelector('#lc-rec[data-state="paused"]');
     await page.focus('#lc-ctl-pause'); await page.keyboard.press('Space');
     await page.waitForSelector('#lc-rec[data-state="on"]');
+    // a quick room (not the demo): only you, no invented people, no "Demo" chip; invite link needs the video classroom
+    if (await page.$('.lc-tile[data-pid^="sim-"], #lc-room .lc-chip-demo, #lc-room .lc-banner')) throw new Error('contenido demo en una sala real');
+    if (!/Preview mode/.test(await text('#lc-provider-chip'))) throw new Error('chip: ' + await text('#lc-provider-chip'));
+    await page.click('#lc-invite-link');
+    await page.waitForFunction(() => /once the video classroom is connected/.test(document.getElementById('toast')?.textContent || ''));
+    if (net.ticket !== 1) throw new Error('no pidió el link de invitación');
+    await page.click('#lc-ctl-end'); await page.click('#lc-end-confirm');
+    await page.waitForSelector('#lc-demo-card'); // a quick room ends at home: no invented insights (P-07 / P-08)
+    // TC-23: without a connected recorder (RECORDING_ENABLED) the indicator never says "Recording"
+    await page.evaluate(() => { APP_CONFIG.recording = false; });
+    await page.click('#lc-start-btn'); await page.click('#lc-join'); await page.waitForSelector('#lc-room');
+    const rec = await text('#lc-rec');
+    if (!/Recording ready to be turned on — nothing is recorded yet/.test(rec) || /Recording — only/.test(rec)) throw new Error('indicador sin grabador: ' + rec);
+    if (await page.$eval('#lc-rec', e => e.dataset.recorder) !== 'off') throw new Error('data-recorder');
+    await shot('rec-ready');
+    await page.click('#lc-ctl-end'); await page.click('#lc-end-confirm'); await page.waitForSelector('#lc-demo-card');
+    await page.evaluate(() => { APP_CONFIG.recording = true; });
   });
 
   await step('Responsive a 768px: sin scroll horizontal en sala, inicio, lobby e insights', async () => {
     await page.setViewportSize({ width: 768, height: 900 });
+    await page.click('#lc-try-demo'); await page.click('#lc-join'); await page.waitForSelector('#lc-room');
     await sleep(200);
     const over = () => page.evaluate(() => { const r = document.getElementById('lc-root'); const p = document.documentElement; return Math.max(r.scrollWidth - r.clientWidth, p.scrollWidth - p.clientWidth); });
     let o = await over(); if (o > 1) throw new Error('sala desborda ' + o);
@@ -416,12 +437,11 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     const tip = await text('#nav-live .sib-tooltip'); if (tip !== 'Aula en vivo') throw new Error('tooltip: ' + tip);
     await page.click('#nav-live');
     if (!/Aula en vivo/.test(await text('#lc-root h1'))) throw new Error('h1');
-    if (!/Datos de demostración/.test(await text('.lc-banner'))) throw new Error('banner');
+    if (!/Probar la demo/.test(await text('#lc-demo-card'))) throw new Error('Probar la demo');
     await check('inicio');
     // Ana revoked her consent (from another device): the lobby asks again
     M.db.user_consents.filter(c => !c.revoked_at).forEach(c => { c.revoked_at = new Date().toISOString(); c.revoked_reason = 'user'; });
     await page.selectOption('#lc-plan-select', { index: 1 }); // the saved chemistry class
-    await page.check('#lc-simulate');
     await page.click('#lc-start-btn');
     await page.waitForSelector('.lc-lobby');
     if (!/Entrar a la clase/.test(await text('#lc-join'))) throw new Error('botón entrar');
@@ -448,8 +468,14 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await shot('9-room-es');
     await page.click('#lc-ctl-end'); await page.waitForSelector('#lc-end-modal:not([hidden])'); await check('diálogo');
     await page.click('#lc-end-confirm');
+    await page.waitForSelector('#lc-demo-card'); await check('inicio después de una sala rápida');
+    // the explicit demo: processing + sample insights (chemistry sample for the discipline labels)
+    await page.click('#lc-try-demo'); await page.waitForSelector('.lc-lobby'); await check('lobby demo');
+    await page.click('#lc-join'); await page.waitForSelector('#lc-room');
+    await page.click('#lc-ctl-end'); await page.click('#lc-end-confirm');
     await page.waitForSelector('.lc-processing'); await check('procesamiento');
     await page.waitForSelector('.lc-insights', { timeout: 8000 });
+    await page.click('[data-lc="sample"][data-k="chemistry"]');
     for (const sub of ['overview', 'recap', 'progress', 'feedback', 'vocab']) { await page.click('#lc-sub-' + sub); await check('insights ' + sub); }
     if (!/Seguimiento de conceptos/.test(await (async () => { await page.click('#lc-sub-progress'); return text('.lc-sub-body'); })())) throw new Error('etiquetas de disciplina');
     await page.click('#lc-ins-teacher'); await check('insights docente');

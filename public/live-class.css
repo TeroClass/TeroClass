@@ -283,3 +283,9 @@ dialog.lc-dialog .lc-modal{max-width:none;box-shadow:0 18px 50px rgba(0,0,0,.3)}
 .lc-share-row input{flex:1;min-width:0;font:inherit;font-size:12px;padding:6px 8px;border:1px solid var(--lc-border,#e2dff0);border-radius:8px;background:#fff}
 .lc-share-row a.lc-btn{text-decoration:none}
 .lc-rec-demo{font-size:11px;font-weight:600;background:#f1f1f4;color:#4a4a55;border-radius:999px;padding:2px 8px;margin-left:6px;white-space:nowrap}
+.lc-note{display:flex;gap:8px;align-items:flex-start;margin:0 0 14px;padding:10px 14px;border-radius:12px;background:#f1f1f4;color:#3f3f4a;font-size:13.5px}
+.lc-demo-card h2{display:flex;gap:6px;align-items:center}
+.lc-share-apps{margin-top:8px}
+/* TC-23: no recorder connected → the indicator is neutral (never the red "recording" look) */
+.lc-rec[data-recorder="off"][data-state="on"]{background:#3a3a4a;color:#e4e4ee;box-shadow:none}
+.lc-rec[data-recorder="off"][data-state="on"] .lc-rec-dot{background:#9b9bb0;animation:none}

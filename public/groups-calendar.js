@@ -228,6 +228,7 @@
     $('screen-auth').style.display = 'none'; $('screen-app').classList.add('active');
     if (typeof renderUserMenu === 'function') renderUserMenu();
     showPanel('student');
+    window.LiveClass?.consumeRoomLink?.(); // TC-13: a teacher's invitation link to a quick room
   }
   function leaveStudentMode() {
     studentMode = false; ST.data = null; ST.error = null; ST.seq++;

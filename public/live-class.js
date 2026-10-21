@@ -224,7 +224,8 @@ Cierre y ticket de salida (5 min)
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (session?.access_token || '') },
         // consent is NOT sent: the server reads it from the database (my_consent) with this session
-        body: JSON.stringify({ room: o.room, name: o.name, role: o.role }),
+        // the role is decided by the server (P-09); a ticket = the invitation link of an ad-hoc room (TC-13)
+        body: JSON.stringify({ room: o.room, role: o.role, ...(o.ticket ? { ticket: o.ticket } : {}) }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.token) throw new Error(j.error || 'Could not join the class.');
@@ -360,6 +361,8 @@ Cierre y ticket de salida (5 min)
     sampleKey: 'language',
     sessionTitle: '',
     sessionId: null, sessionRole: null, // calendar session (groups-calendar.js): everyone in it joins the same room
+    demo: false,           // P-07: only the explicit "Try the demo" path shows invented people / sample plans / sample insights
+    adhocRoom: null, ticket: null, // TC-13: an ad-hoc room joined with the creator's invitation link (?room=…&t=…)
     lobby: null,
     room: null,
     insights: { tab: 'student', student: 0, sub: 'overview', role: 'teacher' },
@@ -436,22 +439,27 @@ Cierre y ticket de salida (5 min)
     const list = (typeof plannings !== 'undefined' && Array.isArray(plannings)) ? plannings : [];
     if (HOME.rows === null) setTimeout(loadHomeSessions, 0);
     const opts = list.map(p => `<option value="${esc(p.id)}" data-no-i18n>${esc(p.title || 'Class')}</option>`).join('');
+    const live = typeof APP_CONFIG !== 'undefined' && APP_CONFIG.live === true;
     return `<div class="lc-wrap">
-      ${banner()}
       <header class="lc-head">
         <div><h1><span aria-hidden="true">🎥</span> <span>Live class</span></h1>
         <p class="lc-sub">Teach online from TeroClass: video, your class plan beside you, and learning insights after class.</p></div>
-        ${demoChip()}
       </header>
+      ${live ? '' : '<p class="lc-note" id="lc-not-connected" role="note"><span aria-hidden="true" data-no-i18n>ℹ️</span> <span>The video classroom is not connected yet: a room opens in preview mode (only you, nothing is recorded).</span></p>'}
       <section class="lc-card lc-start" aria-labelledby="lc-start-h">
         <h2 id="lc-start-h">Start a live class</h2>
+        <p class="lc-hint">Your scheduled classes are in the Calendar. Here you can open a quick room and invite your students with a link.</p>
         <div class="lc-start-row">
           <div class="lc-field"><label for="lc-plan-select">Class plan</label>
-            <select id="lc-plan-select"><option value="">Sample plan (demo)</option>${opts}</select></div>
+            <select id="lc-plan-select"><option value="">No plan</option>${opts}</select></div>
           <button type="button" class="lc-btn lc-primary" data-lc="start" id="lc-start-btn">▶ Start live class</button>
         </div>
-        <label class="lc-check lc-sim"><input type="checkbox" id="lc-simulate" ${S.simulate ? 'checked' : ''}> <span>Show sample participants (demo, invented names)</span></label>
         ${list.length ? '' : '<p class="lc-hint">Tip: save a class first and it will appear here with its activity timers.</p>'}
+      </section>
+      <section class="lc-card lc-demo-card" id="lc-demo-card" aria-labelledby="lc-demo-h">
+        <h2 id="lc-demo-h"><span aria-hidden="true">🧪</span> <span>Try the demo</span></h2>
+        <p class="lc-hint">See how a class looks with a sample plan, invented participants and sample insights. Nothing is saved and nobody else sees it.</p>
+        <button type="button" class="lc-btn" data-lc="try-demo" id="lc-try-demo">▶ Try the demo</button>
       </section>
       <div class="lc-two">
         <section class="lc-card" aria-labelledby="lc-up-h">
@@ -487,7 +495,8 @@ Cierre y ticket de salida (5 min)
   function newLobby() {
     const isStaff = !!currentUser && ['teacher', 'org_admin', 'superadmin'].includes(String(currentUser.role || 'teacher'));
     return {
-      name: (currentUser && currentUser.name) || '', role: S.sessionRole || (isStaff ? 'teacher' : 'student'),
+      // P-09: the role comes from the class (calendar row) or the room: whoever opens an invitation link joins as a student
+      name: (currentUser && currentUser.name) || '', role: S.sessionRole || (S.adhocRoom ? 'student' : isStaff ? 'teacher' : 'student'),
       camId: '', micId: '', stream: null, mediaError: '', mic: true, cam: true, level: 0,
       devices: { cams: [], mics: [] },
       // recording consent: 'loading' → 'ask' (one checkbox) or 'granted' (asked before, nothing to do)
@@ -647,9 +656,9 @@ Cierre y ticket de salida (5 min)
   function lobbyHtml() {
     const L = S.lobby;
     return `<div class="lc-wrap lc-lobby">
-      ${banner()}
+      ${S.demo ? banner() : ''}
       <button type="button" class="lc-link" data-lc="back-home">${studentBack() ? '← Back to my classes' : '← Back to live classes'}</button>
-      <header class="lc-head"><div><h1>Get ready to join</h1><p class="lc-sub" data-no-i18n>${esc(S.sessionTitle)}</p></div>${demoChip()}</header>
+      <header class="lc-head"><div><h1>Get ready to join</h1><p class="lc-sub" data-no-i18n>${esc(S.sessionTitle)}</p></div>${S.demo ? demoChip() : ''}</header>
       <div class="lc-lobby-grid">
         <section class="lc-card" aria-labelledby="lc-prev-h">
           <h2 id="lc-prev-h">Camera and microphone</h2>
@@ -819,6 +828,7 @@ Cierre y ticket de salida (5 min)
   // ════════════════════════════════════════════════════════════════════════════════════════
   // ROOM
   // ════════════════════════════════════════════════════════════════════════════════════════
+  const recorderOn = () => typeof APP_CONFIG !== 'undefined' && APP_CONFIG.recording === true;
   const roomOwnerKey = () => String(currentUser?.id || 'guest').replace(/-/g, '').slice(0, 12).toLowerCase();
   const randId = () => Math.random().toString(36).slice(2, 10);
   const isNarrow = () => window.matchMedia && window.matchMedia('(max-width: 900px)').matches;
@@ -828,7 +838,7 @@ Cierre y ticket de salida (5 min)
     let kind = await detectProviderKind();
     // P-06: the plan attached to this calendar class; a calendar class without a plan shows none (no invented sample);
     // only the free "Start live class" with "Sample plan (demo)" uses a sample
-    const planText = (S.planning && S.planning.content) || (S.sessionId ? (S.sessionTitle || '') : (S.sampleKey === 'chemistry' ? SAMPLE_PLAN_ES : SAMPLE_PLAN_EN));
+    const planText = (S.planning && S.planning.content) || (S.demo ? (S.sampleKey === 'chemistry' ? SAMPLE_PLAN_ES : SAMPLE_PLAN_EN) : (S.sessionTitle || ''));
     const plan = parsePlanSections(planText, parseInt(S.planning?.params?.duration, 10) || 45);
     plan.sections.forEach(s => { s.elapsed = 0; });
     // consent from the database (lobby): the LiveKit token reads it there too, never from this browser
@@ -845,13 +855,14 @@ Cierre y ticket de salida (5 min)
       // A calendar session → one room for its teacher and students. TODO(live): api/class/token.js grants
       // roomAdmin by "<ownerKey>-…" rooms; with real LiveKit, look the session up (teacher → admin) instead.
       roomName: S.sessionId ? `sess-${String(S.sessionId).replace(/[^A-Za-z0-9]/g, '').slice(0, 32)}`
+        : S.adhocRoom ? S.adhocRoom
         : `${roomOwnerKey()}-${S.planning?.id ? String(S.planning.id).replace(/-/g, '').slice(0, 10) : randId()}`,
       endOpen: false,
     };
     const connectOpts = provider => ({
       room: R.roomName, name: R.name, role: R.role, recorded, minor: R.minor, guardianOk: R.guardianOk,
       localStream: R.stream, mic: R.mic, cam: R.cam, provider, title: S.sessionTitle,
-      simulate: !!S.simulate || inViewAs(), teacherName: S.teacherName || '',
+      simulate: !!S.demo || inViewAs(), teacherName: S.teacherName || '', ticket: S.ticket || null,
     });
     let provider = createProvider(kind);
     wireProvider(provider, R);
@@ -917,8 +928,8 @@ Cierre y ticket de salida (5 min)
     const R = S.room; const teacher = R.role === 'teacher';
     return `<div class="lc-room${R.side ? ' side-open' : ''}" id="lc-room">
       <div class="lc-room-top">
-        <div class="lc-room-title">${demoChip()} <b data-no-i18n>${esc(S.sessionTitle)}</b> <span class="lc-chip" id="lc-provider-chip">${R.kind === 'livekit' ? 'LiveKit' : 'Simulated participants'}</span></div>
-        <div class="lc-rec" id="lc-rec" data-state="${esc(R.rec.state)}" role="status"><span class="lc-rec-dot" aria-hidden="true"></span><span class="lc-rec-label" aria-live="polite">Recording — only people who gave consent</span><span class="lc-rec-time" data-no-i18n id="lc-rec-time"></span><span class="lc-rec-me" id="lc-rec-me"${R.recorded ? ' hidden' : ''}>You: not recorded</span>${R.kind === 'demo' ? '<span class="lc-rec-demo" title="' + esc(tr('The recorder is not connected yet: nothing is saved.')) + '">Preview: nothing is recorded yet</span>' : ''}</div>
+        <div class="lc-room-title">${S.demo ? demoChip() : ''} <b data-no-i18n>${esc(S.sessionTitle)}</b> <span class="lc-chip" id="lc-provider-chip">${R.kind === 'livekit' ? 'LiveKit' : S.demo ? 'Simulated participants' : 'Preview mode'}</span>${R.role === 'teacher' && !S.sessionId && !S.demo ? ' <button type="button" class="lc-btn lc-sm" data-lc="invite-link" id="lc-invite-link">🔗 <span>Invite students</span></button>' : ''}</div>
+        <div class="lc-rec" id="lc-rec" data-state="${esc(R.rec.state)}" data-recorder="${recorderOn() ? 'on' : 'off'}" role="status"><span class="lc-rec-dot" aria-hidden="true"></span><span class="lc-rec-label" aria-live="polite">${recorderOn() ? 'Recording — only people who gave consent' : 'Recording ready to be turned on — nothing is recorded yet'}</span><span class="lc-rec-time" data-no-i18n id="lc-rec-time"></span><span class="lc-rec-me" id="lc-rec-me"${R.recorded ? ' hidden' : ''}>You: not recorded</span></div>
         <div class="lc-talk" id="lc-talk" role="group" aria-label="${esc(tr('Talk time'))}">
           <span class="lc-talk-lb">Teacher</span> <b data-no-i18n id="lc-talk-t">0%</b>
           <div class="lc-talk-bar" aria-hidden="true"><span id="lc-talk-bar-t"></span></div>
@@ -926,7 +937,7 @@ Cierre y ticket de salida (5 min)
         </div>
         <div class="lc-clock" data-no-i18n id="lc-clock" aria-label="${esc(tr('Class time'))}">00:00</div>
       </div>
-      ${banner(true)}
+      ${S.demo ? banner(true) : ''}
       <div class="lc-room-body">
         <div class="lc-stage"><div class="lc-grid" id="lc-grid"></div></div>
         <aside class="lc-side" id="lc-side" aria-label="${esc(tr('Side panel'))}">
@@ -1060,7 +1071,7 @@ Cierre y ticket de salida (5 min)
       <div class="lc-plan-head">
         <div class="lc-plan-title" data-no-i18n>${esc(P.title || S.sessionTitle)}</div>
         <div class="lc-plan-total"><span>Planned</span> <b data-no-i18n>${total} min</b> · <span>Activities</span> <b data-no-i18n>${P.sections.length}</b></div>
-        ${S.planning ? '' : S.sessionId ? '<div class="lc-hint" id="lc-plan-none">No plan attached to this class. Attach a saved class from this class in the Calendar.</div>' : '<div class="lc-hint">Sample plan — open a saved class to see yours here.</div>'}
+        ${S.planning ? '' : S.sessionId ? '<div class="lc-hint" id="lc-plan-none">No plan attached to this class. Attach a saved class from this class in the Calendar.</div>' : S.demo ? '<div class="lc-hint">Sample plan — open a saved class to see yours here.</div>' : '<div class="lc-hint" id="lc-plan-none">No plan for this room. Choose a saved class when you start it.</div>'}
       </div>
       ${P.intro ? `<details class="lc-plan-intro"><summary>Objectives and notes</summary><div class="cls-doc lc-plan-doc">${formatDoc('\n' + P.intro)}</div></details>` : ''}
       <ol class="lc-secs">${P.sections.map((s, i) => `<li class="lc-sec" id="lc-sec-${i}">
@@ -1116,7 +1127,9 @@ Cierre y ticket de salida (5 min)
     if (rec) {
       rec.dataset.state = st;
       const lb = rec.querySelector('.lc-rec-label');
-      const k = st === 'on' ? 'Recording — only people who gave consent' : st === 'paused' ? 'Recording paused — resumes automatically' : 'Not recording';
+      // TC-23: "Recording" only when a recorder is really connected (RECORDING_ENABLED); otherwise say it is ready
+      const k = st === 'on' ? (recorderOn() ? 'Recording — only people who gave consent' : 'Recording ready to be turned on — nothing is recorded yet')
+        : st === 'paused' ? 'Recording paused — resumes automatically' : 'Not recording';
       if (lb.dataset.k !== k) { lb.dataset.k = k; lb.textContent = k; }
       const t = document.getElementById('lc-rec-time');
       if (t) t.textContent = st === 'paused' && R.rec.resumeAt ? mmss((R.rec.resumeAt - Date.now()) / 1000) : '';
@@ -1260,6 +1273,13 @@ Cierre y ticket de salida (5 min)
     teardownRoom();
     // the class document keeps a "class end" version (teacher / substitute; nothing is created if nobody wrote)
     if (sess && typeof sb !== 'undefined') sb.rpc('classdoc_add_version', { p_session: sess.id, p_label: 'class_end' }).then(() => {}, () => {});
+    // P-07 / P-08: sample insights only for the explicit demo; a calendar class gets its (demo-flagged) stored insights;
+    // a quick room outside the calendar (or a student) gets none — nothing invented is shown as if it were real
+    if (!S.demo && !sess) {
+      S.view = 'home'; S.adhocRoom = null; S.ticket = null; render();
+      toast(R.role === 'teacher' ? 'Class ended. Insights are prepared for the classes scheduled in the Calendar.' : 'You left the class.', 'ok');
+      return;
+    }
     S.processing = summary;
     S.insights = { tab: 'student', student: 0, sub: 'overview', role: summary.role, live: summary, liveSample: S.sampleKey, saved: null, saving: !!sess };
     S.view = 'processing'; render(); runProcessing();
@@ -1419,11 +1439,57 @@ Cierre y ticket de salida (5 min)
     const doc = document.getElementById('lp-doc');
     return { id: cr.id || null, title: cr.title || '', content: ((doc && doc.innerText) || cr.text || '').trim(), params: cr.params || {} };
   }
+  // ── TC-13: invitation link of a quick room (only its creator; needs the real video classroom) ──
+  async function inviteLink(btn) {
+    const R = S.room; if (!R || R.role !== 'teacher' || S.sessionId) return;
+    if (inViewAs()) { if (typeof vaBlocked === 'function') vaBlocked(); return; }
+    if (btn) btn.disabled = true;
+    let j = null; let status = 0;
+    try {
+      const { data: { session } = {} } = await sb.auth.getSession();
+      const r = await fetch('/api/class/ticket', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (session?.access_token || '') },
+        body: JSON.stringify({ room: R.roomName }) });
+      status = r.status; j = await r.json().catch(() => null);
+    } catch (e) { status = 0; }
+    if (btn) btn.disabled = false;
+    if (status === 501) { toast('Students can join a quick room with a link once the video classroom is connected. Your scheduled classes are in the Calendar.', 'warn'); return; }
+    if (status !== 200 || !j || !j.link) { toast((j && j.error) || 'Could not create the invitation link. Try again.', 'err'); return; }
+    const msg = tr('Join my class on TeroClass:') + ' ' + j.link;
+    const until = (() => { try { return new Date(j.expires_at).toLocaleTimeString(typeof uiLocale === 'function' ? uiLocale() : undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); } catch (e) { return ''; } })();
+    profileModal(`<h2 id="lc-pm-h">Invite students to this room</h2>
+      <p>Only people with this link can join, after signing in. It works until <b data-no-i18n>${esc(until)}</b>.</p>
+      <div class="lc-share-row"><input type="text" readonly id="lc-inv-link" value="${esc(j.link)}" data-no-i18n aria-label="${esc(tr('Invitation link'))}">
+        <button type="button" class="lc-btn lc-sm" data-pm="copy-link">📋 <span>Copy link</span></button></div>
+      <div class="lc-share-row lc-share-apps"><a class="lc-btn lc-sm" href="https://wa.me/?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">WhatsApp</a>
+        <a class="lc-btn lc-sm" href="mailto:?subject=${encodeURIComponent(tr('Live class on TeroClass'))}&body=${encodeURIComponent(msg)}">✉️ <span>Email</span></a></div>
+      <div class="lc-modal-actions"><button type="button" class="lc-btn" data-pm="cancel">Close</button></div>`);
+  }
+  // ?room=<ad-hoc room>&t=<ticket> (a teacher's invitation link): remembered through the sign-in, then opens the lobby
+  const ROOM_LINK_KEY = 'tc_room_link';
+  (function rememberRoomLink() {
+    try {
+      const u = new URL(location.href); const room = u.searchParams.get('room'); const t = u.searchParams.get('t');
+      if (!room || !t || !/^[0-9a-f]{12}-[A-Za-z0-9_-]{1,51}$/.test(room) || t.length > 1000) return;
+      localStorage.setItem(ROOM_LINK_KEY, JSON.stringify({ room, t, at: Date.now() }));
+      u.searchParams.delete('room'); u.searchParams.delete('t'); history.replaceState(null, '', u.pathname + (u.search || '') + u.hash);
+    } catch (e) { /* private mode: the link just doesn't survive a sign-in */ }
+  })();
+  function consumeRoomLink() {
+    let x = null;
+    try { x = JSON.parse(localStorage.getItem(ROOM_LINK_KEY) || 'null'); localStorage.removeItem(ROOM_LINK_KEY); } catch (e) { x = null; }
+    if (!x || !x.room || !x.t || Date.now() - (x.at || 0) > 6 * 3600e3 || !currentUser || inViewAs()) return false;
+    if (S.room) return false;
+    S.planning = null; S.sessionId = null; S.sessionRole = null; S.demo = false; S.teacherName = '';
+    S.adhocRoom = x.room; S.ticket = x.t; S.sessionTitle = tr('Live class');
+    if (typeof showPanel === 'function') showPanel('live');
+    goLobby();
+    return true;
+  }
   // Join a scheduled session from the calendar / student dashboard: {id, title, planning?}
   function openSession(sess) {
     if (S.room) { toast('A live class is already in progress.', 'err'); openLiveClass(); return; }
     const p = sess && sess.planning ? sess.planning : null;
-    S.planning = p; S.sessionId = (sess && sess.id) || null;
+    S.planning = p; S.sessionId = (sess && sess.id) || null; S.demo = false; S.adhocRoom = null; S.ticket = null;
     // role in THIS class (calendar row): a teacher enrolled in someone else's group joins as a student
     S.sessionRole = sess && (sess.role === 'teacher' || sess.role === 'student') ? sess.role : null;
     S.sessionGroup = (sess && sess.group) || '';
@@ -1437,7 +1503,7 @@ Cierre y ticket de salida (5 min)
   function openFromDoc() {
     if (S.room) { toast('A live class is already in progress.', 'err'); openLiveClass(); return; }
     const p = planningFromDoc(); if (!p) return;
-    S.sessionId = null; S.sessionRole = null;
+    S.sessionId = null; S.sessionRole = null; S.demo = false; S.adhocRoom = null; S.ticket = null; S.teacherName = '';
     S.planning = p; S.sampleKey = pickSampleKey(p);
     S.sessionTitle = p.title || (p.content.split('\n')[0] || '').trim() || 'Live class';
     if (typeof showPanel === 'function') showPanel('live');
@@ -1462,11 +1528,19 @@ Cierre y ticket de salida (5 min)
         const id = document.getElementById('lc-plan-select')?.value || '';
         const p = id && Array.isArray(plannings) ? plannings.find(x => String(x.id) === id) : null;
         S.planning = p ? { id: p.id, title: p.title, content: p.content, params: p.params || {} } : null;
-        S.sessionId = null; S.sessionRole = null; S.teacherName = '';
+        S.sessionId = null; S.sessionRole = null; S.teacherName = ''; S.demo = false; S.adhocRoom = null; S.ticket = null;
         S.sampleKey = p ? pickSampleKey(p) : 'language';
-        S.sessionTitle = p ? (p.title || 'Live class') : SAMPLES.language.title;
+        S.sessionTitle = p ? (p.title || tr('Live class')) : tr('Live class');
         goLobby(); break;
       }
+      case 'try-demo': {
+        // P-07: the ONLY place with invented participants, a sample plan and sample insights — labelled "Demo" everywhere
+        S.planning = null; S.sessionId = null; S.sessionRole = null; S.adhocRoom = null; S.ticket = null;
+        S.demo = true; S.sampleKey = 'language'; S.teacherName = '';
+        S.sessionTitle = SAMPLES.language.title;
+        goLobby(); break;
+      }
+      case 'invite-link': inviteLink(el); break;
       case 'open-cal': if (window.GC?.openSession) window.GC.openSession(el.dataset.id); else if (typeof showPanel === 'function') showPanel('calendar'); break;
       case 'open-insights': if (typeof showPanel === 'function') showPanel('insights'); break;
       case 'back-home':
@@ -1541,7 +1615,6 @@ Cierre y ticket de salida (5 min)
   }
   function onChange(e) {
     const t = e.target; if (!root()?.contains(t)) return;
-    if (t.id === 'lc-simulate') { S.simulate = !!t.checked; return; }
     const L = S.lobby;
     if (L) {
       if (t.id === 'lc-cam-select') { L.camId = t.value; startPreview(); return; }
@@ -1662,6 +1735,11 @@ Cierre y ticket de salida (5 min)
     const b = e.target.closest('[data-pm]'); if (!b) return;
     const err = document.getElementById('lc-pm-err'); const setErr = m => { if (err) err.textContent = m ? tr(m) : ''; };
     if (b.dataset.pm === 'cancel') { closeProfileModal(); return; }
+    if (b.dataset.pm === 'copy-link') {
+      const v = document.getElementById('lc-inv-link')?.value || '';
+      (navigator.clipboard ? navigator.clipboard.writeText(v) : Promise.reject()).then(() => toast('✓ Copied!', 'ok'), () => { document.getElementById('lc-inv-link')?.select(); toast('Could not copy. Select the text and copy it manually (Ctrl+C / Cmd+C).', 'err'); });
+      return;
+    }
     if (b.dataset.pm === 'revoke') {
       b.disabled = true;
       try { await revokeConsent(); closeProfileModal(); toast("Recording turned off. We'll ask you again at your next class.", 'ok'); }
@@ -1693,7 +1771,7 @@ Cierre y ticket de salida (5 min)
   function reset() { teardownRoom(); teardownLobby(); S.lobby = null; S.view = 'home'; }
 
   window.LiveClass = {
-    open: openLiveClass, openFromDoc, openSession, onDocShown, reset, openConsentSettings, refreshProfileConsent,
+    open: openLiveClass, openFromDoc, openSession, onDocShown, reset, openConsentSettings, refreshProfileConsent, consumeRoomLink,
     providers: { LiveProvider, DemoProvider, LiveKitProvider }, detectProviderKind,
     parsePlanSections, pickSampleKey, SAMPLES, LK_CDN, CONSENT_VERSION,
     get state() { return S; },
@@ -1812,6 +1890,20 @@ Cierre y ticket de salida (5 min)
     'Open Insights': 'Abrir Insights', 'Open in Calendar': 'Abrir en el Calendario', 'No classes in the next two weeks. Schedule them in the Calendar.': 'No tenés clases en las próximas dos semanas. Programalas en el Calendario.',
     'No plan attached to this class. Attach a saved class from this class in the Calendar.': 'Esta clase no tiene un plan adjunto. Adjuntá una clase guardada desde esta clase en el Calendario.',
     'Teacher (sample)': 'Docente (ejemplo)', 'Participant': 'Participante',
+    // P-07 / TC-13 / TC-23 (2026-10)
+    'The video classroom is not connected yet: a room opens in preview mode (only you, nothing is recorded).': 'El aula de video todavía no está conectada: la sala se abre en modo vista previa (solo vos, no se graba nada).',
+    'Your scheduled classes are in the Calendar. Here you can open a quick room and invite your students with a link.': 'Tus clases programadas están en el Calendario. Acá podés abrir una sala rápida e invitar a tus estudiantes con un link.',
+    'No plan': 'Sin plan', 'Try the demo': 'Probar la demo', '▶ Try the demo': '▶ Probar la demo',
+    'See how a class looks with a sample plan, invented participants and sample insights. Nothing is saved and nobody else sees it.': 'Mirá cómo se ve una clase con un plan de ejemplo, participantes inventados e insights de ejemplo. No se guarda nada y nadie más lo ve.',
+    'Preview mode': 'Modo vista previa', 'Invite students': 'Invitar estudiantes',
+    'Recording ready to be turned on — nothing is recorded yet': 'Grabación lista para activarse — todavía no se graba nada',
+    'No plan for this room. Choose a saved class when you start it.': 'Esta sala no tiene plan. Elegí una clase guardada al iniciarla.',
+    'Class ended. Insights are prepared for the classes scheduled in the Calendar.': 'Clase terminada. Los insights se preparan para las clases programadas en el Calendario.', 'You left the class.': 'Saliste de la clase.',
+    'Students can join a quick room with a link once the video classroom is connected. Your scheduled classes are in the Calendar.': 'Los estudiantes van a poder entrar a una sala rápida con un link cuando se conecte el aula de video. Tus clases programadas están en el Calendario.',
+    'Could not create the invitation link. Try again.': 'No se pudo crear el link de invitación. Probá de nuevo.', 'Join my class on TeroClass:': 'Entrá a mi clase en TeroClass:',
+    'Invite students to this room': 'Invitar estudiantes a esta sala', 'Only people with this link can join, after signing in. It works until': 'Solo pueden entrar las personas que tengan este link, después de iniciar sesión. Funciona hasta las',
+    'Invitation link': 'Link de invitación', 'Copy link': 'Copiar link', 'Email': 'Email', 'Live class on TeroClass': 'Clase en vivo en TeroClass',
+    '✓ Copied!': '✓ ¡Copiado!', 'Could not copy. Select the text and copy it manually (Ctrl+C / Cmd+C).': 'No se pudo copiar. Seleccioná el texto y copialo a mano (Ctrl+C / Cmd+C).',
     'A parent or guardian must agree for participants under 18.': 'Para menores de 18, tiene que aceptar su madre, padre o tutor/a.',
     'I am the parent or guardian and I agree to the above.': 'Soy la madre, el padre o tutor/a y acepto lo de arriba.',
     "We ask only once. If you don't agree, you can still join the class without being recorded.": 'Te lo preguntamos una sola vez. Si no aceptás, podés entrar igual a la clase sin que te graben.',

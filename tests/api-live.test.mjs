@@ -6,6 +6,7 @@ import { createHmac, createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 
 const tokenMod = await import('../api/class/token.js');
+const ticketMod = await import('../api/class/ticket.js');
 const configMod = await import('../api/class/config.js');
 const webhookMod = await import('../api/livekit/webhook.js');
 const lib = await import('../api/_lib/livekit.js');
@@ -198,5 +199,51 @@ test('token: calendar class rooms are authorized by the database (teacher hosts,
   r = await call(body('teacher')); assert.equal(r.statusCode, 403);
   for (const lr of [null, 'admin']) { mockFetch({ liveRole: lr }); r = await call(body('student')); assert.equal(r.statusCode, 403); assert.equal(r.body.code, 'not_member'); }
   mockFetch({ liveFail: true }); r = await call(body('student')); assert.equal(r.statusCode, 503);
+  setEnv(false);
+});
+
+// ── TC-13 / P-09: invitation tickets for ad-hoc rooms; the server decides the role ──
+test('TC-13 ticket: only the creator of an ad-hoc room gets an invitation link; 501 without LiveKit', async () => {
+  setEnv(false); mockFetch();
+  let r = res(); await ticketMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { room } }, r);
+  assert.equal(r.statusCode, 501);
+  setEnv(true); mockFetch({ adhoc: 'guest' });
+  r = res(); await ticketMod.default({ method: 'POST', headers: {}, body: { room } }, r);
+  assert.equal(r.statusCode, 401);
+  r = res(); await ticketMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token', host: 'teroclass.com' }, body: { room } }, r);
+  assert.equal(r.statusCode, 200);
+  assert.ok(r.body.link.startsWith('https://teroclass.com/?room=' + encodeURIComponent(room) + '&t='));
+  assert.ok(Date.parse(r.body.expires_at) > Date.now() + 5 * 3600e3 && Date.parse(r.body.expires_at) <= Date.now() + 6 * 3600e3 + 2000);
+  assert.ok(!r.body.ticket.includes(ENV.LIVEKIT_API_SECRET));
+  r = res(); await ticketMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { room: 'ffffffffffff-x1' } }, r);
+  assert.equal(r.statusCode, 403, 'a guest (not the creator) cannot invite');
+  r = res(); await ticketMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { room: 'sess-' + 'a'.repeat(32) } }, r);
+  assert.equal(r.statusCode, 400, 'calendar classes never use tickets');
+  setEnv(false);
+});
+test('TC-13 token: a student joins an ad-hoc room ONLY with a valid ticket for THAT room; signed in is not enough', async () => {
+  setEnv(true); mockFetch({ adhoc: null });
+  const other = 'ffffffffffff-x1';
+  const call = async b => { const r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: b }, r); return r; };
+  assert.equal((await call({ room: other })).statusCode, 403, 'no ticket');
+  const t = ticketMod.signTicket(other, 'ffffffffffff');
+  let r = await call({ room: other, ticket: t });
+  assert.equal(r.statusCode, 200); assert.equal(r.body.role, 'student');
+  const c = b64d(r.body.token.split('.')[1]); assert.equal(c.video.roomAdmin, undefined); assert.equal(JSON.parse(c.metadata).role, 'student');
+  assert.equal((await call({ room: other, ticket: t, role: 'teacher' })).statusCode, 403, 'a ticket never makes you the teacher');
+  assert.equal((await call({ room: 'ffffffffffff-x2', ticket: t })).body.code, 'ticket', 'a ticket of another room');
+  assert.equal((await call({ room: other, ticket: t.slice(0, -2) + 'xx' })).statusCode, 403, 'tampered');
+  const old = ticketMod.signTicket(other, 'ffffffffffff', { now: Math.floor(Date.now() / 1000) - 7 * 3600 });
+  assert.equal((await call({ room: other, ticket: old })).body.code, 'ticket', 'expired');
+  setEnv(false);
+});
+test('P-09 token: the role comes from the server (host → teacher, calendar student → student), never chosen in the lobby', async () => {
+  setEnv(true); mockFetch();
+  let r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { room } }, r);
+  assert.equal(r.statusCode, 200); assert.equal(r.body.role, 'teacher');
+  const sid = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  mockFetch({ liveRole: 'student' });
+  r = res(); await tokenMod.default({ method: 'POST', headers: { authorization: 'Bearer good-token' }, body: { room: 'sess-' + sid.replace(/-/g, '') } }, r);
+  assert.equal(r.statusCode, 200); assert.equal(r.body.role, 'student');
   setEnv(false);
 });
