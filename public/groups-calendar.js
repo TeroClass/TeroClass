@@ -980,7 +980,9 @@
     const rows = people.map(p => `<tr>
         <td><span data-no-i18n>${esc(p.name || '—')}</span>${unitBadge(p)}</td><td data-no-i18n class="gc-mail">${esc(p.email || '')}</td>
         <td><span class="gc-chip">${p.admin ? 'Admin' : p.kind === 'teacher' ? 'Teacher' : 'Student'}</span></td>
-        <td><span class="gc-chip ${CST[p.status]?.[1] || ''}">${CST[p.status]?.[0] || 'Pending'}</span>${p.minor ? (p.guardian_consent ? ` <span class="gc-chip" title="${esc(tr('Under 18: the guardian gave consent'))}">👪 <span>Under 18 · guardian ✓</span></span>` : ` <span class="gc-chip neutral" title="${esc(tr('Under 18: not recorded until the guardian confirms from their link'))}">👪 <span>Under 18 · waiting for the guardian</span></span>`) : ''}${!p.linked ? ' <span class="gc-muted">(<span>not signed in yet</span>)</span>' : ''}</td>
+        <td><span class="gc-chip ${CST[p.status]?.[1] || ''}">${CST[p.status]?.[0] || 'Pending'}</span>${p.minor ? (p.guardian_source === 'institution'
+          ? ` <span class="gc-chip" title="${esc(tr('Under 18: your institution declared it collected the family\'s consent'))}">👪 <span>Under 18 · managed by the institution</span></span>`
+          : ` <span class="gc-chip" title="${esc(tr('Under 18: the student declared that their guardian agrees (not verified)'))}">👪 <span>Under 18 · guardian declared by the student</span></span>`) : ''}${!p.linked ? ' <span class="gc-muted">(<span>not signed in yet</span>)</span>' : ''}</td>
         <td data-no-i18n class="gc-cons-date">${esc(consDate(p.status_at))}</td></tr>`).join('');
     const people_ = `<h2 class="gc-cons-h"><span>People</span> <span class="gc-muted" data-no-i18n>(${people.length})</span></h2>
       ${(d.people || []).length ? `<div class="admin-card gc-tablecard"><table class="teachers-table gc-cons-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Date</th></tr></thead><tbody>
@@ -1518,7 +1520,8 @@
     'PH:Search by name, email or class': 'Buscar por nombre, email o clase', 'Search by name, email or class': 'Buscar por nombre, email o clase',
     'Export CSV': 'Exportar CSV', 'People': 'Personas', 'Justifications': 'Justificaciones', 'Name': 'Nombre', 'Email': 'Email', 'Date': 'Fecha',
     'Under 18 · guardian ✓': 'Menor de 18 · tutor/a ✓', 'Under 18: the guardian gave consent': 'Menor de 18: el tutor/a dio su consentimiento',
-    'Under 18 · waiting for the guardian': 'Menor de 18 · esperando al tutor/a', 'Under 18: not recorded until the guardian confirms from their link': 'Menor de 18: no se graba hasta que el tutor/a confirme desde su link',
+    'Under 18 · guardian declared by the student': 'Menor de 18 · tutor/a declarado por el estudiante', 'Under 18: the student declared that their guardian agrees (not verified)': 'Menor de 18: el estudiante declaró que su tutor/a está de acuerdo (no verificado)',
+    'Under 18 · managed by the institution': 'Menor de 18 · gestionado por la institución', "Under 18: your institution declared it collected the family's consent": 'Menor de 18: tu institución declaró que juntó el consentimiento de la familia',
     'Admin': 'Admin', 'Comments': 'Comentarios', 'Answers without a comment:': 'Respuestas sin comentario:', 'No comments yet.': 'Todavía no hay comentarios.', 'Latest comment': 'Último comentario',
     'One consent per person: recording (audio only), AI analysis and storage. Each person is asked once; a "no" is asked again at their next class, and the comment is optional. Saying no is a valid choice: those people join their classes normally, without being recorded. Only this institution sees the people it loaded and the comments addressed to it.':
       'Un solo consentimiento por persona: grabación (solo audio), análisis con IA y almacenamiento. A cada persona se le pregunta una vez; si dice que no, se le vuelve a preguntar en su próxima clase, y el comentario es opcional. Decir que no es una opción válida: esas personas participan normalmente de sus clases, sin ser grabadas. Solo esta institución ve a las personas que cargó y los comentarios dirigidos a ella.',

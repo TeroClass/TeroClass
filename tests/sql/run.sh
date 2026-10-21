@@ -24,7 +24,7 @@
 # Pre-launch audit fixes (launch_fixes.sql: registration by link off, invitations need acceptance + expiry, e-mail / IP /
 # document caps, ad-hoc rooms, plan of a class, data export, search_path) run with the other suites and after an upgrade
 # from git 203e2e1 (before the fixes) with data: data kept, institutions closed ONCE (re-opening survives a re-run),
-# pending invitations get an expiry, minors' self-given consents wait for the guardian; then launch_fixes.sql.
+# pending invitations get an expiry, minors' consents are kept and labelled "declared by the student"; then launch_fixes.sql.
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -192,13 +192,13 @@ if git cat-file -e 203e2e1:supabase/migrations/001_base.sql 2>/dev/null; then
     open_before=$($PSQL -At -d $UP6 -c "select count(*) from public.institutions where open_registration")
     minors_before=$($PSQL -At -d $UP6 -c "select count(*) from public.user_consents where is_minor and revoked_at is null and guardian_consent")
     if $PSQL -d $UP6 -f supabase/migrations/001_base.sql >/dev/null 2>&1; then
-      checks=$($PSQL -At -d $UP6 -c "select (select count(*) from public.institutions where open_registration)||'/'||(select count(*) from public.invitations where expires_at is null)||'/'||(select count(*) from public.invitations where accepted_at is null and expires_at < now() + interval '13 days')||'/'||(select count(*) from public.user_consents where is_minor and revoked_at is null and guardian_consent)||'/'||(select count(*) from public.user_consents where is_minor and revoked_at is null and guardian_token is null)")
+      checks=$($PSQL -At -d $UP6 -c "select (select count(*) from public.institutions where open_registration)||'/'||(select count(*) from public.invitations where expires_at is null)||'/'||(select count(*) from public.invitations where accepted_at is null and expires_at < now() + interval '13 days')||'/'||(select count(*) from public.user_consents where is_minor and revoked_at is null and not guardian_consent)||'/'||(select count(*) from public.user_consents where is_minor and guardian_source is distinct from 'student')")
       $PSQL -d $UP6 -c "update public.institutions set open_registration = true where slug = (select slug from public.institutions order by created_at limit 1)" >/dev/null
       if $PSQL -d $UP6 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP6 -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
         after=$($PSQL -At -d $UP6 -c "$DATA")
         reopened=$($PSQL -At -d $UP6 -c "select count(*) from public.institutions where open_registration")
         if [[ "$before" == "$after" && "$open_before" != "0" && "$minors_before" != "0" && "$checks" == "0/0/0/0/0" && "$reopened" == "1" ]]; then
-          echo "upgrade (203e2e1 + data → current 001 ×2 → 002): data kept ($after), $open_before institutions closed once (re-opening kept), invitations expire, $minors_before minor consent(s) wait for the guardian"
+          echo "upgrade (203e2e1 + data → current 001 ×2 → 002): data kept ($after), $open_before institutions closed once (re-opening kept), invitations expire, $minors_before minor consent(s) kept as declared by the student"
         else echo "upgrade: **FAIL** 203e2e1 before=$before after=$after open_before=$open_before minors_before=$minors_before checks=$checks reopened=$reopened"; fail=1; fi
         for t in launch_fixes; do
           out=$($PSQL -d $UP6 -f tests/sql/$t.sql 2>&1)

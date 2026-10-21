@@ -3,7 +3,8 @@
 //  · "no" → "Está bien" pop-up with an OPTIONAL comment (P-11: can be sent empty), joins NOT recorded, asked again next
 //    class (nothing prefilled), the admin sees it in Groups → Consentimientos (badge, filters, CSV), email API called;
 //  · profile menu "Grabación de mis clases: Activada / Desactivada" (confirmation; next entry asks again; turn back on);
-//  · minor: guardian name + valid email + confirmation required; admin sees the flag, never the guardian's data;
+//  · minor (P-10): guardian name + valid email + the student's declaration; admin sees "declarado por el estudiante", never
+//    the guardian's data; with "the institution manages the families' consent" on, no guardian data is asked;
 //  · auto-recording indicator for everyone; the teacher pauses and resumes; View as is read-only; Métricas totals; mobile.
 // Mock Supabase (tests/mock-supabase.cjs + mock-consent.cjs) in headless Chromium.
 // Usage: NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-consent.cjs   (SHOTS=<dir> saves cons-*.png)
@@ -33,8 +34,6 @@ async function newCtx(browser, opts = {}) {
     if (u.pathname === '/api/notify/session') return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ configured: false, sent: 0 }) });
     if (u.pathname === '/api/billing/status') return r.fulfill({ contentType: 'application/json', body: '{"billing_configured":true,"billing_ok":true}' });
     if (u.pathname.startsWith('/api/')) return r.fulfill({ status: 404, body: '{}' });
-    // P-10: the guardian's page (public/tutor.html, as vercel.json serves it)
-    if (u.pathname === '/tutor') return r.fulfill({ contentType: 'text/html', body: fs.readFileSync(require('path').join(__dirname, '..', 'public', 'tutor.html'), 'utf8') });
     if (u.pathname === '/legal.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(require('path').join(__dirname, '..', 'public', 'legal.css'), 'utf8') });
     return r.fulfill({ contentType: 'text/html', body: HTML });
   });
@@ -138,7 +137,7 @@ async function openConsents(page) {
     const t = seed();
     const S = await open();
     await studentLobby(S.page, t.ana);
-    if ((await S.page.$$('#lc-consent-box input[type=checkbox]')).length !== 2) throw new Error('expected: consent + under 18 (the guardian confirms from their own link, P-10)');
+    if ((await S.page.$$('#lc-consent-box input[type=checkbox]:visible')).length !== 2) throw new Error('expected: consent + under 18 (the guardian part shows only for minors)');
     if (!/^Acepto que mis clases en TeroClass se graben \(solo audio\) y que la IA las analice para generar mis insights y mejorar las clases\.$/.test(await text(S.page, '.lc-consent-main'))) throw new Error('text: ' + await text(S.page, '.lc-consent-main'));
     if (!/Más información/.test(await text(S.page, '.lc-more summary'))) throw new Error('more info link');
     if (!/Te lo preguntamos una sola vez. Si no aceptás, podés entrar igual/.test(await text(S.page, '#lc-consent-box'))) throw new Error('can join anyway');
@@ -177,7 +176,8 @@ async function openConsents(page) {
     await S.page.click('#lc-join');
     await S.page.waitForSelector('#lc-decline-modal[open]');
     if (!/^Está bien$/.test(await text(S.page, '#lc-decline-h'))) throw new Error('title: ' + await text(S.page, '#lc-decline-h'));
-    if (!/Si querés, contanos por qué \(opcional\)\. Tu respuesta le llega a la institución\./.test(await text(S.page, '#lc-decline-p'))) throw new Error('neutral wording');
+    if (!/Si escribís algo, le llega a tu institución\. Si lo dejás vacío, solo queda registrado que dijiste que no\./.test(await text(S.page, '#lc-decline-p'))) throw new Error('neutral wording');
+    if (!/^¿Querés contarnos por qué\? \(opcional\)$/.test(await text(S.page, 'label[for="lc-decline-text"]'))) throw new Error('owner wording: ' + await text(S.page, 'label[for="lc-decline-text"]'));
     if (!/Podés entrar igual a la clase sin que te graben/.test(await text(S.page, '.lc-decline-ok'))) throw new Error('"you can still join" not visible');
     if (await S.page.evaluate(() => document.activeElement.id) !== 'lc-decline-text') throw new Error('focus not in the text box');
     if (await S.page.inputValue('#lc-decline-text') !== '') throw new Error('prefilled');
@@ -302,7 +302,7 @@ async function openConsents(page) {
     if (!db.user_consents.some(x => x.user_id === t.ana.id && !x.revoked_at)) throw new Error('not granted again');
   });
 
-  await run('Under 18 (P-10): guardian name + valid email; NOT recorded until the guardian confirms from their own link; then "Tutor/a ✓"; the admin never sees the guardian\'s data', browser, async open => {
+  await run('Under 18 (P-10): guardian name + valid email + the student\'s declaration; recorded, shown as "declared by the student"; the admin never sees the guardian\'s data; with institution-managed consent no guardian data is asked', browser, async open => {
     const t = seed();
     const S = await open();
     await studentLobby(S.page, t.dani);
@@ -310,54 +310,58 @@ async function openConsents(page) {
     await S.page.check('#lc-minor');
     await S.page.waitForSelector('#lc-guardian', { state: 'visible' });
     if (!/Falta el consentimiento del tutor/.test(await text(S.page, '#lc-consent-summary'))) throw new Error('summary');
+    if (!/Lo declarás vos acá: TeroClass no lo verifica/.test(await text(S.page, '#lc-guardian'))) throw new Error('honest note: ' + await text(S.page, '#lc-guardian'));
     await S.page.click('#lc-join');
     if (!/nombre del tutor/.test(await text(S.page, '#lc-lobby-err'))) throw new Error('guardian name required');
     await S.page.fill('#lc-g-name', 'Laura Pérez');
     await S.page.fill('#lc-g-email', 'no-es-email');
     await S.page.click('#lc-join');
     if (!/email válido del tutor/.test(await text(S.page, '#lc-lobby-err'))) throw new Error('valid email required');
-    if (calls.rpc.some(x => x.fn === 'grant_recording_consent')) throw new Error('saved before the guardian part was complete');
-    if (await S.page.$('#lc-g-consent')) throw new Error('the minor must not tick the guardian\'s box (P-10)');
     await S.page.fill('#lc-g-email', 'laura.tutora@example.com');
     await S.page.click('#lc-join');
-    // saved, waiting for the guardian: the lobby shows the link to send (copy / WhatsApp)
-    await S.page.waitForSelector('#lc-guardian-wait');
-    const link = await S.page.inputValue('#lc-guardian-link');
-    if (!/\/tutor\?t=[0-9a-f]{64}$/.test(link)) throw new Error('guardian link: ' + link);
-    let c = db.user_consents.find(x => x.user_id === t.dani.id && !x.revoked_at);
-    if (!c || !c.is_minor || c.guardian_email !== 'laura.tutora@example.com' || c.guardian_consent) throw new Error('minor consent must wait for the guardian: ' + JSON.stringify(c));
+    if (!/Marcá la casilla para declarar/.test(await text(S.page, '#lc-lobby-err'))) throw new Error('declaration required: ' + await text(S.page, '#lc-lobby-err'));
+    if (calls.rpc.some(x => x.fn === 'grant_recording_consent')) throw new Error('saved before the guardian part was complete');
+    if (!/Mi madre, padre o tutor\/a está de acuerdo \(lo declaro yo\)/.test(await text(S.page, '#lc-guardian'))) throw new Error('declaration label');
+    await S.page.check('#lc-g-consent');
+    if (!/Te vamos a grabar/.test(await text(S.page, '#lc-consent-summary'))) throw new Error('summary after declaring: ' + await text(S.page, '#lc-consent-summary'));
     const un = await untranslated(S.page, '.lc-lobby'); if (un.length) throw new Error('untranslated: ' + JSON.stringify(un));
-    await shot(S.page, 'minor-waiting', '.lc-lobby');
+    await shot(S.page, 'minor-declared', '.lc-lobby');
     await S.page.click('#lc-join');
     await S.page.waitForSelector('#lc-room');
-    if (await S.page.evaluate(() => LiveClass.state.room.recorded)) throw new Error('a minor recorded before the guardian confirmed');
-    // the admin sees "waiting for the guardian", never the guardian's data
+    const c = db.user_consents.find(x => x.user_id === t.dani.id && !x.revoked_at);
+    if (!c || !c.is_minor || c.guardian_email !== 'laura.tutora@example.com' || !c.guardian_consent || c.guardian_source !== 'student') throw new Error('minor consent: ' + JSON.stringify(c));
+    if (!(await S.page.evaluate(() => LiveClass.state.room.recorded))) throw new Error('declared minor consent → recorded');
+    if (!/Menor de 18/.test(await text(S.page, '.lc-tile[data-pid="local"] .lc-tile-top'))) throw new Error('minor badge');
+    // the admin sees "declared by the student", never the guardian's data
     const A = await open();
     await login(A.page, 'adm@sol.uy');
     await A.page.evaluate(() => setAppMode('admin'));
     await openConsents(A.page);
-    let row = await A.page.locator('.gc-cons-table tr', { hasText: 'dani@mail.com' }).textContent();
-    if (!/Menor de 18 · esperando al tutor\/a/.test(row)) throw new Error('admin row (waiting): ' + row);
-    // the guardian opens their link (no account) and confirms
-    const G = await open();
-    await G.page.goto(link.replace(/^https?:\/\/[^/]+/, 'http://teroclass.test') + '&lang=es');
-    await G.page.waitForSelector('#tu-yes');
-    if (!/Dani/.test(await text(G.page, '#tu-body'))) throw new Error('guardian page: ' + await text(G.page, '#tu-body'));
-    await shot(G.page, 'guardian-page');
-    await G.page.click('#tu-yes');
-    await G.page.waitForFunction(() => /Aceptaste/.test(document.getElementById('tu-body').textContent));
-    c = db.user_consents.find(x => x.user_id === t.dani.id && !x.revoked_at);
-    if (!c.guardian_consent) throw new Error('guardian confirmation not stored');
-    await openConsents(A.page);
-    row = await A.page.locator('.gc-cons-table tr', { hasText: 'dani@mail.com' }).textContent();
-    if (!/Aceptó/.test(row) || !/Menor de 18 · tutor\/a ✓/.test(row)) throw new Error('admin row: ' + row);
+    const row = await A.page.locator('.gc-cons-table tr', { hasText: 'dani@mail.com' }).textContent();
+    if (!/Aceptó/.test(row) || !/Menor de 18 · tutor\/a declarado por el estudiante/.test(row) || /tutor\/a ✓/.test(row)) throw new Error('admin row: ' + row);
     if (/laura\.tutora|Laura Pérez/.test(await A.page.textContent('#gc-groups-root'))) throw new Error('guardian data shown to the admin');
-    // next class: recorded, with the guardian badge
+    // the admin turns on "our institution collects the families' consent" (Dashboard) → another minor is not asked for guardian data
+    await A.page.evaluate(() => showPanel('admin'));
+    await A.page.waitForSelector('#consent-card', { state: 'visible' });
+    await A.page.check('#access-consent-managed');
+    await A.page.waitForSelector('#modal-danger.active');
+    if (!/autorización escrita/.test(await text(A.page, '#modal-danger'))) throw new Error('declaration dialog: ' + await text(A.page, '#modal-danger'));
+    await A.page.click('#dg-ok');
+    await waitToast(A.page, /gestiona el consentimiento de las familias/);
+    if (!db.institutions.some(i => i.consent_managed_by_institution)) throw new Error('flag not stored');
+    db.user_consents.filter(x => x.user_id === t.dani.id).forEach(x => { x.revoked_at = new Date().toISOString(); x.revoked_reason = 'user'; });
     await studentLobby(S.page, t.dani);
-    await S.page.waitForSelector('#lc-consent-ok');
+    await S.page.check('#lc-consent');
+    await S.page.check('#lc-minor');
+    await S.page.waitForSelector('#lc-g-managed', { state: 'visible' });
+    if (await S.page.$('#lc-g-name')) throw new Error('guardian fields shown although the institution manages consent');
+    if (!/Tu institución ya gestionó la autorización de tu familia/.test(await text(S.page, '#lc-guardian'))) throw new Error('managed note');
     await S.page.click('#lc-join');
     await S.page.waitForSelector('#lc-room');
-    if (!/Tutor\/a ✓/.test(await text(S.page, '.lc-tile[data-pid="local"] .lc-tile-top'))) throw new Error('guardian badge');
+    const c2 = db.user_consents.find(x => x.user_id === t.dani.id && !x.revoked_at);
+    if (!c2 || c2.guardian_source !== 'institution' || c2.guardian_name) throw new Error('managed consent: ' + JSON.stringify(c2));
+    await openConsents(A.page);
+    if (!/Menor de 18 · gestionado por la institución/.test(await A.page.locator('.gc-cons-table tr', { hasText: 'dani@mail.com' }).textContent())) throw new Error('admin row (managed)');
   });
 
   await run('Auto-recording for everyone: the teacher is asked once too, sees the indicator and can pause / resume; the student sees the indicator', browser, async open => {

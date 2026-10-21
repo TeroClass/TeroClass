@@ -16,7 +16,6 @@ const gen = (await import('../api/generate.js')).default;
 const guard = await import('../api/_lib/guard.js');
 const mail = await import('../api/_lib/mail.js');
 const invite = await import('../api/notify/invite.js');
-const guardian = await import('../api/notify/guardian.js');
 const session = await import('../api/notify/session.js');
 const health = (await import('../api/health.js')).default;
 const config = await import('../api/config.js');
@@ -188,14 +187,6 @@ test('TC-08 / P-03 invite e-mail: no provider → {configured:false} (the app sh
     }
   } finally { console.error = e; delete process.env.RESEND_API_KEY; }
   assert.equal(invite.inviteLink('https://x.test', { has_account: true }), 'https://x.test/?invitations');
-});
-test('P-10 guardian e-mail: link to /tutor with the token; nothing without a provider', async () => {
-  const em = guardian.buildGuardianEmail({ guardian_email: 'mama@x.com', guardian_name: 'Laura', student: 'Mini', token: 'a'.repeat(64) }, { lang: 'es', origin: 'https://teroclass.com', from: 'T <t@x>' });
-  assert.ok(em.html.includes('https://teroclass.com/tutor?t=' + 'a'.repeat(64)));
-  assert.equal(guardian.buildGuardianEmail({ guardian_email: 'mama@x.com', token: 'bad' }, { origin: 'https://x' }), null);
-  delete process.env.RESEND_API_KEY;
-  const r = res(); await guardian.default({ method: 'POST', headers: { authorization: 'Bearer t' }, body: {} }, r);
-  assert.equal(r.body.configured, false);
 });
 
 // ── TC-11: security headers and CSP vs. what the app loads ──

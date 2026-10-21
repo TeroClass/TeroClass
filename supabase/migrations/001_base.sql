@@ -1920,8 +1920,9 @@ grant execute on function public.platform_insights(integer, uuid, boolean) to au
 --   · Los estudiantes no tienen unidad (profiles.institution_id null) ni ocupan asientos.
 --   · Nada de esto se anota en ai_events; Métricas (platform_insights) solo recibe totales.
 -- MENORES: muchos estudiantes son menores. El consentimiento de grabación (uno solo, por persona) está al final de
---   este archivo ("CONSENTIMIENTO DE GRABACIÓN"): para un menor exige nombre, email y confirmación del tutor/a.
---   institutions.consent_managed_by_institution queda reservado (instituciones que lo gestionan por su cuenta; sin uso).
+--   este archivo ("CONSENTIMIENTO DE GRABACIÓN"): para un menor pide nombre y email del tutor/a y que el estudiante
+--   declare que está de acuerdo (no verificado: se muestra "declarado por el estudiante"), salvo que la institución
+--   gestione el consentimiento de las familias por su cuenta (institutions.consent_managed_by_institution, P-10).
 alter table public.institutions add column if not exists consent_managed_by_institution boolean not null default false;
 
 -- ── ayudas de formato (uso interno) ──
@@ -4433,27 +4434,29 @@ create table if not exists public.user_consents (
   constraint user_consents_minor_guardian check (not is_minor or (guardian_name is not null and guardian_email is not null)),
   constraint user_consents_revoked check ((revoked_at is null) = (revoked_reason is null))
 );
--- 2026-10 (P-10): el "sí" de un menor cuenta recién cuando el tutor/a lo confirma desde SU link (guardian_token);
--- antes alcanzaba con una casilla que marcaba el propio menor. guardian_consent = confirmado por el tutor/a.
-alter table public.user_consents add column if not exists guardian_token text;
-alter table public.user_consents add column if not exists guardian_confirmed_at timestamptz;
-alter table public.user_consents add column if not exists guardian_declined_at timestamptz;
-alter table public.user_consents add column if not exists guardian_token_expires_at timestamptz;
-create unique index if not exists user_consents_guardian_token_idx on public.user_consents (guardian_token) where guardian_token is not null;
+-- 2026-10 (P-10, decisión del dueño): el consentimiento del tutor/a de un menor NO está verificado. Se guarda de dónde
+-- viene (guardian_source) y se muestra así, sin prometer más de lo que es:
+--   'student'     = lo declaró el propio estudiante (nombre + email del tutor/a + casilla "mi tutor/a está de acuerdo");
+--   'institution' = la institución declaró que ya juntó las autorizaciones de las familias por su cuenta
+--                   (institutions.consent_managed_by_institution): al menor no se le piden datos del tutor/a.
+-- PENDIENTE (README): verificación real del tutor/a por email.
+alter table public.user_consents add column if not exists guardian_source text;
+alter table public.user_consents drop constraint if exists user_consents_guardian_source;
+alter table public.user_consents add constraint user_consents_guardian_source
+  check (guardian_source is null or guardian_source in ('student','institution'));
+update public.user_consents set guardian_source = 'student' where is_minor and guardian_source is null;
 alter table public.user_consents drop constraint if exists user_consents_minor_guardian;
 alter table public.user_consents add constraint user_consents_minor_guardian
-  check (not is_minor or (guardian_name is not null and guardian_email is not null));
--- Una sola vez: los "sí" de menores que ya existían (casilla marcada por el propio menor) quedan esperando la
--- confirmación del tutor/a (no se graban hasta que confirme). Se les genera el link.
-do $$
-begin
-  if not exists (select 1 from public.tc_schema_marks where key = '2026-10-minor-guardian-confirm') then
-    update public.user_consents set guardian_consent = false, guardian_token = public.tc_new_token(),
-           guardian_token_expires_at = now() + interval '30 days'
-     where is_minor and revoked_at is null and guardian_confirmed_at is null;
-    insert into public.tc_schema_marks (key) values ('2026-10-minor-guardian-confirm');
-  end if;
-end $$;
+  check (not is_minor or coalesce(guardian_source, '') = 'institution' or (guardian_name is not null and guardian_email is not null));
+-- Una versión intermedia (nunca publicada) pedía la confirmación del tutor/a desde un link: se quita sin tocar datos.
+drop function if exists public.guardian_consent_info(text);
+drop function if exists public.guardian_consent_respond(text, boolean);
+drop function if exists public.guardian_email_payload();
+drop index if exists public.user_consents_guardian_token_idx;
+alter table public.user_consents drop column if exists guardian_token;
+alter table public.user_consents drop column if exists guardian_confirmed_at;
+alter table public.user_consents drop column if exists guardian_declined_at;
+alter table public.user_consents drop column if exists guardian_token_expires_at;
 create unique index if not exists user_consents_one_active on public.user_consents (user_id) where revoked_at is null;
 create index if not exists user_consents_user_idx on public.user_consents (user_id, granted_at desc);
 
@@ -4486,6 +4489,32 @@ drop policy if exists cd_select on public.consent_declines;
 create policy cd_select on public.consent_declines for select to authenticated
   using (user_id = auth.uid() or public.is_admin_of(institution_id));
 
+-- P-10: ¿alguna institución de esta persona (su unidad o una que la cargó como estudiante, o una superior) declaró que
+-- gestiona el consentimiento de las familias por su cuenta (institutions.consent_managed_by_institution)? Uso interno.
+create or replace function public.tc_consent_managed(p_uid uuid) returns boolean
+language sql stable security definer set search_path = public, pg_temp as
+$$ select p_uid is not null and exists (
+     select 1 from (select p.institution_id as inst from public.profiles p where p.id = p_uid and p.institution_id is not null
+                    union select e.institution_id from public.student_enrollments e where e.user_id = p_uid) x
+       cross join lateral public.institution_chain(x.inst) c
+       join public.institutions i on i.id = c.id
+      where i.consent_managed_by_institution) $$;
+revoke all on function public.tc_consent_managed(uuid) from public, anon, authenticated;
+
+-- Admin de la unidad: "La institución gestiona el consentimiento de las familias" (P-10). Al encenderlo, la institución
+-- declara que juntó por su cuenta (en papel, por ejemplo) la autorización de las familias de sus estudiantes menores;
+-- entonces a esos menores no se les piden datos del tutor/a. Vale para la unidad y todo lo que cuelga de ella.
+create or replace function public.set_consent_managed(p_unit uuid, p_on boolean) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+begin
+  perform public.tc_assert_admin(p_unit);
+  update public.institutions set consent_managed_by_institution = coalesce(p_on, false) where id = p_unit;
+  return coalesce(p_on, false);
+end $$;
+revoke all on function public.set_consent_managed(uuid, boolean) from public, anon;
+grant execute on function public.set_consent_managed(uuid, boolean) to authenticated;
+
 -- Estado del consentimiento de quien llama (lo usan el lobby, el perfil y api/class/token.js). Sin datos del tutor/a.
 create or replace function public.my_consent() returns json
 language plpgsql stable security definer set search_path = public, pg_temp as
@@ -4503,36 +4532,40 @@ begin
     'recorded', c.id is not null and c.version = v and (not c.is_minor or c.guardian_consent),
     'version', c.version, 'granted_at', c.granted_at, 'revoked_at', case when c.id is null then v_rev end,
     'minor', coalesce(c.is_minor, false), 'guardian_consent', case when c.is_minor then c.guardian_consent end,
-    -- P-10: el menor ve el estado de la confirmación de su tutor/a y el link para mandárselo (solo su propia fila)
-    'guardian_status', case when not coalesce(c.is_minor, false) then null when c.guardian_consent then 'confirmed'
-                            when c.guardian_declined_at is not null then 'declined' else 'pending' end,
-    'guardian_token', case when c.is_minor and not c.guardian_consent and c.guardian_declined_at is null
-                                and coalesce(c.guardian_token_expires_at, now()) > now() then c.guardian_token end);
+    -- P-10: de dónde viene el "sí" del tutor/a ('student' = declarado por el estudiante; 'institution' = lo gestiona la
+    -- institución) y si a un menor hay que pedirle los datos del tutor/a (consent_managed = no)
+    'guardian_source', case when c.is_minor then c.guardian_source end,
+    'consent_managed', public.tc_consent_managed(auth.uid()));
 end $$;
 
--- "Sí" (una sola casilla). Menores: nombre + email del tutor/a; cuenta recién cuando el tutor/a confirma desde su link
--- (P-10, guardian_consent_respond). p_guardian_consent se ignora (lo marcaba el propio menor). Reemplaza un "sí" anterior.
+-- "Sí" (una sola casilla). Menores (P-10): nombre + email del tutor/a + la declaración del estudiante de que su tutor/a
+-- está de acuerdo (guardian_source 'student', NO verificado); si alguna de sus instituciones gestiona el consentimiento
+-- de las familias por su cuenta, no se piden datos del tutor/a (guardian_source 'institution'). Reemplaza un "sí" anterior.
 create or replace function public.grant_recording_consent(p_version text, p_minor boolean default false, p_guardian_name text default null,
                                                           p_guardian_email text default null, p_guardian_consent boolean default false)
 returns json
 language plpgsql volatile security definer set search_path = public, pg_temp as
 $$
 declare v_minor boolean := coalesce(p_minor, false); v_name text := public.tc_clean_text(p_guardian_name, 120);
-        v_email text := btrim(coalesce(p_guardian_email, ''));
+        v_email text := btrim(coalesce(p_guardian_email, '')); v_inst boolean := false;
 begin
   if auth.uid() is null then raise exception 'No autorizado'; end if;
   if p_version is distinct from public.tc_consent_version() then raise exception 'El texto del consentimiento cambió: recargá la página'; end if;
   if v_minor then
-    if v_name = '' then raise exception 'Menores de 18: falta el nombre del tutor/a'; end if;
-    if not public.tc_email_ok(v_email) then raise exception 'Menores de 18: email del tutor/a inválido'; end if;
-    if lower(v_email) = lower(coalesce((select u.email from auth.users u where u.id = auth.uid()), '')) then
-      raise exception 'Menores de 18: el email del tutor/a tiene que ser distinto del tuyo';
+    v_inst := public.tc_consent_managed(auth.uid());
+    if not v_inst then
+      if v_name = '' then raise exception 'Menores de 18: falta el nombre del tutor/a'; end if;
+      if not public.tc_email_ok(v_email) then raise exception 'Menores de 18: email del tutor/a inválido'; end if;
+      if lower(v_email) = lower(coalesce((select u.email from auth.users u where u.id = auth.uid()), '')) then
+        raise exception 'Menores de 18: el email del tutor/a tiene que ser distinto del tuyo';
+      end if;
+      if not coalesce(p_guardian_consent, false) then raise exception 'Menores de 18: el tutor/a tiene que confirmar el consentimiento'; end if;
     end if;
   end if;
   update public.user_consents set revoked_at = now(), revoked_reason = 'superseded' where user_id = auth.uid() and revoked_at is null;
-  insert into public.user_consents (user_id, version, is_minor, guardian_name, guardian_email, guardian_consent, guardian_token, guardian_token_expires_at)
-  values (auth.uid(), p_version, v_minor, case when v_minor then v_name end, case when v_minor then v_email end, false,
-          case when v_minor then public.tc_new_token() end, case when v_minor then now() + interval '30 days' end);
+  insert into public.user_consents (user_id, version, is_minor, guardian_name, guardian_email, guardian_consent, guardian_source)
+  values (auth.uid(), p_version, v_minor, case when v_minor and not v_inst then v_name end, case when v_minor and not v_inst then v_email end,
+          v_minor, case when v_minor then case when v_inst then 'institution' else 'student' end end);
   return public.my_consent();
 end $$;
 
@@ -4606,6 +4639,7 @@ begin
         'kind', x.kind, 'admin', x.is_admin, 'name', x.name, 'email', x.email, 'unit_id', x.institution_id, 'unit_name', i.name, 'linked', x.user_id is not null,
         'status', st.status, 'status_at', st.at, 'minor', coalesce(c.is_minor, false) and st.status = 'granted',
         'guardian_consent', case when c.is_minor and st.status = 'granted' then c.guardian_consent end,
+        'guardian_source', case when c.is_minor and st.status = 'granted' then c.guardian_source end,
         'declines', (select count(*) from public.consent_declines d2 where d2.user_id = x.user_id and d2.institution_id = any(v_scope)))
         order by lower(x.name), lower(x.email))
       from (select 'teacher'::text as kind, coalesce(nullif(btrim(p.name), ''), p.email) as name, p.email, p.institution_id, p.id as user_id,
@@ -4854,7 +4888,7 @@ revoke all on function public.tc_inv_pending(public.invitations) from public, an
 revoke all on function public.tc_inv_status(public.invitations) from public, anon, authenticated;
 
 -- ── Límites de envío de emails (TC-08): por persona y por día, antes de que exista RESEND_API_KEY ──
--- La API (notify/session, notify/invite, notify/guardian) lo pide con el token de quien manda, ANTES de enviar.
+-- La API (notify/session, notify/invite) lo pide con el token de quien manda, ANTES de enviar.
 -- Topes: máximo 100 destinatarios por envío; por día (UTC) 30 envíos y 300 destinatarios (docentes/admins),
 -- 3 envíos y 3 destinatarios para cuentas sin institución ni grupo (p. ej. el email al tutor/a).
 create or replace function public.email_quota_take(p_kind text, p_recipients integer) returns json
@@ -4863,7 +4897,7 @@ $$
 declare v_role text := public.my_role(); v_staff boolean; v_n int := coalesce(p_recipients, 0); v_sends int; v_rcpt int;
 begin
   if auth.uid() is null then raise exception 'No autorizado'; end if;
-  if p_kind is null or p_kind not in ('session','invite','guardian','consent') then raise exception 'Tipo inválido'; end if;
+  if p_kind is null or p_kind not in ('session','invite','consent') then raise exception 'Tipo inválido'; end if;
   if v_n < 1 then return json_build_object('allowed', false, 'reason', 'none'); end if;
   if v_n > 100 then return json_build_object('allowed', false, 'reason', 'too_many_recipients', 'max', 100); end if;
   v_staff := v_role in ('teacher','org_admin','superadmin') and (public.my_institution() is not null or v_role = 'superadmin');
@@ -4964,64 +4998,6 @@ grant execute on function public.set_session_plan(uuid, uuid) to authenticated;
 revoke all on function public.session_plan(uuid) from public, anon;
 grant execute on function public.session_plan(uuid) to authenticated;
 
--- ── Tutor/a de un menor (P-10): confirma o rechaza desde SU link (/tutor?t=<token>), sin cuenta ──
--- No es una verificación de identidad (eso queda pendiente: ver README); sí evita que el propio menor marque la casilla.
-create or replace function public.guardian_consent_info(p_token text) returns json
-language plpgsql stable security definer set search_path = public, pg_temp as
-$$
-declare c public.user_consents%rowtype;
-begin
-  if p_token is null or p_token !~ '^[0-9a-f]{64}$' then return json_build_object('status', 'invalid'); end if;
-  select * into c from public.user_consents where guardian_token = p_token;
-  if c.id is null or c.revoked_at is not null then return json_build_object('status', 'invalid'); end if;
-  if c.guardian_token_expires_at is not null and c.guardian_token_expires_at < now() and not c.guardian_consent then
-    return json_build_object('status', 'expired');
-  end if;
-  return json_build_object(
-    'status', case when c.guardian_consent then 'confirmed' when c.guardian_declined_at is not null then 'declined' else 'pending' end,
-    -- first name only: the profile's, or the name the institution loaded (magic-link student accounts have no profile name)
-    'student', coalesce((select split_part(nullif(btrim(p.name), ''), ' ', 1) from public.profiles p where p.id = c.user_id),
-                        (select split_part(nullif(btrim(e.name), ''), ' ', 1) from public.student_enrollments e where e.user_id = c.user_id order by e.created_at limit 1), ''),
-    'guardian_name', c.guardian_name, 'requested_at', c.granted_at);
-end $$;
-create or replace function public.guardian_consent_respond(p_token text, p_accept boolean) returns json
-language plpgsql volatile security definer set search_path = public, pg_temp as
-$$
-declare c public.user_consents%rowtype;
-begin
-  if p_token is null or p_token !~ '^[0-9a-f]{64}$' then raise exception 'Link inválido'; end if;
-  select * into c from public.user_consents where guardian_token = p_token for update;
-  if c.id is null or c.revoked_at is not null then raise exception 'Link inválido'; end if;
-  if c.guardian_token_expires_at is not null and c.guardian_token_expires_at < now() and not c.guardian_consent then
-    raise exception 'El link venció: pedile un link nuevo';
-  end if;
-  if coalesce(p_accept, false) then
-    update public.user_consents set guardian_consent = true, guardian_confirmed_at = now(), guardian_declined_at = null where id = c.id;
-  else
-    update public.user_consents set guardian_consent = false, guardian_confirmed_at = null, guardian_declined_at = now() where id = c.id;
-  end if;
-  return public.guardian_consent_info(p_token);
-end $$;
-revoke all on function public.guardian_consent_info(text) from public;
-grant execute on function public.guardian_consent_info(text) to anon, authenticated;
-revoke all on function public.guardian_consent_respond(text, boolean) from public;
-grant execute on function public.guardian_consent_respond(text, boolean) to anon, authenticated;
--- Para el email al tutor/a (api/notify/guardian.js, con el token del menor): solo su propio pedido pendiente.
-create or replace function public.guardian_email_payload() returns json
-language plpgsql stable security definer set search_path = public, pg_temp as
-$$
-begin
-  if auth.uid() is null then raise exception 'No autorizado'; end if;
-  return (select json_build_object('guardian_email', c.guardian_email, 'guardian_name', c.guardian_name, 'token', c.guardian_token,
-                                   'student', coalesce((select nullif(btrim(p.name), '') from public.profiles p where p.id = c.user_id),
-                                                       (select nullif(btrim(e.name), '') from public.student_enrollments e where e.user_id = c.user_id order by e.created_at limit 1), ''))
-            from public.user_consents c
-           where c.user_id = auth.uid() and c.revoked_at is null and c.is_minor and not c.guardian_consent
-             and c.guardian_token is not null and coalesce(c.guardian_token_expires_at, now()) > now());
-end $$;
-revoke all on function public.guardian_email_payload() from public, anon;
-grant execute on function public.guardian_email_payload() to authenticated;
-
 -- ── Mis datos (TC-21, derechos de acceso / portabilidad): todo lo mío, en JSON ──
 create or replace function public.my_data_export() returns json
 language plpgsql stable security definer set search_path = public, pg_temp as
@@ -5040,7 +5016,7 @@ begin
                               where e.user_id = auth.uid()), '[]'::json),
     'recording_consent', coalesce((select json_agg(json_build_object('version', c.version, 'granted_at', c.granted_at, 'revoked_at', c.revoked_at,
                                                                      'minor', c.is_minor, 'guardian_name', c.guardian_name, 'guardian_email', c.guardian_email,
-                                                                     'guardian_confirmed_at', c.guardian_confirmed_at) order by c.granted_at)
+                                                                     'guardian_source', c.guardian_source) order by c.granted_at)
                                      from public.user_consents c where c.user_id = auth.uid()), '[]'::json),
     'recording_declines', coalesce((select json_agg(json_build_object('created_at', d.created_at, 'reason', d.reason) order by d.created_at)
                                       from public.consent_declines d where d.user_id = auth.uid()), '[]'::json),

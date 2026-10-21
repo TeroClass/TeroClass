@@ -102,7 +102,7 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
   await step('Consentimiento (primera vez): UNA sola casilla; menor exige tutor', async () => {
     await page.waitForSelector('#lc-consent');
     if (await page.$('#lc-c-recording, #lc-c-ai, #lc-c-storage')) throw new Error('siguen las 3 casillas viejas');
-    if ((await page.$$('#lc-consent-box input[type=checkbox]')).length !== 2) throw new Error('consentimiento + menor (el tutor confirma desde su link, P-10)');
+    if ((await page.$$('#lc-consent-box input[type=checkbox]:visible')).length !== 2) throw new Error('consentimiento + menor (los datos del tutor/a aparecen solo para menores)');
     if (await page.$('input[name="lc-role"], #lc-name')) throw new Error('el rol / nombre no se eligen en la sala (P-09 / TC-27)');
     if (!/recorded \(audio only\) and that AI analyses them/.test(await text('.lc-consent-main'))) throw new Error('texto: ' + await text('.lc-consent-main'));
     if (!/without being recorded/.test(await text('#lc-consent-summary'))) throw new Error('resumen inicial');
@@ -120,7 +120,9 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.click('#lc-join');
     if (!/valid guardian email/.test(await text('#lc-lobby-err'))) throw new Error('sin error de email');
     await page.fill('#lc-g-email', 'laura@example.com');
-    if (!/Waiting for guardian consent/.test(await text('#lc-consent-summary'))) throw new Error('un menor no se graba hasta que confirme el tutor');
+    if (!/Waiting for guardian consent/.test(await text('#lc-consent-summary'))) throw new Error('falta la declaración del estudiante');
+    await page.check('#lc-g-consent');
+    if (!/You will be recorded/.test(await text('#lc-consent-summary'))) throw new Error('menor con tutor/a declarado → se graba (P-10)');
     await page.uncheck('#lc-minor'); // the full minor path is in tests/e2e-consent.cjs; Ana joins as an adult
     if (!/You will be recorded/.test(await text('#lc-consent-summary'))) throw new Error('adulta que acepta → se graba');
     if (M.consent.calls.grant.length) throw new Error('guardó el consentimiento antes de entrar');

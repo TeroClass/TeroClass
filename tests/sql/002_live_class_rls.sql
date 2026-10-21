@@ -100,11 +100,7 @@ select expect_denied($$insert into public.consents(session_id, participant_id, k
   'the browser cannot insert consents any more (server only, from user_consents)');
 select expect((public.grant_recording_consent(public.tc_consent_version())->>'recorded')::boolean, 'student gives the single consent (001)');
 select as_user('00000000-0000-4000-8000-000000000052');
-select expect(not (public.grant_recording_consent(public.tc_consent_version(), true, 'Laura Pérez', 'guardian@x.com', true)->>'recorded')::boolean, 'minor gives it with guardian name + email: not recorded until the guardian confirms (P-10)');
-reset role;
-select set_config('lv.gtok', (select guardian_token from public.user_consents where user_id = '00000000-0000-4000-8000-000000000052' and revoked_at is null), false);
-set role anon;
-select expect((public.guardian_consent_respond(current_setting('lv.gtok'), true)->>'status') = 'confirmed', 'the guardian confirms from their link');
+select expect((public.grant_recording_consent(public.tc_consent_version(), true, 'Laura Pérez', 'guardian@x.com', true)->>'recorded')::boolean, 'minor gives it with guardian name + email + the declaration that the guardian agrees (P-10: declared by the student)');
 reset role;
 insert into public.consents(session_id, participant_id, kind, granted, policy_version, given_by_user_id, user_consent_id)
   select 'dddddddd-0000-4000-8000-000000000001', 'eeeeeeee-0000-4000-8000-000000000051', 'recording', true, c.version, c.user_id, c.id

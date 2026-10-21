@@ -149,7 +149,7 @@ select ql.fails('TC-08: unknown kind', $$select public.email_quota_take('spam', 
 select ql.eq('TC-08: a teacher can send 250 recipients today', $$select (public.email_quota_take('session', 100)->>'allowed')||(public.email_quota_take('session', 100)->>'allowed')||(public.email_quota_take('session', 50)->>'allowed')$$, 'truetruetrue');
 select ql.eq('TC-08: …but not 100 more (300 / day)', $$select public.email_quota_take('session', 100)->>'reason'$$, 'daily_recipients');
 select ql.as_user(ql.uid('lf-student@x.com')::text);
-select ql.eq('TC-08: a student: 3 sends a day', $$select (public.email_quota_take('guardian', 1)->>'allowed')||(public.email_quota_take('guardian', 1)->>'allowed')||(public.email_quota_take('guardian', 1)->>'allowed')||(public.email_quota_take('guardian', 1)->>'reason')$$, 'truetruetruedaily_sends');
+select ql.eq('TC-08: a student: 3 sends a day', $$select (public.email_quota_take('consent', 1)->>'allowed')||(public.email_quota_take('consent', 1)->>'allowed')||(public.email_quota_take('consent', 1)->>'allowed')||(public.email_quota_take('consent', 1)->>'reason')$$, 'truetruetruedaily_sends');
 reset role;
 set role anon; select ql.as_user('');
 select ql.fails('TC-08: anon cannot take e-mail quota', $$select public.email_quota_take('session', 1)$$, 'permission denied');

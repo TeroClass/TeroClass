@@ -58,6 +58,7 @@ insert into auth.users(id,email,raw_user_meta_data,email_confirmed_at) values
   (gen_random_uuid(),'cn-st1@x.com','{"via":"student_link","name":"Ana"}',now()),
   (gen_random_uuid(),'cn-st2@x.com','{"via":"student_link","name":"Beto"}',now()),
   (gen_random_uuid(),'cn-minor@x.com','{"via":"student_link","name":"Mini"}',now()),
+  (gen_random_uuid(),'cn-minor2@x.com','{"via":"student_link","name":"Mina"}',now()),
   (gen_random_uuid(),'cn-x@x.com','{"via":"student_link","name":"Equis"}',now()),
   (gen_random_uuid(),'cn-st4@x.com','{"via":"student_link","name":"Dani"}',now()),
   (gen_random_uuid(),'cn-stranger@x.com','{"via":"student_link","name":"Stranger"}',now());
@@ -71,12 +72,13 @@ select public.add_student(null, 'cn-minor@x.com', 'Mini Menor', qn.grp('CN G1'))
 select public.add_student(null, 'cn-x@x.com', 'Equis Uno', qn.grp('CN G1'));
 select public.add_student(null, 'cn-caro@x.com', 'Caro Sin Cuenta', qn.grp('CN G1'));
 select public.add_student(null, 'cn-st4@x.com', 'Dani Díaz', qn.grp('CN G2'));
+select public.add_student(null, 'cn-minor2@x.com', 'Mina Menor', qn.grp('CN G2'));
 select qn.as_user(qn.uid('cn-oadm@x.com')::text);
 select public.create_group(qn.inst('cn-otra'), 'CN GO', qn.uid('cn-to@x.com'));
 select public.add_student(null, 'cn-x@x.com', 'Equis Otra', qn.grp('CN GO'));
 reset role;
 update public.student_enrollments e set user_id = u.id, claimed_at = now() from auth.users u
- where lower(u.email) = lower(e.email) and lower(e.email) in ('cn-st1@x.com','cn-st2@x.com','cn-minor@x.com','cn-x@x.com','cn-st4@x.com');
+ where lower(u.email) = lower(e.email) and lower(e.email) in ('cn-st1@x.com','cn-st2@x.com','cn-minor@x.com','cn-minor2@x.com','cn-x@x.com','cn-st4@x.com');
 insert into public.class_sessions (institution_id, group_id, teacher_id, title, starts_at, ends_at, timezone)
 select g.institution_id, g.id, g.teacher_id, x.t, now() - interval '5 minutes', now() + interval '40 minutes', 'America/Montevideo'
   from (values ('CN G1', 'CN now'), ('CN GO', 'CN GO now'), ('CN G2', 'CN G2 now')) x(g, t) join public.class_groups g on g.name = x.g;
@@ -113,32 +115,31 @@ select qn.as_user(qn.uid('cn-minor@x.com')::text);
 select qn.fails('M: minor without guardian name', $$select public.grant_recording_consent('2026-10', true, '', 'g@x.com', true)$$, 'nombre del tutor');
 select qn.fails('M: minor with an invalid guardian email', $$select public.grant_recording_consent('2026-10', true, 'Laura Pérez', 'no-es-email', true)$$, 'email del tutor');
 select qn.fails('M: the guardian''s email cannot be the minor''s own (P-10)', $$select public.grant_recording_consent('2026-10', true, 'Laura Pérez', 'CN-minor@x.com', true)$$, 'distinto del tuyo');
--- P-10 (2026-10): the minor's own checkbox no longer counts; the guardian confirms from their own link
-select qn.eq('M: minor yes → NOT recorded yet (the minor''s own checkbox is ignored)', $$select public.grant_recording_consent('2026-10', true, 'Laura <b>Pérez</b>', 'laura@x.com', true)->>'recorded'$$, 'false');
-select qn.eq('M: … waiting for the guardian', $$select public.my_consent()->>'guardian_status'$$, 'pending');
-select qn.eq('M: … the minor gets the link token to send to the guardian', $$select (public.my_consent()->>'guardian_token' ~ '^[0-9a-f]{64}$')::text$$, 'true');
+select qn.fails('M: minor without the guardian''s agreement (declared by the student)', $$select public.grant_recording_consent('2026-10', true, 'Laura Pérez', 'laura@x.com', false)$$, 'confirmar');
+-- P-10 (2026-10, owner decision): the guardian's agreement is DECLARED by the student (not verified) and labelled so
+select qn.eq('M: minor with guardian name + email + declaration → recorded', $$select public.grant_recording_consent('2026-10', true, 'Laura <b>Pérez</b>', 'laura@x.com', true)->>'recorded'$$, 'true');
+select qn.eq('M: … flagged minor, guardian consent declared by the student', $$select (public.my_consent()->>'minor')||'/'||(public.my_consent()->>'guardian_consent')||'/'||(public.my_consent()->>'guardian_source')||'/'||(public.my_consent()->>'consent_managed')$$, 'true/true/student/false');
 select qn.eq('M: my_consent never returns guardian data', $$select (public.my_consent()::text not ilike '%laura%')::text$$, 'true');
 select qn.eq('M: guardian name stored cleaned (no HTML)', $$select guardian_name from public.user_consents where user_id = auth.uid() and revoked_at is null$$, 'Laura b Pérez /b');
-select set_config('qn.gtok', public.my_consent()->>'guardian_token', false);
-reset role;
-set role anon; select qn.as_user('');
-select qn.eq('M: guardian link (anon): pending + the student''s first name only', $$select (public.guardian_consent_info(current_setting('qn.gtok'))->>'status')||'/'||(public.guardian_consent_info(current_setting('qn.gtok'))->>'student')$$, 'pending/Mini');
-select qn.eq('M: a wrong token reveals nothing', $$select public.guardian_consent_info(repeat('a', 64))::text$$, '{"status" : "invalid"}');
-select qn.fails('M: a malformed token is refused', $$select public.guardian_consent_respond('nope', true)$$, 'Link inválido');
-select qn.eq('M: guardian says no', $$select public.guardian_consent_respond(current_setting('qn.gtok'), false)->>'status'$$, 'declined');
-reset role;
-set role authenticated; select qn.as_user(qn.uid('cn-minor@x.com')::text);
-select qn.eq('M: … minor not recorded, sees "declined"', $$select (public.my_consent()->>'recorded')||'/'||(public.my_consent()->>'guardian_status')$$, 'false/declined');
-reset role;
-set role anon; select qn.as_user('');
-select qn.eq('M: guardian changes their mind and confirms', $$select public.guardian_consent_respond(current_setting('qn.gtok'), true)->>'status'$$, 'confirmed');
-reset role;
-set role authenticated; select qn.as_user(qn.uid('cn-minor@x.com')::text);
-select qn.eq('M: … now recorded, flagged minor with guardian consent, link no longer shown', $$select (public.my_consent()->>'recorded')||'/'||(public.my_consent()->>'minor')||'/'||(public.my_consent()->>'guardian_consent')||'/'||coalesce(public.my_consent()->>'guardian_token','-')$$, 'true/true/true/-');
-reset role;
-update public.user_consents set guardian_token_expires_at = now() - interval '1 day' where guardian_token = current_setting('qn.gtok');
-set role anon; select qn.as_user('');
-select qn.eq('M: an expired link still shows a confirmation that was already given', $$select public.guardian_consent_info(current_setting('qn.gtok'))->>'status'$$, 'confirmed');
+select qn.eq('M: the guardian-link functions of an unreleased draft are gone', $$select count(*)::text from pg_proc where proname in ('guardian_consent_info','guardian_consent_respond','guardian_email_payload')$$, '0');
+-- consent_managed_by_institution: the institution declares it collected the families' consent itself → no guardian data asked
+select qn.as_user(qn.uid('cn-minor2@x.com')::text);
+select qn.eq('M2: institution does not manage it yet → asked for guardian data', $$select public.my_consent()->>'consent_managed'$$, 'false');
+select qn.fails('M2: … so guardian data is required', $$select public.grant_recording_consent('2026-10', true)$$, 'nombre del tutor');
+select qn.fails('M2: a student cannot turn the option on', $$select public.set_consent_managed(qn.inst('cn-s2'), true)$$, 'No autorizado');
+select qn.as_user(qn.uid('cn-s1adm@x.com')::text);
+select qn.fails('M2: the admin of a sibling unit cannot either', $$select public.set_consent_managed(qn.inst('cn-s2'), true)$$, 'No autorizado');
+select qn.as_user(qn.uid('cn-adm@x.com')::text);
+select qn.eq('M2: the admin of the main institution turns it on (applies below)', $$select public.set_consent_managed(qn.inst('cn-madre'), true)::text$$, 'true');
+select qn.as_user(qn.uid('cn-minor2@x.com')::text);
+select qn.eq('M2: now consent_managed', $$select public.my_consent()->>'consent_managed'$$, 'true');
+select qn.eq('M2: minor yes without guardian data → recorded', $$select public.grant_recording_consent('2026-10', true, 'ignored', 'ignored@x.com', false)->>'recorded'$$, 'true');
+select qn.eq('M2: … source = institution', $$select public.my_consent()->>'guardian_source'$$, 'institution');
+select qn.eq('M2: … no guardian data stored', $$select coalesce(guardian_name,'-')||'/'||coalesce(guardian_email,'-') from public.user_consents where user_id = auth.uid() and revoked_at is null$$, '-/-');
+select qn.as_user(qn.uid('cn-adm@x.com')::text);
+select qn.eq('M2: … the admin sees "managed by the institution"', $$select qn.person(qn.inst('cn-madre'), 'cn-minor2@x.com')->>'guardian_source'$$, 'institution');
+select qn.eq('M2: turn it off again', $$select public.set_consent_managed(qn.inst('cn-madre'), false)::text$$, 'false');
+select qn.as_user(qn.uid('cn-minor@x.com')::text);
 reset role;
 select qn.fails('M: the table itself refuses a minor without guardian', $$insert into public.user_consents(user_id, version, is_minor) values (qn.uid('cn-minor@x.com'), '2026-10', true)$$, 'user_consents_minor_guardian');
 set role anon; select qn.as_user('');
@@ -207,7 +208,7 @@ select qn.eq('O: granted (with date)', $$select (qn.person(qn.inst('cn-madre'), 
 select qn.eq('O: declined (with date and count)', $$select (qn.person(qn.inst('cn-madre'), 'cn-x@x.com')->>'status')||'/'||(qn.person(qn.inst('cn-madre'), 'cn-x@x.com')->>'declines')$$, 'declined/1');
 select qn.eq('O: not signed in yet → pending', $$select (qn.person(qn.inst('cn-madre'), 'cn-caro@x.com')->>'status')||'/'||(qn.person(qn.inst('cn-madre'), 'cn-caro@x.com')->>'linked')$$, 'pending/false');
 select qn.eq('O: teacher listed with their decline', $$select (qn.person(qn.inst('cn-madre'), 'cn-t1@x.com')->>'kind')||'/'||(qn.person(qn.inst('cn-madre'), 'cn-t2@x.com')->>'status')||'/'||(qn.person(qn.inst('cn-madre'), 'cn-t1@x.com')->>'status')$$, 'teacher/pending/declined');
-select qn.eq('O: minor → flags only (guardian ✓), never the guardian''s name or email', $$select (qn.person(qn.inst('cn-madre'), 'cn-minor@x.com')->>'minor')||'/'||(qn.person(qn.inst('cn-madre'), 'cn-minor@x.com')->>'guardian_consent')||'/'||(public.consent_overview(qn.inst('cn-madre'))::text not ilike '%laura%')$$, 'true/true/true');
+select qn.eq('O: minor → flags only (guardian ✓ declared by the student), never the guardian''s name or email', $$select (qn.person(qn.inst('cn-madre'), 'cn-minor@x.com')->>'minor')||'/'||(qn.person(qn.inst('cn-madre'), 'cn-minor@x.com')->>'guardian_consent')||'/'||(qn.person(qn.inst('cn-madre'), 'cn-minor@x.com')->>'guardian_source')||'/'||(public.consent_overview(qn.inst('cn-madre'))::text not ilike '%laura%')$$, 'true/true/student/true');
 select qn.eq('O: the owner (super admin) is never listed', $$select (public.consent_overview(qn.inst('cn-madre'))::text not like '%owner@teroclass.test%')::text$$, 'true');
 select qn.eq('O: people of another institution are not listed', $$select (public.consent_overview(qn.inst('cn-madre'))::text not like '%cn-to@x.com%' and public.consent_overview(qn.inst('cn-madre'))::text not like '%Equis Otra%')::text$$, 'true');
 select qn.as_user(qn.uid('cn-st1@x.com')::text);

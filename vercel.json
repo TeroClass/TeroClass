@@ -70,10 +70,6 @@
       "destination": "/public/terminos.html"
     },
     {
-      "source": "/tutor",
-      "destination": "/public/tutor.html"
-    },
-    {
       "source": "/legal.css",
       "destination": "/public/legal.css"
     },
@@ -90,9 +86,6 @@
       "maxDuration": 30
     },
     "api/notify/invite.js": {
-      "maxDuration": 20
-    },
-    "api/notify/guardian.js": {
       "maxDuration": 20
     },
     "api/notify/consent.js": {

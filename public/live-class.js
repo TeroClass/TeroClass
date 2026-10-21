@@ -15,9 +15,11 @@
  * RECORDING CONSENT (2026-10): ONE checkbox, asked the first time a person enters any class room (teachers too), stored
  * per person in the database (001_base.sql: user_consents, my_consent / grant_recording_consent / revoke_recording_consent).
  * A "yes" is permanent until revoked from the profile menu ("Recording of my classes") or until CONSENT_VERSION changes.
- * A "no" asks for a required justification ("Justificá tu respuesta", decline_recording_consent → the institution's admins,
- * emailed by /api/notify/consent when RESEND_API_KEY exists) and the person joins NOT recorded; asked again next class.
- * Under 18: guardian name + email + confirmation in the same step. Classes are recorded AUTOMATICALLY (audio only, only
+ * A "no" offers an OPTIONAL comment ("¿Querés contarnos por qué? (opcional)", decline_recording_consent → the institution's
+ * admins only if something was written; emailed by /api/notify/consent when RESEND_API_KEY exists) and the person joins NOT
+ * recorded; asked again next class.
+ * Under 18 (P-10): guardian name + email + the student's DECLARATION that the guardian agrees (not verified; shown as
+ * "declared by the student"), unless the institution manages the families' consent itself (consent_managed). Classes are recorded AUTOMATICALLY (audio only, only
  * people who consented); the teacher can pause ("Pause recording"), and it resumes by itself after PAUSE_MAX_S.
  * The LiveKit token (api/class/token.js) reads the consent from the database, never from this browser.
  */
@@ -34,7 +36,7 @@
     'The original audio is deleted after 30 days; the insights stay in your TeroClass record.',
     'Each person is identified by their own microphone, never by voiceprint. No emotion detection.',
     'You can turn it off at any time from your profile menu (Recording of my classes).',
-    'Under 18: a parent or guardian must agree from their own link.'];
+    'Under 18: a parent or guardian must agree. You declare it here; TeroClass does not verify it.'];
   // P-11 (2026-10): saying no needs NO justification; an optional comment reaches the institution only if written
   const PAUSE_MAX_S = 5 * 60;      // a teacher's pause resumes by itself after 5 minutes
   const V = window.TCInsightsView; // shared insights view (loaded before this file)
@@ -493,8 +495,10 @@ Cierre y ticket de salida (5 min)
       declineOpen: false,
     };
   }
-  // P-10: a minor is recorded only after the guardian confirms from their own link, never right away
-  const willBeRecorded = L => L.cstate === 'granted' ? L.recorded : (L.cstate === 'ask' && L.agree && !L.minor && !inViewAs());
+  // P-10: the guardian's agreement is declared by the student (not verified), or managed by the institution
+  const managedConsent = () => !!(CS.data && CS.data.consent_managed);
+  const guardianOk = G => managedConsent() || !!(G.guardian.name.trim() && EMAIL_RE.test(G.guardian.email.trim()) && G.guardian.consent);
+  const willBeRecorded = L => L.cstate === 'granted' ? L.recorded : (L.cstate === 'ask' && L.agree && (!L.minor || guardianOk(L)) && !inViewAs());
   const inViewAs = () => typeof viewAs !== 'undefined' && !!viewAs;
 
   function consentSummaryHtml(L) {
@@ -528,42 +532,13 @@ Cierre y ticket de salida (5 min)
     return p;
   }
   async function grantConsent(G) {
-    // P-10: a minor's "yes" waits for the guardian, who confirms from their own link (never a box the minor ticks)
+    // P-10: the student DECLARES that their guardian agrees (stored as guardian_source 'student'); with an institution that
+    // manages the families' consent itself, the database ignores the guardian fields (guardian_source 'institution')
     const d = await rpcJson('grant_recording_consent', { p_version: CONSENT_VERSION, p_minor: !!G.minor,
-      p_guardian_name: G.minor ? G.guardian.name.trim() : null, p_guardian_email: G.minor ? G.guardian.email.trim() : null,
-      p_guardian_consent: false });
-    CS.data = d; CS.uid = currentUser?.id;
-    if (G.minor && d && d.guardian_token) sendGuardianEmail();
-    return d;
+      p_guardian_name: G.minor && !managedConsent() ? G.guardian.name.trim() : null, p_guardian_email: G.minor && !managedConsent() ? G.guardian.email.trim() : null,
+      p_guardian_consent: !!(G.minor && (managedConsent() || G.guardian.consent)) });
+    CS.data = d; CS.uid = currentUser?.id; return d;
   }
-  // ── P-10: the guardian's link (and an e-mail to the guardian when a provider exists) ──
-  const guardianLink = d => (d && d.guardian_token ? `${location.origin}/tutor?t=${d.guardian_token}` : '');
-  const guardianPending = d => !!(d && d.minor && d.guardian_status && d.guardian_status !== 'confirmed');
-  async function sendGuardianEmail() {
-    try {
-      const cfg = typeof loadAppConfig === 'function' ? await loadAppConfig() : null;
-      if (!cfg || !cfg.email) return false;
-      const { data: { session } = {} } = await sb.auth.getSession();
-      const r = await fetch('/api/notify/guardian', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (session?.access_token || '') },
-        body: JSON.stringify({ lang: typeof uiLang !== 'undefined' && uiLang === 'en' ? 'en' : 'es' }) });
-      const j = await r.json().catch(() => ({})); return !!(j && j.sent);
-    } catch (e) { return false; }
-  }
-  function guardianPendingHtml(d, P) {
-    const link = guardianLink(d);
-    const msg = tr('Hi! To have my classes on TeroClass recorded (audio only), I need you to confirm here:') + ' ' + link;
-    return `<div class="lc-guardian-wait" id="${P}guardian-wait" role="status">
-        <p><span aria-hidden="true">👪</span> <b>${esc(tr(d.guardian_status === 'declined' ? 'Your guardian did not agree: your classes are not recorded.' : 'Waiting for your guardian to confirm.'))}</b></p>
-        <p class="lc-fine">${esc(tr('Until they confirm from their link, you join your classes without being recorded. Send them this link:'))}</p>
-        ${link ? `<div class="lc-share-row"><input type="text" readonly id="${P}guardian-link" value="${esc(link)}" data-no-i18n aria-label="${esc(tr('Link for your guardian'))}">
-          <button type="button" class="lc-btn lc-sm" data-gl="copy" data-link="${esc(link)}">📋 <span>Copy</span></button>
-          <a class="lc-btn lc-sm" href="https://wa.me/?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">WhatsApp</a></div>` : ''}
-      </div>`;
-  }
-  document.addEventListener('click', e => {
-    const b = e.target.closest && e.target.closest('[data-gl="copy"]'); if (!b) return;
-    (navigator.clipboard ? navigator.clipboard.writeText(b.dataset.link) : Promise.reject()).then(() => toast('✓ Copied!', 'ok'), () => toast('Could not copy. Select the text and copy it manually (Ctrl+C / Cmd+C).', 'err'));
-  });
   async function revokeConsent() { const d = await rpcJson('revoke_recording_consent'); CS.data = d; CS.uid = currentUser?.id; return d; }
   async function declineConsent(sessionId, reason) {
     const d = await rpcJson('decline_recording_consent', { p_session: sessionId || null, p_reason: reason });
@@ -583,15 +558,16 @@ Cierre y ticket de salida (5 min)
     return `<label class="lc-check lc-consent-main"><input type="checkbox" id="${P}consent" ${G.agree ? 'checked' : ''} ${ro ? 'disabled' : ''}> <span>${esc(CONSENT_TEXT)}</span></label>
       <details class="lc-more"><summary>More information</summary><ul>${CONSENT_MORE.map(t => `<li>${esc(t)}</li>`).join('')}</ul></details>
       <label class="lc-check lc-minor"><input type="checkbox" id="${P}minor" ${G.minor ? 'checked' : ''} ${ro ? 'disabled' : ''}> <span><b>I'm under 18</b></span></label>
-      <div class="lc-guardian" id="${P}guardian" ${G.minor ? '' : 'hidden'}>
-        <p class="lc-guardian-note"><span aria-hidden="true">👪</span> <span>A parent or guardian must agree for participants under 18. They confirm from their own link: until then you join without being recorded.</span></p>
+      <div class="lc-guardian" id="${P}guardian" ${G.minor ? '' : 'hidden'}>${managedConsent()
+        ? '<p class="lc-guardian-note" id="' + P + 'g-managed"><span aria-hidden="true">🏫</span> <span>Your institution already collected your family\'s authorization: you don\'t need to add your guardian\'s details.</span></p>'
+        : `<p class="lc-guardian-note"><span aria-hidden="true">👪</span> <span>A parent or guardian must agree for participants under 18. You declare it here: TeroClass does not verify it, and your institution sees it as "declared by the student".</span></p>
         <div class="lc-field"><label for="${P}g-name">Guardian's full name</label><input id="${P}g-name" type="text" maxlength="120" autocomplete="off" value="${esc(G.guardian.name)}" ${ro ? 'disabled' : ''}></div>
         <div class="lc-field"><label for="${P}g-email">Guardian's email</label><input id="${P}g-email" type="email" maxlength="254" autocomplete="off" value="${esc(G.guardian.email)}" ${ro ? 'disabled' : ''}></div>
+        <label class="lc-check"><input type="checkbox" id="${P}g-consent" ${G.guardian.consent ? 'checked' : ''} ${ro ? 'disabled' : ''}> <span>My parent or guardian agrees (I declare it).</span></label>`}
       </div>`;
   }
   function consentBlockHtml(L) {
     if (L.cstate === 'loading') return '<p class="lc-hint" id="lc-consent-loading">Checking your recording consent…</p>';
-    if (L.cstate === 'granted' && guardianPending(CS.data)) return guardianPendingHtml(CS.data, 'lc-');
     if (L.cstate === 'granted') return `<div class="lc-consent-ok" id="lc-consent-ok"><span aria-hidden="true">✓</span> <span>You already agreed: your classes are recorded (audio only). We won't ask you again.</span></div>
       <p class="lc-fine">You can turn it off at any time from your profile menu (Recording of my classes).</p>`;
     const ro = inViewAs();
@@ -619,8 +595,8 @@ Cierre y ticket de salida (5 min)
       <div class="lc-modal">
         <h2 id="lc-decline-h">No problem</h2>
         <p class="lc-decline-ok"><span aria-hidden="true">✓</span> <span>You can still join the class without being recorded.</span></p>
-        <p id="lc-decline-p">If you want, tell us why (optional). Your answer goes to your institution.</p>
-        <div class="lc-field"><label for="lc-decline-text">Your comment (optional)</label>
+        <p id="lc-decline-p">If you write something, it goes to your institution. If you leave it empty, we only record that you said no.</p>
+        <div class="lc-field"><label for="lc-decline-text">Do you want to tell us why? (optional)</label>
           <textarea id="lc-decline-text" rows="3" maxlength="1000" aria-describedby="lc-decline-min"></textarea>
           <span class="lc-fine" id="lc-decline-min">You can leave it empty.</span></div>
         <div class="lc-error" id="lc-decline-err" role="alert"></div>
@@ -804,12 +780,13 @@ Cierre y ticket de salida (5 min)
     const sum = document.getElementById('lc-consent-summary'); if (sum) sum.innerHTML = consentSummaryHtml(L);
     const pi = document.getElementById('lc-preview-initials'); if (pi) { pi.textContent = initials(L.name || 'You'); pi.style.background = colorFor(L.name || 'you'); }
   }
-  // under 18: name + valid email + confirmation, all required for the "yes" to count
+  // under 18: name + valid email + the student's declaration, all required for the "yes" to count (unless the institution manages it)
   function guardianError(G, P) {
-    if (!G.minor) return null;
+    if (!G.minor || managedConsent()) return null;
     if (!G.guardian.name.trim()) return { msg: "Please write the guardian's name.", focus: P + 'g-name' };
     if (!EMAIL_RE.test(G.guardian.email.trim())) return { msg: 'Please write a valid guardian email.', focus: P + 'g-email' };
     if (currentUser && String(currentUser.email || '').toLowerCase() === G.guardian.email.trim().toLowerCase()) return { msg: "The guardian's email must be different from yours.", focus: P + 'g-email' };
+    if (!G.guardian.consent) return { msg: 'Check the box to declare that your parent or guardian agrees.', focus: P + 'g-consent' };
     return null;
   }
   function setLobbyError(msg) {
@@ -830,8 +807,6 @@ Cierre y ticket de salida (5 min)
         if (S.lobby !== L) return;
         if (!consentOk(d)) throw new Error('Could not save your consent.');
         L.cstate = 'granted'; L.recorded = !!d.recorded; L.guardianOkDb = !!d.guardian_consent;
-        // P-10: a minor stays in the lobby once, to see / send the guardian's link; the next click joins (not recorded)
-        if (guardianPending(d)) { renderConsentBlock(); setLobbyError(''); toast('Saved. Send the link to your guardian; you can join now without being recorded.', 'ok'); return; }
       } catch (e) { setLobbyError(dbMsg(e) || 'Could not save your consent.'); return; }
     }
     if (inViewAs()) L.recorded = false;
@@ -1011,7 +986,7 @@ Cierre y ticket de salida (5 min)
   }
 
   function consentBadge(p) {
-    if (p.recorded) return `<span class="lc-badge rec" title="${esc(tr('Consented to recording'))}">● <span>Recorded</span></span>${p.minor ? ` <span class="lc-badge" title="${esc(tr('Guardian consent'))}">👪 <span>Guardian ✓</span></span>` : ''}`;
+    if (p.recorded) return `<span class="lc-badge rec" title="${esc(tr('Consented to recording'))}">● <span>Recorded</span></span>${p.minor ? ` <span class="lc-badge" title="${esc(tr('Under 18: guardian consent declared by the student or managed by the institution (not verified by TeroClass)'))}">👪 <span>Under 18</span></span>` : ''}`;
     return `<span class="lc-badge off" title="${esc(tr('Attends without recording'))}"><span>Not recorded</span></span>`;
   }
   function tileHtml(p) {
@@ -1573,6 +1548,7 @@ Cierre y ticket de salida (5 min)
       if (t.id === 'lc-mic-select') { L.micId = t.value; startPreview(); return; }
       if (t.id === 'lc-consent') L.agree = t.checked;
       if (t.id === 'lc-minor') L.minor = t.checked;
+      if (t.id === 'lc-g-consent') L.guardian.consent = t.checked;
       if (L.error) setLobbyError('');
       syncConsentUi();
     }
@@ -1667,12 +1643,7 @@ Cierre y ticket de salida (5 min)
     if (typeof closeUserMenu === 'function') closeUserMenu();
     if (inViewAs()) { if (typeof vaBlocked === 'function') vaBlocked(); return; }
     const d = await loadConsent(true);
-    if (consentOk(d) && guardianPending(d)) {
-      profileModal(`<h2 id="lc-pm-h">Recording of my classes</h2>
-        ${guardianPendingHtml(d, 'lc-p-')}
-        <div class="lc-error" id="lc-pm-err" role="alert"></div>
-        <div class="lc-modal-actions"><button type="button" class="lc-btn" data-pm="cancel">Close</button><button type="button" class="lc-btn lc-danger" data-pm="revoke" id="lc-pm-revoke">Turn off recording</button></div>`);
-    } else if (consentOk(d)) {
+    if (consentOk(d)) {
       profileModal(`<h2 id="lc-pm-h">Turn off the recording of your classes?</h2>
         <p>From now on your classes are not recorded and you don't get new insights from them. We'll ask you again at your next class.</p>
         <div class="lc-error" id="lc-pm-err" role="alert"></div>
@@ -1703,8 +1674,7 @@ Cierre y ticket de salida (5 min)
       if (!G.agree) { setErr('Check the box to turn on recording.'); document.getElementById('lc-p-consent')?.focus(); return; }
       const ge = guardianError(G, 'lc-p-'); if (ge) { setErr(ge.msg); document.getElementById(ge.focus)?.focus(); return; }
       b.disabled = true;
-      try { const d = await grantConsent(G); if (!consentOk(d)) throw new Error('Could not save your consent.'); closeProfileModal();
-        if (guardianPending(d)) { openConsentSettings(); toast('Saved. Your classes are recorded once your guardian confirms.', 'ok'); } else toast('Recording turned on ✓', 'ok'); }
+      try { const d = await grantConsent(G); if (!consentOk(d)) throw new Error('Could not save your consent.'); closeProfileModal(); toast('Recording turned on ✓', 'ok'); }
       catch (x) { setErr(dbMsg(x)); b.disabled = false; }
       refreshProfileConsent();
     }
@@ -1715,6 +1685,7 @@ Cierre y ticket de salida (5 min)
     if (t.id === 'lc-p-minor') { G.minor = t.checked; const g = document.getElementById('lc-p-guardian'); if (g) g.hidden = !G.minor; }
     if (t.id === 'lc-p-g-name') G.guardian.name = t.value;
     if (t.id === 'lc-p-g-email') G.guardian.email = t.value;
+    if (t.id === 'lc-p-g-consent') G.guardian.consent = t.checked;
     const err = document.getElementById('lc-pm-err'); if (err && e.type === 'change') err.textContent = '';
   }
 
@@ -1823,17 +1794,18 @@ Cierre y ticket de salida (5 min)
     [CONSENT_MORE[2]]: 'El audio original se borra a los 30 días; los insights quedan en tu registro de TeroClass.',
     [CONSENT_MORE[3]]: 'Cada persona se identifica por su propio micrófono, nunca por huella de voz. Sin detección de emociones.',
     [CONSENT_MORE[4]]: 'Lo podés desactivar cuando quieras desde el menú de tu perfil (Grabación de mis clases).',
-    [CONSENT_MORE[5]]: 'Menores de 18: tiene que aceptar su madre, padre o tutor/a desde su propio link.',
-    'A parent or guardian must agree for participants under 18. They confirm from their own link: until then you join without being recorded.': 'Para menores de 18, tiene que aceptar su madre, padre o tutor/a. Confirma desde su propio link: hasta entonces entrás sin que te graben.',
-    'Waiting for your guardian to confirm.': 'Esperando la confirmación de tu tutor/a.', 'Your guardian did not agree: your classes are not recorded.': 'Tu tutor/a no aceptó: tus clases no se graban.',
-    'Until they confirm from their link, you join your classes without being recorded. Send them this link:': 'Hasta que confirme desde su link, entrás a tus clases sin que te graben. Mandale este link:',
-    'Link for your guardian': 'Link para tu tutor/a', 'Copy': 'Copiar', 'WhatsApp': 'WhatsApp',
-    'Hi! To have my classes on TeroClass recorded (audio only), I need you to confirm here:': 'Hola: para que se graben mis clases en TeroClass (solo audio), necesito que lo confirmes acá:',
-    'Saved. Send the link to your guardian; you can join now without being recorded.': 'Listo. Mandale el link a tu tutor/a; podés entrar ahora sin que te graben.',
-    'Saved. Your classes are recorded once your guardian confirms.': 'Listo. Tus clases se van a grabar cuando tu tutor/a confirme.',
+    [CONSENT_MORE[5]]: 'Menores de 18: tiene que estar de acuerdo su madre, padre o tutor/a. Lo declarás vos acá; TeroClass no lo verifica.',
+    'A parent or guardian must agree for participants under 18. You declare it here: TeroClass does not verify it, and your institution sees it as "declared by the student".':
+      'Para menores de 18, tiene que estar de acuerdo su madre, padre o tutor/a. Lo declarás vos acá: TeroClass no lo verifica y tu institución lo ve como "declarado por el estudiante".',
+    'My parent or guardian agrees (I declare it).': 'Mi madre, padre o tutor/a está de acuerdo (lo declaro yo).',
+    'Check the box to declare that your parent or guardian agrees.': 'Marcá la casilla para declarar que tu madre, padre o tutor/a está de acuerdo.',
+    "Your institution already collected your family's authorization: you don't need to add your guardian's details.": 'Tu institución ya gestionó la autorización de tu familia: no hace falta que agregues los datos de tu tutor/a.',
+    'Under 18: guardian consent declared by the student or managed by the institution (not verified by TeroClass)': 'Menor de 18: consentimiento del tutor/a declarado por el estudiante o gestionado por la institución (TeroClass no lo verifica)',
+    'Under 18': 'Menor de 18',
+    'If you write something, it goes to your institution. If you leave it empty, we only record that you said no.': 'Si escribís algo, le llega a tu institución. Si lo dejás vacío, solo queda registrado que dijiste que no.',
+    'Do you want to tell us why? (optional)': '¿Querés contarnos por qué? (opcional)',
     "The guardian's email must be different from yours.": 'El email del tutor/a tiene que ser distinto del tuyo.',
-    'No problem': 'Está bien', 'If you want, tell us why (optional). Your answer goes to your institution.': 'Si querés, contanos por qué (opcional). Tu respuesta le llega a la institución.',
-    'Your comment (optional)': 'Tu comentario (opcional)', 'You can leave it empty.': 'Lo podés dejar vacío.', 'Join without recording': 'Entrar sin que me graben', 'Joining…': 'Entrando…',
+    'No problem': 'Está bien', 'You can leave it empty.': 'Lo podés dejar vacío.', 'Join without recording': 'Entrar sin que me graben', 'Joining…': 'Entrando…',
     'You join as': 'Entrás como', 'Preview: nothing is recorded yet': 'Vista previa: todavía no se graba nada', 'The recorder is not connected yet: nothing is saved.': 'El grabador todavía no está conectado: no se guarda nada.',
     'Show sample participants (demo, invented names)': 'Mostrar participantes de ejemplo (demo, nombres inventados)', 'Sample plan (demo)': 'Plan de ejemplo (demo)',
     'Your next classes': 'Tus próximas clases', 'Past classes': 'Clases pasadas', 'The insights of the classes you taught are in Insights.': 'Los insights de las clases que diste están en Insights.',

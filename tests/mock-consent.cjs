@@ -22,10 +22,12 @@ module.exports = function install(ctx) {
     return { current_version: VERSION, status: !c ? (rev ? 'revoked' : 'none') : c.version !== VERSION ? 'outdated' : 'granted',
       granted: !!c && c.version === VERSION, recorded: !!c && c.version === VERSION && (!c.is_minor || c.guardian_consent),
       version: c ? c.version : null, granted_at: c ? c.granted_at : null, revoked_at: c ? null : rev, minor: !!c?.is_minor, guardian_consent: c?.is_minor ? c.guardian_consent : null,
-      // P-10: the guardian confirms from their own link
-      guardian_status: c?.is_minor ? (c.guardian_consent ? 'confirmed' : c.guardian_declined_at ? 'declined' : 'pending') : null,
-      guardian_token: c?.is_minor && !c.guardian_consent && !c.guardian_declined_at ? c.guardian_token : null };
+      // P-10: declared by the student, or managed by the institution (consent_managed_by_institution)
+      guardian_source: c?.is_minor ? (c.guardian_source || 'student') : null, consent_managed: managed(userId) };
   }
+  // P-10: any of the person's institutions (own unit or enrolling ones, and above) manages the families' consent
+  const managed = userId => { const ids = [prof(userId)?.institution_id, ...db.student_enrollments.filter(e => e.user_id === userId).map(e => e.institution_id)].filter(Boolean);
+    return ids.some(i => chainOf(i).some(c => instById(c.id)?.consent_managed_by_institution)); };
   const sess = id => db.class_sessions.find(s => s.id === id);
   const group = id => db.class_groups.find(g => g.id === id);
   const teaches = (me, s) => { if (s.group_id) { const g = group(s.group_id); return !!g && (g.teacher_id === me.id || g.substitute_id === me.id); } return s.teacher_id === me.id; };
@@ -45,25 +47,20 @@ module.exports = function install(ctx) {
 
   function handle(fn, body, me) {
     const b = body || {};
-    // P-10: the guardian's link (anon)
-    if (fn === 'guardian_consent_info' || fn === 'guardian_consent_respond') {
-      const c = db.user_consents.find(x => x.guardian_token && x.guardian_token === b.p_token && !x.revoked_at);
-      if (!c) return fn === 'guardian_consent_info' ? ok({ status: 'invalid' }) : err('Link inválido');
-      if (fn === 'guardian_consent_respond') { if (b.p_accept) { c.guardian_consent = true; c.guardian_declined_at = null; } else { c.guardian_consent = false; c.guardian_declined_at = now(); } }
-      return ok({ status: c.guardian_consent ? 'confirmed' : c.guardian_declined_at ? 'declined' : 'pending', student: (prof(c.user_id)?.name || db.student_enrollments.find(e => e.user_id === c.user_id)?.name || '').trim().split(' ')[0], guardian_name: c.guardian_name });
-    }
+    if (fn === 'set_consent_managed') { if (!isAdminOf(me, b.p_unit)) return err('No autorizado'); const i = instById(b.p_unit); if (i) i.consent_managed_by_institution = !!b.p_on; return ok(!!b.p_on); }
     if (fn === 'my_consent') { if (!me) return err('No autorizado'); return ok(myConsent(me.id)); }
     if (fn === 'grant_recording_consent') {
       if (!me) return err('No autorizado');
       if (b.p_version !== VERSION) return err('El texto del consentimiento cambió: recargá la página');
       const minor = !!b.p_minor; const name = String(b.p_guardian_name || '').trim(); const email = String(b.p_guardian_email || '').trim();
-      if (minor && !name) return err('Menores de 18: falta el nombre del tutor/a');
-      if (minor && !EMAIL_RE.test(email)) return err('Menores de 18: email del tutor/a inválido');
-      if (minor && email.toLowerCase() === String(me.email || '').toLowerCase()) return err('Menores de 18: el email del tutor/a tiene que ser distinto del tuyo');
+      const inst = minor && managed(me.id);
+      if (minor && !inst && !name) return err('Menores de 18: falta el nombre del tutor/a');
+      if (minor && !inst && !EMAIL_RE.test(email)) return err('Menores de 18: email del tutor/a inválido');
+      if (minor && !inst && email.toLowerCase() === String(me.email || '').toLowerCase()) return err('Menores de 18: el email del tutor/a tiene que ser distinto del tuyo');
+      if (minor && !inst && !b.p_guardian_consent) return err('Menores de 18: el tutor/a tiene que confirmar el consentimiento');
       db.user_consents.filter(c => c.user_id === me.id && !c.revoked_at).forEach(c => { c.revoked_at = now(); c.revoked_reason = 'superseded'; });
       db.user_consents.push({ id: uid(), user_id: me.id, version: VERSION, granted_at: now(), revoked_at: null, revoked_reason: null, is_minor: minor,
-        guardian_name: minor ? name : null, guardian_email: minor ? email : null, guardian_consent: false,
-        guardian_token: minor ? require('crypto').randomBytes(32).toString('hex') : null });
+        guardian_name: minor && !inst ? name : null, guardian_email: minor && !inst ? email : null, guardian_consent: minor, guardian_source: minor ? (inst ? 'institution' : 'student') : null });
       calls.grant.push({ user: me.id, minor });
       return ok(myConsent(me.id));
     }
@@ -101,7 +98,7 @@ module.exports = function install(ctx) {
         .map(e => ({ kind: 'student', name: e.name || e.email, email: e.email, unit_id: e.institution_id, user_id: e.user_id || null }));
       const people = [...staff, ...studs].map(x => { const st = personStatus(x.user_id, units); const minor = st.status === 'granted' && !!st.c?.is_minor;
         return { kind: x.kind, admin: !!x.admin, name: x.name, email: x.email, unit_id: x.unit_id, unit_name: instById(x.unit_id)?.name || '', linked: !!x.user_id, status: st.status, status_at: st.at,
-          minor, guardian_consent: minor ? st.c.guardian_consent : null, declines: x.user_id ? decl.filter(d => d.user_id === x.user_id).length : 0 }; })
+          minor, guardian_consent: minor ? st.c.guardian_consent : null, guardian_source: minor ? (st.c.guardian_source || 'student') : null, declines: x.user_id ? decl.filter(d => d.user_id === x.user_id).length : 0 }; })
         .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
       const declines = decl.slice().sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).map(d => {
         const e = db.student_enrollments.find(x => x.user_id === d.user_id && x.institution_id === d.institution_id); const p = prof(d.user_id); const s = d.session_id ? sess(d.session_id) : null;

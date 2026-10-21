@@ -1058,6 +1058,11 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
           <label class="switch-row access-row"><input type="checkbox" id="access-open-reg"> <span>Anyone with the link can join as a teacher</span></label>
           <p class="access-help">Off (recommended): only the people you invite can join. On: whoever opens <b id="access-link" data-no-i18n></b> and creates an account becomes a teacher of this unit, uses a seat of your plan and sees the unit's AI settings and playbooks. Turn it on only for a short time and share the link only with your team.</p>
         </div>
+        <!-- P-10: the institution may manage the families' consent for minors itself (declared, e.g. paper forms) -->
+        <div class="admin-card" id="consent-card" style="display:none;margin-top:16px"><div class="admin-card-title">Recording consent of minors <span>Students under 18</span></div>
+          <label class="switch-row access-row"><input type="checkbox" id="access-consent-managed"> <span>Our institution collects the families' consent itself</span></label>
+          <p class="access-help">Off: a student under 18 writes their guardian's name and email and declares that the guardian agrees (TeroClass does not verify it; you see it as "declared by the student"). On: your institution declares that it already collected the written authorization of the families of its students under 18 (for example on paper), so they are not asked for their guardian's details. Applies to this unit and everything below it.</p>
+        </div>
       </div>
 
       <!-- BRANDING WIZARD -->
@@ -1901,7 +1906,7 @@ sb.auth.onAuthStateChange((event,session)=>{
 
 function normOrg(r){
   if(!r)return null;
-  return {id:r.id,name:r.name,slug:r.slug,color:r.color||'#7c5cbf',bgColor:r.bg_color||'#f0eef8',font:r.font||'Inter',logo:safeImgUrl(r.logo_url),adminEmail:r.admin_email||'',openRegistration:r.open_registration===true,
+  return {id:r.id,name:r.name,slug:r.slug,color:r.color||'#7c5cbf',bgColor:r.bg_color||'#f0eef8',font:r.font||'Inter',logo:safeImgUrl(r.logo_url),adminEmail:r.admin_email||'',openRegistration:r.open_registration===true,consentManaged:r.consent_managed_by_institution===true,
     masterPrompt:r.master_prompt||'',docText:r.doc_text||'',docName:r.doc_name||'',
     // hierarchy: parent unit, own (non-inherited) branding values, learning-approach bars config
     parentId:r.parent_id||null,ownColor:r.color||null,ownBg:r.bg_color||null,ownFont:r.font||null,ownLogo:safeImgUrl(r.logo_url)||null,
@@ -4948,7 +4953,7 @@ async function openDeleteAccount(){
   let r,j={};
   try{r=await fetch('/api/account/delete',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+(session?.access_token||'')},body:JSON.stringify({confirm:'DELETE'})});j=await r.json().catch(()=>({}));}
   catch(e){showToast('No connection. Check your internet and try again.','err');return;}
-  if(r.status===501){showToast('Account deletion is not enabled yet. Write to privacidad@teroclass.com and we will delete it.','warn',9000);return;}
+  if(r.status===501){showToast('Account deletion is not enabled yet. Write to the contact on the Privacy page and we will delete it.','warn',9000);return;}
   if(!r.ok){showToast(j.error||'Could not delete the account. Please try again or write to us.','err');return;}
   try{await sb.auth.signOut({scope:'local'});}catch(e){}
   try{sessionStorage.setItem('tc_auth_msg','Your account was deleted.');}catch(e){}
@@ -5106,7 +5111,24 @@ function renderAccessCard(orgFilter){
   card.style.display=can?'block':'none';if(!can)return;
   const cb=document.getElementById('access-open-reg');cb.checked=org.openRegistration===true;cb.dataset.org=org.id;
   document.getElementById('access-link').textContent=location.origin+'/org/'+(org.slug||'');
+  const cc=document.getElementById('consent-card');if(cc){cc.style.display='block';const c2=document.getElementById('access-consent-managed');c2.checked=org.consentManaged===true;c2.dataset.org=org.id;}
 }
+document.addEventListener('change',async e=>{
+  if(e.target?.id!=='access-consent-managed')return;
+  const cb=e.target;const id=cb.dataset.org;const want=cb.checked;
+  if(viewAs){cb.checked=!want;vaBlocked();return;}
+  if(want){
+    const ok=await confirmDanger({title:'Does your institution collect the families\' consent?',body:'By turning this on, your institution declares that it has the written authorization of the parents or guardians of its students under 18 for the recording of their classes.',
+      items:['Students under 18 are no longer asked for their guardian\'s details','Keep those authorizations: your institution is responsible for them','You can turn it off at any time'],confirmText:'Yes, we collect it'});
+    if(!ok){cb.checked=false;return;}
+  }
+  cb.disabled=true;
+  const {error}=await sb.rpc('set_consent_managed',{p_unit:id,p_on:want});
+  cb.disabled=false;
+  if(error){cb.checked=!want;showToast('Error: '+error.message,'err');return;}
+  if(orgsCache[id])orgsCache[id].consentManaged=want;
+  showToast(want?'Saved: your institution manages the families\' consent.':'Saved: students under 18 declare their guardian\'s consent.','ok');
+});
 document.addEventListener('change',async e=>{
   if(e.target?.id!=='access-open-reg')return;
   const cb=e.target;const id=cb.dataset.org;const want=cb.checked;
@@ -5150,7 +5172,7 @@ const I18N_ES_FIX={
 'Delete my account':'Borrar mi cuenta','This deletes your account for good. You cannot undo it.':'Esto borra tu cuenta para siempre. No se puede deshacer.',
 'Your profile and your saved classes':'Tu perfil y tus clases guardadas','Your recording consent':'Tu consentimiento de grabación',
 'Your access to your classes and insights (the records your institution keeps lose the link to you)':'Tu acceso a tus clases e insights (los registros que guarda tu institución dejan de estar vinculados a vos)',
-'Account deletion is not enabled yet. Write to privacidad@teroclass.com and we will delete it.':'El borrado de cuentas todavía no está activado. Escribinos a privacidad@teroclass.com y la borramos.',
+'Account deletion is not enabled yet. Write to the contact on the Privacy page and we will delete it.':'El borrado de cuentas todavía no está activado. Escribinos al contacto de la página de Privacidad y la borramos.',
 'Account deletion is not enabled yet. Write to us and we will delete it.':'El borrado de cuentas todavía no está activado. Escribinos y la borramos.',
 'Could not delete the account. Please try again or write to us.':'No se pudo borrar la cuenta. Probá de nuevo o escribinos.',
 'You are the last admin of your institution: make someone else admin first.':'Sos el último admin de tu institución: primero hacé admin a otra persona.',
@@ -5184,6 +5206,15 @@ const I18N_ES_FIX={
 "and creates an account becomes a teacher of this unit, uses a seat of your plan and sees the unit's AI settings and playbooks. Turn it on only for a short time and share the link only with your team.":'y cree una cuenta pasa a ser docente de esta unidad, ocupa un asiento de tu plan y ve los ajustes de IA y los playbooks de la unidad. Encendelo solo por un rato y compartí el link solo con tu equipo.',
 'Open join by link?':'¿Abrir el registro por link?','Anyone who gets the link can create an account and join as a teacher of this unit.':'Cualquiera que tenga el link puede crear una cuenta y sumarse como docente de esta unidad.',
 'Each person uses a seat of your plan':'Cada persona ocupa un asiento de tu plan',"They can see this unit's AI settings and playbooks":'Ve los ajustes de IA y los playbooks de esta unidad','You can turn it off at any time':'Lo podés apagar cuando quieras',
+'Recording consent of minors':'Consentimiento de grabación de menores','Students under 18':'Estudiantes menores de 18',
+"Our institution collects the families' consent itself":'Nuestra institución junta el consentimiento de las familias',
+'Off: a student under 18 writes their guardian\'s name and email and declares that the guardian agrees (TeroClass does not verify it; you see it as "declared by the student"). On: your institution declares that it already collected the written authorization of the families of its students under 18 (for example on paper), so they are not asked for their guardian\'s details. Applies to this unit and everything below it.':
+'Apagado: un estudiante menor de 18 escribe el nombre y el email de su tutor/a y declara que está de acuerdo (TeroClass no lo verifica; lo ves como "declarado por el estudiante"). Encendido: tu institución declara que ya juntó la autorización escrita de las familias de sus estudiantes menores de 18 (por ejemplo, en papel), así que no se les piden los datos del tutor/a. Vale para esta unidad y todo lo que cuelga de ella.',
+"Does your institution collect the families' consent?":'¿Tu institución junta el consentimiento de las familias?',
+'By turning this on, your institution declares that it has the written authorization of the parents or guardians of its students under 18 for the recording of their classes.':'Al encenderlo, tu institución declara que tiene la autorización escrita de las madres, padres o tutores de sus estudiantes menores de 18 para grabar sus clases.',
+"Students under 18 are no longer asked for their guardian's details":'A los estudiantes menores de 18 ya no se les piden los datos de su tutor/a','Keep those authorizations: your institution is responsible for them':'Guardá esas autorizaciones: la responsabilidad es de tu institución',
+'Yes, we collect it':'Sí, las juntamos',"Saved: your institution manages the families' consent.":'Listo: tu institución gestiona el consentimiento de las familias.',
+"Saved: students under 18 declare their guardian's consent.":'Listo: los estudiantes menores de 18 declaran el consentimiento de su tutor/a.',
 'Turn on':'Encender','Join by link is on.':'El registro por link está encendido.','Join by link is off: only invited people can join.':'El registro por link está apagado: solo se suman las personas invitadas.',
 'Delete this unit?':'¿Borrar esta unidad?','This cannot be undone. To confirm, type the name of the unit.':'No se puede deshacer. Para confirmar, escribí el nombre de la unidad.',
 'Its branding, AI settings, playbooks and learning-approach bars':'Su marca, ajustes de IA, playbooks y barras de enfoque','Its invitations':'Sus invitaciones',
