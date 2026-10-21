@@ -95,7 +95,7 @@ test('budget used up: 402 with the right message per role; Azure is not called',
   setKey(JWT_KEY);
   const cases = [
     [{ allowed: false, scope: 'institution', is_admin: false, can_buy: false }, /Tell your admin/, false],
-    [{ allowed: false, scope: 'institution', is_admin: true, can_buy: true }, /Buy a token pack/, true],
+    [{ allowed: false, scope: 'institution', is_admin: true, can_buy: true }, /Add a class pack/, true],
     [{ allowed: false, scope: 'institution', is_admin: true, can_buy: false }, /main institution's admin/, false],
     [{ allowed: false, scope: 'personal', is_admin: false, can_buy: false, resets_on: '2026-11-01' }, /free AI allowance/, false],
   ];
@@ -156,23 +156,23 @@ test('a content-filtered answer that still consumed tokens is recorded', async (
 test('billing/status: booleans only, ping only for signed-in users', async () => {
   setKey(null); mock();
   let r = res(); await status({ method: 'GET', headers: {} }, r);
-  assert.deepEqual(r.body, { billing_configured: false, billing_ok: null });
+  assert.deepEqual(r.body, { billing_configured: false, billing_ok: null, model_mini: false, sales_email: false });
   assert.equal(r.headers['Cache-Control'], 'no-store');
   setKey(JWT_KEY); let calls = mock();
   r = res(); await status({ method: 'GET', headers: {} }, r);
-  assert.deepEqual(r.body, { billing_configured: true, billing_ok: null });
+  assert.deepEqual(r.body, { billing_configured: true, billing_ok: null, model_mini: false, sales_email: false });
   assert.equal(by(calls, '/rpc/billing_service_ping').length, 0);
   r = res(); await status({ method: 'GET', headers: { authorization: 'Bearer forged' } }, r);
   assert.equal(r.body.billing_ok, null);
   calls = mock();
   r = res(); await status({ method: 'GET', headers: { authorization: 'Bearer good-token' } }, r);
-  assert.deepEqual(r.body, { billing_configured: true, billing_ok: true });
+  assert.deepEqual(r.body, { billing_configured: true, billing_ok: true, model_mini: false, sales_email: false });
   assert.ok(!JSON.stringify(r.body).includes(JWT_KEY));
   const oe = console.error; console.error = () => {};
   try {
     mock({ ping: 'fail' });
     r = res(); await status({ method: 'GET', headers: { authorization: 'Bearer good-token' } }, r);
-    assert.deepEqual(r.body, { billing_configured: true, billing_ok: false });
+    assert.deepEqual(r.body, { billing_configured: true, billing_ok: false, model_mini: false, sales_email: false });
   } finally { console.error = oe; }
   r = res(); await status({ method: 'POST', headers: {} }, r);
   assert.equal(r.statusCode, 405);

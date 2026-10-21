@@ -69,9 +69,9 @@ export function publicBudget(b) {
 
 export const BUDGET_MESSAGES = {
   personal: 'You have used your free AI allowance for this month. It renews on the 1st of next month.',
-  admin_buy: 'Your institution has used all its AI tokens for this month. Buy a token pack to keep generating.',
-  admin_ask: "Your institution has used all its AI tokens for this month. Ask the main institution's admin to buy a token pack.",
-  teacher: 'Your institution has reached its monthly AI limit. Tell your admin so they can add more tokens.',
+  admin_buy: 'Your institution has used all its classes for this month. Add a class pack to keep generating.',
+  admin_ask: "Your institution has used all its classes for this month. Ask the main institution's admin to add a class pack.",
+  teacher: 'Your institution has used all its classes for this month. Tell your admin so they can add a class pack.',
 };
 
 // 402 body when the budget is used up

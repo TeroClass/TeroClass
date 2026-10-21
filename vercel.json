@@ -128,6 +128,9 @@
     },
     "api/class/config.js": {
       "maxDuration": 10
+    },
+    "api/notify/lead.js": {
+      "maxDuration": 20
     }
   },
   "headers": [

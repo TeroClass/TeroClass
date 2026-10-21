@@ -18,6 +18,14 @@
 //  · TC-01: además de los pedidos por día, cada pedido descuenta sus tokens ESTIMADOS (entrada / 4 + max_tokens) del tope
 //    diario de la persona y del de su institución (platform_settings; consume_ai_quota). Cuentas sin institución o con
 //    el email sin confirmar: muy poco. Todo con el token del usuario (sin la clave del servidor).
+//
+// Planes y prueba gratis (2026-10-21):
+//  · PRUEBA GRATIS: consume_ai_quota (token del usuario, sin la clave del servidor) cuenta las clases completas de quien
+//    está en prueba; al intentar la 6ª responde reason 'trial_limit' → 402 {code:'trial_limit'} y la app abre los planes.
+//    El pedido se marca como fallido solo con su finish_key (la persona no la ve: nadie se "devuelve" una clase).
+//  · MODELO: body.model ('default' | 'mini') solo lo acepta el súper admin (comparar modelos; la base lo decide:
+//    reason 'model' → 403). Sin body.model vale el ajuste de la plataforma por tipo de pedido (ai_model_default).
+//    'mini' usa AZURE_OPENAI_DEPLOYMENT_MINI; si no existe, el despliegue de siempre (model.fallback = true).
 import { serviceKey, budgetCheck, recordUsage, publicBudget, budgetError, warnNotConfigured } from './_lib/billing.js';
 import { sanitizeMeta } from './_lib/meta.js';
 import { validateGenerateBody, clientIp, ipKey, memRateHit } from './_lib/guard.js';
@@ -80,9 +88,14 @@ export const estimateTokens = (messages, maxTokens) =>
 // por día de la persona y de su institución, TC-01) y anota el pedido con sus metadatos ya limpios.
 // Devuelve { allowed, used, limit, reason?, event? } o null si no se pudo verificar.
 // Si la base todavía no tiene la versión nueva (script sin volver a correr), reintenta con la firma anterior.
-async function consumeQuota(token, meta, est, ms) {
-  let r = await userRpc('consume_ai_quota', token, { ...(meta ? { p_meta: meta } : {}), p_est_tokens: est }, ms);
+async function consumeQuota(token, meta, est, ms, model) {
   const missing = x => !x.ok && (x.status === 404 || x.data?.code === 'PGRST202');
+  let r;
+  if (model) { // base sin la versión con p_model (script sin volver a correr): sin poder verificar al súper admin, se ignora
+    r = await userRpc('consume_ai_quota', token, { ...(meta ? { p_meta: meta } : {}), p_est_tokens: est, p_model: model }, ms);
+    if (missing(r)) r = null;
+  }
+  if (!r) r = await userRpc('consume_ai_quota', token, { ...(meta ? { p_meta: meta } : {}), p_est_tokens: est }, ms);
   if (missing(r)) r = await userRpc('consume_ai_quota', token, meta ? { p_meta: meta } : {}, ms);
   if (missing(r) && meta) r = await userRpc('consume_ai_quota', token, {}, ms);
   const q = r.ok ? r.data : null;
@@ -104,10 +117,20 @@ async function ipAllowed(token, req, ms) {
 }
 
 // Marca cómo terminó el pedido (para no contar como "clase generada" un error). Nunca hace fallar la respuesta.
-async function finishEvent(token, event, ok) {
+async function finishEvent(token, event, ok, key) {
   if (!Number.isSafeInteger(event) || event <= 0) return;
-  try { await userRpc('finish_ai_event', token, { p_event: event, p_ok: !!ok }, 3000); } catch { /* best effort */ }
+  const body = { p_event: event, p_ok: !!ok, ...(typeof key === 'string' && /^[0-9a-f]{16,64}$/.test(key) ? { p_key: key } : {}) };
+  try { await userRpc('finish_ai_event', token, body, 3000); } catch { /* best effort */ }
 }
+
+// Qué despliegue de Azure usar: 'mini' solo si existe AZURE_OPENAI_DEPLOYMENT_MINI (si no, el de siempre).
+export function pickDeployment(choice, env = process.env) {
+  const def = env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4o';
+  const mini = String(env.AZURE_OPENAI_DEPLOYMENT_MINI || '').trim();
+  if (choice === 'mini' && /^[A-Za-z0-9._-]{1,64}$/.test(mini)) return { used: 'mini', deployment: mini, fallback: false };
+  return { used: 'default', deployment: def, fallback: choice === 'mini' };
+}
+export const TRIAL_ERROR = "You've used your free trial classes. Everything you created is still here to view and export. To create new classes, choose a plan.";
 
 function isContentFilterError(data) {
   const e = data?.error || {};
@@ -188,7 +211,6 @@ export default async function handler(req, res) {
 
   const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
   const apiKey = process.env.AZURE_OPENAI_API_KEY;
-  const deployment = process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4o';
   const apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-12-01-preview';
   if (!endpoint || !apiKey) {
     return res.status(500).json({ error: 'AI is not configured on the server yet (missing Azure settings in Vercel).' });
@@ -205,17 +227,28 @@ export default async function handler(req, res) {
     const v = validateGenerateBody(req.body);
     if (v.error) return res.status(400).json({ error: v.error, code: v.code });
     const { kind, messages, maxTokens, temperature } = v;
+    // Modelo elegido a mano (solo el súper admin: lo decide la base en consume_ai_quota)
+    const wantModel = req.body?.model;
+    if (wantModel !== undefined && wantModel !== null && wantModel !== 'default' && wantModel !== 'mini') {
+      return res.status(400).json({ error: 'Invalid request.', code: 'invalid' });
+    }
 
     if (!(await ipAllowed(token, req, Math.min(SUPABASE_TIMEOUT_MS, left())))) {
       return res.status(429).json({ error: 'Too many requests right now. Wait a moment and try again.', code: 'ip_rate' });
     }
 
     // Límite diario (falla cerrado: si no se puede verificar, no se llama a Azure)
-    const quota = await consumeQuota(token, sanitizeMeta(req.body?.meta, kind), estimateTokens(messages, maxTokens), Math.min(SUPABASE_TIMEOUT_MS, left()));
+    const quota = await consumeQuota(token, sanitizeMeta(req.body?.meta, kind), estimateTokens(messages, maxTokens), Math.min(SUPABASE_TIMEOUT_MS, left()), wantModel || null);
     if (!quota) {
       return res.status(503).json({ error: 'Could not check your daily AI limit. Please try again.', code: 'quota_check' });
     }
     if (!quota.allowed) {
+      if (quota.reason === 'trial_limit') {
+        return res.status(402).json({ error: TRIAL_ERROR, code: 'trial_limit', trial_used: quota.trial_used ?? null, trial_limit: quota.trial_limit ?? null });
+      }
+      if (quota.reason === 'model') {
+        return res.status(403).json({ error: 'Only the platform owner can choose the AI model.', code: 'model_forbidden' });
+      }
       if (quota.reason === 'institution') {
         return res.status(429).json({ error: "Your institution reached today's AI limit. Try again tomorrow or ask your admin.", code: 'quota_institution' });
       }
@@ -247,7 +280,8 @@ export default async function handler(req, res) {
 
       const azureMs = left() - FINISH_MARGIN_MS;
       if (azureMs < 5000) return res.status(504).json(TIMEOUT_ERROR);
-      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
+      const pick = pickDeployment(quota.model === 'mini' ? 'mini' : 'default');
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${encodeURIComponent(pick.deployment)}/chat/completions?api-version=${apiVersion}`;
       let response;
       try {
         response = await azureStream(url, apiKey, { messages, max_tokens: maxTokens, temperature, user: user.id }, azureMs);
@@ -278,9 +312,11 @@ export default async function handler(req, res) {
       }
       // choices[0].finish_reason = 'length' cuando se cortó (por tokens o por plazo): la app pide la continuación
       ok = true;
-      return res.status(200).json({ ...data, partial: !!response.partial || undefined, quota: { used: quota.used, limit: quota.limit }, budget: publicBudget(after) });
+      // el nombre del despliegue solo vuelve cuando el súper admin eligió el modelo (comparar modelos)
+      const model = { used: pick.used, ...(pick.fallback ? { fallback: true } : {}), ...(wantModel ? { deployment: pick.deployment } : {}) };
+      return res.status(200).json({ ...data, partial: !!response.partial || undefined, quota: { used: quota.used, limit: quota.limit }, budget: publicBudget(after), model });
     } finally {
-      await finishEvent(token, quota.event, ok);
+      await finishEvent(token, quota.event, ok, quota.finish_key);
     }
   } catch (err) {
     if (err instanceof TimeoutError) return res.status(504).json(TIMEOUT_ERROR);
