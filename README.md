@@ -25,11 +25,19 @@ AI-powered didactic planning platform for teachers.
 | `RESEND_API_KEY` | (secret, **optional**) Turns on class invitation / update / cancellation emails with the event attached ([resend.com](https://resend.com)), and the email to the institution admins when someone does not agree to be recorded (that one also needs `SUPABASE_SERVICE_ROLE_KEY`, to read the admins' emails on the server). Without it nothing is sent: the app offers "Copy invitation link" and the justifications are only in Groups → Consents. |
 | `NOTIFY_FROM` | (optional) Sender of those emails, e.g. `TeroClass <clases@teroclass.com>` (the domain must be verified in Resend). Default `TeroClass <no-reply@teroclass.com>`. |
 | `APP_URL` | (optional) Public https origin used in links inside calendar events, e.g. `https://teroclass.com`. Default: the request's host. |
+| `TURNSTILE_SITE_KEY` | (optional, public) Cloudflare Turnstile site key (TC-18). With it, sign-up, sign-in, the student magic link and "Forgot your password?" show the check and send its token to Supabase Auth (`captchaToken`). The **secret** (`TURNSTILE_SECRET_KEY`) is NOT set in Vercel: paste it in Supabase → Authentication → Bot and Abuse Protection (Turnstile). Without the site key nothing changes. |
+| `RECORDING_ENABLED` | (optional, `true` only once a real recorder is connected) Makes the room say "● Recording — only people who gave consent". Without it the room says "Recording ready to be turned on — nothing is recorded yet" (TC-23). |
+| `APP_ENV` | (optional) `production` on the production project. Any other value (e.g. `staging`) shows the thin "Versión de prueba" banner even on teroclass.com; any host other than teroclass.com / www.teroclass.com shows it anyway (P-21). |
+| `ROOM_TICKET_SECRET` | (optional) Secret for the invitation links of quick live rooms (TC-13). Default: derived from `LIVEKIT_API_SECRET`. |
+| `AI_IP_HOURLY_LIMIT` | (optional) AI requests per hour from one IP (default 300; a school shares one IP). |
+| `RATE_LIMIT_SECRET` | (optional) Key for the HMAC of IPs in the rate limits (default: derived from the Azure key). |
+| `SENTRY_DSN` | (optional) Browser and API errors are also sent to Sentry from the server (TC-12). |
+| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | (optional) The real video classroom (see `docs/live-class.md`). |
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with the recording
-consent (`user_consents`, `consent_declines` and their functions, see *Recording consent*): run it again** (it upgrades the
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with the pre-launch
+fix sprint (2026-10, see *Pre-launch fix sprint*): run it again** — tested from git 203e2e1 with data, then twice; earlier: (it upgrades the
 previous version in place and keeps all data; tested from git 9993462 — and c198c60, d063eb0 — with data, then twice).
 `002_live_class.sql` is still **not** needed; it changed too (its per-call `consents` table is now an audit log written only by
 the server from `user_consents`) and it still applies after the new `001` (it now requires it).
@@ -236,9 +244,11 @@ and offers *Copy invitation link*.
 
 **View as → Student** (super admin): pick a unit, then a group, optionally a student — the student dashboard, read-only.
 
-**Minors and consent.** Many students are under 18: their "yes" to recording counts only with a parent/guardian's name,
-email and confirmation (see *Recording consent*). `institutions.consent_managed_by_institution` (default false) stays reserved
-for institutions that collect parental consent themselves (not used yet).
+**Minors and consent.** Many students are under 18: their "yes" to recording needs a parent/guardian's name and email and
+the student's declaration that the guardian agrees (shown as "declared by the student", not verified), unless the
+institution turns on `institutions.consent_managed_by_institution` (*Dashboard → Recording consent of minors*): then it
+declares it collected the families' consent itself and minors are not asked for guardian details. TODO: real guardian
+verification by email.
 
 **Limitations.** A CSV import creates only future classes (past dates in the file are skipped); a CSV never replaces a
 group's current teacher (only fills an empty or pending one); one imported schedule per group (one start time for all its
@@ -338,13 +348,12 @@ audio deleted after 30 days) and has a short *Más información* note. A **yes**
 permanent: the next classes don't ask again while it is valid and the text version matches. When the text changes, bump
 `CONSENT_VERSION` in `public/live-class.js`, `api/class/token.js` **and** `tc_consent_version()` in `001_base.sql` (a test checks
 they match): everyone is asked again.
-- **Under 18** ("Soy menor de 18 años", same step): guardian's name + email + the guardian's checkbox are required for the yes to
-  count (also enforced by the table).
-- **No** → a pop-up **"Justificá tu respuesta"** (required, at least 10 characters, neutral wording, and "Podés entrar igual a la
-  clase sin que te graben" always visible). After sending, the person joins **not recorded**. A no is not stored as an answer: they
-  are asked again at their next class (nothing prefilled). The justification goes to the admins of that person's institution —
-  students: the unit(s) that loaded them for the class being entered; teachers: their unit — and they get an email when
-  `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY` exist (`api/notify/consent.js`; otherwise nothing is sent).
+- **Under 18** ("Soy menor de 18 años", same step): guardian's name + email + "Mi madre, padre o tutor/a está de acuerdo (lo
+  declaro yo)" (`guardian_source = 'student'`), or nothing when the institution manages it (`guardian_source = 'institution'`).
+- **No** → a pop-up "Está bien" with an **optional** comment ("¿Querés contarnos por qué? (opcional)"; P-11) and "Entrar sin
+  que me graben". The person joins **not recorded** and is asked again at their next class. Only a written comment reaches
+  the admins of that person's institution (students: the unit(s) that loaded them for that class; teachers: their unit), with
+  an email when `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY` exist (`api/notify/consent.js`); an empty "no" is only counted.
 - **Revoke** — account menu → *Grabación de mis clases: Activada / Desactivada*. Turning it off asks for confirmation and sets
   `revoked_at`; the person is asked again at the next class, and can turn it back on from the same menu (same checkbox; guardian
   fields for minors).
@@ -375,10 +384,71 @@ the teacher's browser; the "new" badge is remembered per browser (another device
 email goes to the admins of the unit and the units above it (not the super admin); a student loaded by two institutions has one
 consent, and each institution sees its status but only its own justifications; a guardian has no account or access of their own.
 
+## Pre-launch fix sprint (2026-10) — what changed and what the owner must do
+
+Findings TC-xx (technical audit) and P-xx (product audit). Summary of the behaviour that changed:
+
+- **Join by link off by default** (TC-02 / P-13): existing institutions are switched to "invitation only" ONCE when the new
+  `001_base.sql` runs; admins turn it on in *Dashboard → Join by link* (with a warning: every person uses a seat).
+- **Invitations** (P-03 / P-04 / TC-07 / TC-16): honest result screen (link to copy, WhatsApp, email; an email is promised
+  only if `RESEND_API_KEY` sent it), *Dashboard → Invitations* (copy link, resend, cancel), 14-day expiry. Inviting an
+  EXISTING account creates a pending invitation that the person accepts or declines in the app ("Ana invited you to join
+  … as …"); nobody is moved silently, a super admin is never moved or downgraded.
+- **Password recovery** (TC-04): "Forgot your password?" → `resetPasswordForEmail` → "choose a new password" (min. 8).
+- **AI cost guardrails without the server key** (TC-01): `/api/generate` accepts only the app's own request kinds and
+  prompts (`api/_lib/guard.js`), per-kind `max_tokens`, a per-IP limit, requests per day, and **estimated tokens per day**
+  per teacher and per institution (Platform → *AI daily limits*; defaults 400,000 / 3,000,000). Accounts without an
+  institution: 3 requests / 30,000 tokens (unconfirmed email), 5 / 60,000 (first week), 15 / 150,000 after.
+- **Timeouts** (TC-09): Azure is called in streaming with a total deadline of 55 s (Vercel stops at 60 s; Azure gets
+  ≈ 50 s). If time runs out the text written so far comes back with `finish_reason: "length"` and the app asks for the
+  continuation in a second short request, so a long class is split instead of failing. (The browser still receives one
+  JSON answer: streaming to the browser would need a build step; this keeps every request under the limit.)
+- **Emails** (TC-08): daily cap per teacher (30 sends / 300 recipients), max 100 per send, cleaned subject, and only
+  people the institution loaded (or who already signed in) are emailed.
+- **Live classroom** (TC-13 / P-09 / P-07 / TC-23): quick rooms need the creator's invitation link (`api/class/ticket`);
+  the role comes from the server; invented participants / sample plan / sample insights only in "🧪 Try the demo";
+  "Recording" only with `RECORDING_ENABLED`.
+- **Minors** (P-10 / TC-17): the guardian's agreement is *declared by the student* (shown so, not verified) or the
+  institution declares it collects the families' consent (*Dashboard → Recording consent of minors*). Declining needs no
+  reason ("¿Querés contarnos por qué? (opcional)"). **TODO: real guardian verification by email.**
+- **Security headers + self-hosted libraries** (TC-10 / TC-11 / TC-22): CSP and friends in `vercel.json`; supabase-js
+  2.116.0, livekit-client 2.22.3, pdf.js 4.10.38 (`isEvalSupported:false`), mammoth 1.13.0 and Inter in `public/vendor/`
+  (exact versions). `tests/e2e-csp.cjs` runs the app under the real headers.
+- Class document capped at 2 MB (TC-14); a sign-out / other account in another tab reloads the page (TC-15); deleting a
+  group or removing a student can be undone for 10 s (P-14); Privacy and Terms drafts at `/privacidad` and `/terminos`
+  (TC-06 / P-12, "Borrador — debe revisarlo un abogado", placeholders [RAZÓN SOCIAL], [RUT], [DIRECCIÓN], [EMAIL DE
+  CONTACTO]); "Versión de prueba" banner outside production (P-21).
+
+**Database:** `001_base.sql` and `002_live_class.sql` changed: run `001` again, then `002` if you use it (tested from git
+203e2e1 with data, then twice; `002` still applies after it).
+
+### Owner checklist (accounts, money, lawyer — not solvable in code)
+
+- [ ] Vercel **Pro** (commercial use) and Supabase **Pro** (no pause, daily backups) — TC-03.
+- [ ] Vercel env: `SUPABASE_SERVICE_ROLE_KEY` (monthly token budget), `APP_URL=https://teroclass.com`, `APP_ENV=production`
+      on production (and `staging` on preview), optionally `TURNSTILE_SITE_KEY`, `SENTRY_DSN`. `RESEND_API_KEY` /
+      `NOTIFY_FROM` and the `LIVEKIT_*` variables can now be loaded (TC-08 / TC-13 are fixed). `RECORDING_ENABLED` only
+      when a real recorder exists.
+- [ ] Supabase Auth: Site URL + Redirect URLs (prod, preview, `/org/*`, `/?reset=1`), **Confirm email ON**, own SMTP
+      (e.g. Resend with @teroclass.com), minimum password length 8, Bot and Abuse Protection → Turnstile with the secret
+      key — TC-05 / TC-18. Realtime: turn off "Allow public access".
+- [ ] **Azure budget alerts** (TC-01): Azure portal → Cost Management → Budgets → *Add*: monthly budget for the
+      resource group of the OpenAI resource, alerts at 50 %, 80 % and 100 % to your email; and in Azure AI Foundry →
+      Deployments → `gpt-4o` → set a **tokens-per-minute (TPM) limit** that fits your plan. The app limits are a second
+      line of defence, not a bill cap.
+- [ ] Rotate the keys that were shared in chats (GitHub, Supabase).
+- [ ] Lawyer: review `/privacidad` and `/terminos`, fill [RAZÓN SOCIAL], [RUT], [DIRECCIÓN], [EMAIL DE CONTACTO];
+      DPA with Supabase, Microsoft, Vercel, LiveKit, Resend; register the database with the URCDP (Uruguay); consent
+      model for minors (and whether guardian verification by email is required before recording minors).
+- [ ] Uptime monitor (Better Stack / UptimeRobot) on `/api/health`.
+
 ## Tests
 
 `tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Metrics), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile), `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room), `tests/e2e-insights.cjs` (class insights per role, demo generation, reflection, publish a message, student privacy, admin subtree, View as, mobile, Métricas), `tests/e2e-classdoc.cjs` (two browsers editing the same class document through a simulated Realtime broadcast, lock, paste a class without answers, admin read-only, live room tab, polling fallback, history/restore, export, mobile) `tests/e2e-attendance.cjs` (join → present for the teacher, corrections, admin group report + CSV, student summary, mobile) and `tests/e2e-consent.cjs` (one checkbox asked once, decline + required justification → admin Consentimientos + badge + CSV, profile revoke / turn on, minor + guardian, auto-recording + pause, View as, Métricas, mobile; `SHOTS=<dir>` saves `cons-*.png`) run the app in a headless browser
 against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/<file>`).
+Pre-launch fixes: `tests/e2e-launch-fixes.cjs`, `tests/e2e-sprint-fixes.cjs` (`SHOTS=<dir>` saves `fix-*.png`) and
+`tests/e2e-csp.cjs` (the app under the real `vercel.json` headers / CSP); `tests/api-launch.test.mjs` and
+`tests/sql/launch_fixes.sql` (also run after an upgrade from git 203e2e1 with data).
 
 `tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage, insights, students & calendar privacy, and the upgrade path from the previous `001`) on a local
 Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql`, `class_insights.sql`,

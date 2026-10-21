@@ -131,9 +131,11 @@ Hoy, en modo Demo: **US$ 0**.
 ## Privacidad — checklist antes de activar
 
 - [ ] Texto de consentimiento revisado por un abogado (Uruguay: Ley 18.331; España: RGPD/LOPDGDD) y versión cargada en `CONSENT_VERSION` (`api/class/token.js`, `live-class.js`) y `tc_consent_version()` (`001_base.sql`).
-- [ ] Decisión del producto (2026-10): **un solo consentimiento** (grabación + análisis con IA + almacenamiento), se pide una vez y un "sí" queda guardado; un "no" pide justificación obligatoria (va a la institución) y se vuelve a preguntar en la próxima clase. Sin consentimiento se participa igual, sin grabar. Confirmar con el abogado que agrupar los tres fines en una casilla es válido.
-- [ ] Menores de 18: consentimiento de madre/padre/tutor (nombre, email y confirmación) — la base lo exige (`user_consents_minor_guardian`; en 002, `consents_guard`).
-- [ ] Indicador "● Grabando — solo quienes dieron su consentimiento" siempre visible para todos; el docente puede pausar (se reanuda sola a los 5 min).
+- [ ] Decisión del producto (2026-10): **un solo consentimiento** (grabación + análisis con IA + almacenamiento), se pide una vez y un "sí" queda guardado; un "no" ofrece un comentario OPCIONAL ("¿Querés contarnos por qué? (opcional)"; solo si se escribe algo le llega a la institución, en gris neutro) y se vuelve a preguntar en la próxima clase. Sin consentimiento se participa igual, sin grabar. Confirmar con el abogado que agrupar los tres fines en una casilla es válido.
+- [ ] Menores de 18: hoy el estudiante escribe nombre y email del tutor/a y **declara** que está de acuerdo (se muestra "declarado por el estudiante", no está verificado), o la institución enciende "Nuestra institución junta el consentimiento de las familias" (`consent_managed_by_institution`) y entonces no se piden datos del tutor/a.
+- [ ] **PENDIENTE (TODO): verificación real del tutor/a por email** (link firmado al email del tutor/a; el "sí" del menor cuenta recién cuando confirma). Decidirlo con el abogado antes de grabar a menores.
+- [ ] Indicador siempre visible para todos; dice "● Grabando — solo quienes dieron su consentimiento" **solo** con `RECORDING_ENABLED=true` (grabador conectado); sin esa variable dice "Grabación lista para activarse — todavía no se graba nada". El docente puede pausar (se reanuda sola a los 5 min).
+- [ ] Salas rápidas (fuera del calendario): los estudiantes entran solo con el link de invitación de quien creó la sala (`api/class/ticket`, vence a las 6 h; firma derivada de `LIVEKIT_API_SECRET` o `ROOM_TICKET_SECRET`). El rol (docente / estudiante) lo decide el servidor.
 - [ ] Se identifica a cada persona por su micrófono, nunca por huella de voz. Sin detección de emociones.
 - [ ] Solo se graba audio con voz de quienes consintieron; nunca video.
 - [ ] Audio original borrado a los 30 días (tarea diaria activa y probada).
