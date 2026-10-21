@@ -142,6 +142,18 @@ const shot = async (page, n) => { if (SHOTS) await page.screenshot({ path: `${SH
     if (await page.isVisible('#screen-app.active')) throw new Error('app still visible');
     await ctx.close();
   });
+  await step('TC-15 another account in another tab (storage event) → full reload, nothing of the previous person in memory', async () => {
+    const { ctx, page, base } = await setup(browser);
+    await register(page, base, 'tabs2@t.com');
+    await page.evaluate(() => { window.__marker = 'old page'; });
+    // a token refresh of the same person changes nothing
+    await page.evaluate(() => window.dispatchEvent(new StorageEvent('storage', { key: 'sb-test-auth-token', newValue: JSON.stringify({ user: { id: currentUser.id } }) })));
+    await sleep(300);
+    if (!(await page.evaluate(() => window.__marker === 'old page'))) throw new Error('reloaded on a token refresh');
+    await page.evaluate(() => window.dispatchEvent(new StorageEvent('storage', { key: 'sb-test-auth-token', newValue: JSON.stringify({ user: { id: '00000000-0000-4000-8000-0000000000ff' } }) })));
+    await page.waitForFunction(() => !window.__marker, null, { timeout: 15000 });
+    await ctx.close();
+  });
 
   // ── TC-07 / P-03 / P-04: invite an existing account → pending until it accepts; honest result; list, cancel, resend ──
   await step('TC-07 / P-03 / P-04 invitations: existing student is not moved; link to share; list with cancel / resend; accept in the app', async () => {

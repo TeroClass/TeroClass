@@ -320,7 +320,7 @@ async function handleSupabase(route) {
       const s = db.class_sessions.find(x => x.id === body.p_session); const g = s && s.group_id && db.class_groups.find(x => x.id === s.group_id);
       const teaches = s && me && ((g && [g.teacher_id, g.substitute_id].includes(me.id)) || (!s.group_id && s.teacher_id === me.id));
       const pl = teaches && s.planning_id && db.plannings.find(x => x.id === s.planning_id);
-      return json(200, pl ? { id: pl.id, title: pl.title, content: pl.data?.content || '', params: pl.data?.params || {}, mine: pl.owner_id === me.id } : null);
+      return json(200, pl ? { id: pl.id, title: pl.title, content: pl.data?.content || '', student: pl.data?.student || '', params: pl.data?.params || {}, mine: pl.owner_id === me.id } : null);
     }
     if (fn === 'my_data_export') { if (!me) return NOAUTH(); return json(200, { exported_at: new Date().toISOString(), profile: { email: meP.email, name: meP.name, role: meP.role }, plannings: db.plannings.filter(x => x.owner_id === me.id).map(x => ({ title: x.title, data: x.data })) }); }
     { const r = consent.handle(fn, body, me); if (r) return json(r.status, r.data); }

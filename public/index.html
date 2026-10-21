@@ -1906,6 +1906,16 @@ sb.auth.onAuthStateChange((event,session)=>{
   if(event==='SIGNED_IN'&&currentUser&&session?.user?.id&&session.user.id!==realUser()?.id){try{sessionStorage.setItem('tc_auth_msg','You signed in with another account in another tab.');}catch(e){}location.reload();}
 });
 
+// TC-15: another tab signed out or signed in as someone else (supabase-js keeps the session in localStorage
+// "sb-<project>-auth-token"): reset everything by reloading, so nothing of the previous person stays in memory.
+window.addEventListener('storage',e=>{
+  if(!e.key||!/^sb-.+-auth-token$/.test(e.key)||!currentUser)return;
+  let uid=null;try{uid=JSON.parse(e.newValue||'null')?.user?.id||null;}catch(x){uid=null;}
+  const me=realUser()?.id||currentUser.id;
+  if(uid===me)return; // token refresh of the same person
+  try{sessionStorage.setItem('tc_auth_msg',uid?'You signed in with another account in another tab.':'Your session ended in another tab.');}catch(x){}
+  currentUser=null;location.reload();
+});
 function normOrg(r){
   if(!r)return null;
   return {id:r.id,name:r.name,slug:r.slug,color:r.color||'#7c5cbf',bgColor:r.bg_color||'#f0eef8',font:r.font||'Inter',logo:safeImgUrl(r.logo_url),adminEmail:r.admin_email||'',openRegistration:r.open_registration===true,consentManaged:r.consent_managed_by_institution===true,
@@ -5187,7 +5197,7 @@ const I18N_ES_FIX={
 'Write a valid email.':'Escribí un email válido.','Too many emails were requested. Wait a minute and try again.':'Se pidieron demasiados emails. Esperá un minuto y probá de nuevo.',
 'If an account exists for that email, you will get a link to choose a new password. Check spam too.':'Si existe una cuenta con ese email, te va a llegar un link para elegir una contraseña nueva. Revisá también el correo no deseado.',
 'You were invited: create your account with this email (or sign in if you already have one).':'Te invitaron: creá tu cuenta con este email (o ingresá si ya tenés una).',
-'You signed in with another account in another tab.':'Ingresaste con otra cuenta en otra pestaña.','Your account was deleted.':'Tu cuenta se borró.',
+'You signed in with another account in another tab.':'Ingresaste con otra cuenta en otra pestaña.','Your session ended in another tab.':'Tu sesión terminó en otra pestaña.','Your account was deleted.':'Tu cuenta se borró.',
 'Choose a new password':'Elegí una contraseña nueva','Change password':'Cambiar contraseña',"At least 8 characters. Use one you don't use anywhere else.":'Al menos 8 caracteres. Usá una que no uses en otro lado.',
 'New password':'Contraseña nueva','Repeat the new password':'Repetí la contraseña nueva','Save password':'Guardar contraseña','Not now':'Ahora no',
 'The two passwords are different.':'Las dos contraseñas no coinciden.',

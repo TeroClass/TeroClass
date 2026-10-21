@@ -88,7 +88,7 @@ module.exports = function install(ctx) {
       case 'classdoc_open': {
         const s = sess(b.p_session); const r = role(me, s); if (!r) return err('No autorizado');
         const g = group(s.group_id); const d = docOf(s.id);
-        return ok({ session: { id: s.id, title: s.title || g?.name || '', starts_at: s.starts_at, ends_at: s.ends_at, timezone: s.timezone, status: s.status, group_id: s.group_id, group_name: g?.name || null, teacher_name: personName(me, g?.teacher_id || s.teacher_id) },
+        return ok({ session: { id: s.id, title: s.title || g?.name || '', starts_at: s.starts_at, ends_at: s.ends_at, timezone: s.timezone, status: s.status, group_id: s.group_id, group_name: g?.name || null, teacher_name: personName(me, g?.teacher_id || s.teacher_id), planning_id: r === 'teacher' ? (s.planning_id || null) : null },
           role: r, can_edit: r === 'teacher' || (r === 'student' && !d?.locked), can_lock: r === 'teacher', locked: !!d?.locked, generation: d?.generation || 1,
           state: d?.state || null, upto: d?.state_upto || 0, updates: d ? updatesOf(s.id, d.generation, d.state_upto).map(u => ({ id: u.id, d: u.d, c: u.c })) : [],
           channel: { topic: 'classdoc:' + s.id, key: d?.channel_key || null }, me: ['teacher', 'student'].includes(r) ? { name: docName(me, s, r), color: color(s.id, me.id) } : null,

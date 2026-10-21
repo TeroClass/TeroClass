@@ -195,10 +195,14 @@ async function typeIn(page, text, scope = '#cd-overlay') {
 
   await run('Paste a class: the teacher inserts the STUDENT HANDOUT of a saved class (no answers, no teacher guide); the student sees it', browser, async open => {
     const t = seed();
+    // P-06: the saved class attached to this calendar class is offered first
+    const att = db.plannings.find(x => x.title === 'Making plans (B1)'); db.class_sessions.find(x => x.id === t.now.id).planning_id = att.id;
     const T = await open(); const S = await open();
     await login(T.page, 'prof@sol.uy'); await openDocFromCalendar(T.page, t.now.id);
     await T.page.click('#cd-overlay [data-cd="paste"]');
     await T.page.waitForSelector('#cd-overlay .cd-pick-list');
+    const first = await T.page.$eval('#cd-overlay .cd-pick', e => e.className + '|' + e.textContent);
+    if (!/attached/.test(first) || !/Making plans \(B1\)/.test(first) || !/Plan de esta clase/.test(first)) throw new Error('attached plan not first: ' + first);
     const off = await T.page.$$eval('#cd-overlay .cd-pick.off', l => l.map(x => x.textContent).join('|'));
     if (!/No handout yet/.test(off) || !/Todavía no tiene material del alumno/.test(off)) throw new Error('class without handout not disabled: ' + off);
     await shot(T.page, 'paste-class', '#cd-overlay .cd-sheet-box');

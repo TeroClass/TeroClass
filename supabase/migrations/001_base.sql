@@ -3877,7 +3877,9 @@ begin
   return json_build_object(
     'session', json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name, ''), 'starts_at', s.starts_at,
        'ends_at', s.ends_at, 'timezone', s.timezone, 'status', s.status, 'group_id', s.group_id, 'group_name', g.name,
-       'teacher_name', public.tc_person_name(coalesce(g.teacher_id, s.teacher_id))),
+       'teacher_name', public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)),
+       -- P-06: the saved class attached to this class ("Paste a class" offers it first); only for its teacher / substitute
+       'planning_id', case when v_role = 'teacher' then s.planning_id end),
     'role', v_role,
     'can_edit', v_role = 'teacher' or (v_role = 'student' and not coalesce(d.locked, false)),
     'can_lock', v_role = 'teacher',
@@ -3910,8 +3912,9 @@ begin
   d := public.tc_classdoc_lock_row(p_session);
   if v_role = 'student' and d.locked then raise exception 'El docente bloqueó el documento'; end if;
   if p_generation is distinct from d.generation then raise exception 'Documento desactualizado: volvé a abrirlo'; end if;
-  -- TC-14: tope por documento (20 MB entre foto y cambios sin compactar) y por persona (4 MB por minuto)
-  if d.bytes + octet_length(v_data) > 20971520 then raise exception 'El documento llegó a su tamaño máximo'; end if;
+  -- TC-14: tope por documento (el estado compacto: 2 MB en classdoc_snapshot; foto + cambios sin compactar: 8 MB) y por
+  -- persona (4 MB por minuto). Un documento de texto de una clase usa mucho menos.
+  if d.bytes + octet_length(v_data) > 8388608 then raise exception 'El documento llegó a su tamaño máximo (2 MB): borrá contenido que ya no uses para seguir escribiendo'; end if;
   if not public.tc_rate_take('classdoc:' || auth.uid()::text, octet_length(v_data), 4194304, 60) then
     raise exception 'Demasiados cambios seguidos: esperá un momento';
   end if;
@@ -3976,7 +3979,7 @@ begin
   if v_role is null then raise exception 'No autorizado'; end if;
   if v_role not in ('teacher','student') then raise exception 'Solo lectura: no podés editar este documento'; end if;
   if v_data is null then raise exception 'Cambio inválido'; end if;
-  if octet_length(v_data) > 4194304 then raise exception 'El documento es demasiado grande'; end if;
+  if octet_length(v_data) > 2097152 then raise exception 'El documento llegó a su tamaño máximo (2 MB): borrá contenido que ya no uses para seguir escribiendo'; end if;  -- TC-14
   d := public.tc_classdoc_lock_row(p_session);
   if v_role = 'student' and d.locked then raise exception 'El docente bloqueó el documento'; end if;
   if p_generation is distinct from d.generation then raise exception 'Documento desactualizado: volvé a abrirlo'; end if;
@@ -5066,6 +5069,7 @@ $$
 begin
   if auth.uid() is null or not public.teaches_session(p_session) then return null; end if;
   return (select json_build_object('id', pl.id, 'title', pl.title, 'content', coalesce(pl.data->>'content', ''),
+                                   'student', coalesce(pl.data->>'student', ''),
                                    'params', coalesce(pl.data->'params', '{}'::jsonb), 'mine', pl.owner_id = auth.uid())
             from public.class_sessions s join public.plannings pl on pl.id = s.planning_id where s.id = p_session);
 end $$;

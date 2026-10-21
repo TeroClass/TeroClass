@@ -27,6 +27,7 @@
   const COLOR_RE = /^#[0-9a-f]{6}$/i;
   const tr = s => (typeof trText === 'function' ? trText(s) : s);
   const toast = (m, t, ms) => { if (typeof showToast === 'function') showToast(m, t, ms); };
+  const dbMsg = m => (typeof dbErr === 'function' ? dbErr(String(m || '')) : String(m || '')); // database message → this language
   const inViewAs = () => typeof viewAs !== 'undefined' && !!viewAs;
   const H = s => (typeof esc === 'function' ? esc(s) : String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
   const loc = () => (typeof uiLocale === 'function' ? uiLocale() : undefined);
@@ -323,6 +324,8 @@
         if (/bloque/i.test(m)) { toast(tr('The teacher locked the document: your last change was not saved.'), 'err', 5000); this.info.locked = true; this.info.can_edit = false; this.forceReload(); return; }
         if (/desactualizado/i.test(m)) { this.forceReload(); return; }
         if (/Solo lectura|No autorizado/.test(m)) { this.info.can_edit = false; this.updateUi(); return; }
+        // TC-14: the document reached its maximum size → say so once and stop retrying (the change stays only here)
+        if (/tamaño máximo/.test(m)) { this.pending = batch.concat(this.pending); this.status = 'offline'; this.renderStatus(); if (!this.fullWarned) { this.fullWarned = true; toast(dbMsg(m), 'err', 9000); } return; }
         this.pending = batch.concat(this.pending); this.status = 'offline'; this.renderStatus();
         clearTimeout(this.timers.push); this.timers.push = setTimeout(() => this.flush(), 3000); return;
       }
@@ -383,6 +386,7 @@
       const { data, error } = await rpc('classdoc_snapshot', { p_session: this.sid, p_generation: this.gen, p_state: state, p_upto: this.after });
       this.snapping = false;
       if (!error && data) { this.sinceSnap = 0; this.lastSnap = Date.now(); this.dirtySnap = false; }
+      else if (error && /tamaño máximo/.test(error.message || '') && !this.fullWarned) { this.fullWarned = true; toast(dbMsg(error.message), 'err', 9000); }
     }
 
     // ── presence + cursors ──
@@ -545,10 +549,19 @@
     async pasteDialog() {
       if (!this.isTeacher) return;
       if ((typeof plannings === 'undefined' || !plannings.length) && typeof loadPlannings === 'function') { try { await loadPlannings(); } catch (e) { /* ignore */ } }
-      const list = (typeof plannings !== 'undefined' && Array.isArray(plannings)) ? plannings : [];
+      let list = (typeof plannings !== 'undefined' && Array.isArray(plannings)) ? plannings.slice() : [];
+      // P-06: the saved class attached to this calendar class comes first (also for a substitute, who doesn't own it)
+      const pid = this.info && this.info.session && this.info.session.planning_id;
+      this.attached = null;
+      if (pid) {
+        try { const r = await rpc('session_plan', { p_session: this.sid }); const d = r && !r.error ? (typeof r.data === 'string' ? JSON.parse(r.data) : r.data) : null;
+          if (d && d.id) this.attached = { id: d.id, title: d.title, student: d.student || '', date: null }; } catch (e) { /* ignore */ }
+        const own = list.find(x => String(x.id) === String(pid));
+        list = [own || this.attached, ...list.filter(x => String(x.id) !== String(pid))].filter(Boolean);
+      }
       const rows = list.map(p => {
-        const ok = !!String(p.student || '').trim();
-        return `<li class="cd-pick${ok ? '' : ' off'}"><div class="cd-pick-main"><b data-no-i18n>${H(p.title || '—')}</b><span class="cd-pick-meta" data-no-i18n>${H(fDT(p.date))}</span>
+        const ok = !!String(p.student || '').trim(); const isAtt = !!pid && String(p.id) === String(pid);
+        return `<li class="cd-pick${ok ? '' : ' off'}${isAtt ? ' attached' : ''}"><div class="cd-pick-main"><b data-no-i18n>${H(p.title || '—')}</b>${isAtt ? ` <span class="cd-pick-tag">📎 ${H(tr('Plan of this class'))}</span>` : ''}<span class="cd-pick-meta" data-no-i18n>${H(p.date ? fDT(p.date) : "")}</span>
           ${ok ? '' : `<span class="cd-pick-note">${H(tr('No student handout yet: open it in Classes and the handout is prepared there.'))}</span>`}</div>
           <button type="button" class="tree-btn${ok ? ' primary' : ''}" data-cd="paste-pick" data-id="${H(p.id)}"${ok ? '' : ' disabled'}>${H(tr('Insert'))}</button></li>`;
       }).join('');
@@ -558,7 +571,7 @@
     }
     pasteClass(id, btn) {
       if (!this.isTeacher || !this.canEdit) return;
-      const p = (typeof plannings !== 'undefined' ? plannings : []).find(x => String(x.id) === String(id));
+      const p = (typeof plannings !== 'undefined' ? plannings : []).find(x => String(x.id) === String(id)) || (this.attached && String(this.attached.id) === String(id) ? this.attached : null);
       if (!p || !String(p.student || '').trim()) return;
       // the handout is cleaned again here (answer keys, "Answer: …" lines, teacher timings) — never the teacher guide
       const text = typeof cleanStudentHandout === 'function' ? cleanStudentHandout(p.student) : p.student;
@@ -696,7 +709,9 @@
   if (typeof DB_ERRORS !== 'undefined') DB_ERRORS.unshift(
     [/El docente bloqueó el documento/, 'The teacher locked the document.'], [/Solo lectura: no podés editar este documento/, 'Read-only: you cannot edit this document.'],
     [/Documento desactualizado: volvé a abrirlo/, 'The document changed: open it again.'], [/Cambio demasiado grande/, 'That change is too big.'],
-    [/El documento es demasiado grande/, 'The document is too big.'], [/Cambio inválido/, 'Invalid change.'], [/Versión inválida/, 'Invalid version.']
+    [/El documento es demasiado grande/, 'The document is too big.'], [/Cambio inválido/, 'Invalid change.'], [/Versión inválida/, 'Invalid version.'],
+    [/El documento llegó a su tamaño máximo.*$/, 'The document reached its maximum size (2 MB): delete content you no longer need to keep writing.'],
+    [/Demasiados cambios seguidos.*$/, 'Too many changes in a row: wait a moment.']
   );
   if (typeof I18N_ES === 'object' && I18N_ES) Object.assign(I18N_ES, {
     'Class document': 'Documento de la clase', 'Opening the class document…': 'Abriendo el documento de la clase…',
@@ -704,7 +719,7 @@
     "You don't have access to this class document.": 'No tenés acceso a este documento de clase.', 'Could not open the class document.': 'No se pudo abrir el documento de la clase.',
     'Reader': 'Lector', 'Write here… Everyone in the class sees it as you type.': 'Escribí acá… Todos en la clase lo ven mientras escribís.',
     'This document is empty.': 'Este documento está vacío.', 'A previous version of the document was restored.': 'Se restauró una versión anterior del documento.',
-    'People in the document': 'Personas en el documento', 'Paste a class': 'Pegar una clase', 'History': 'Historial', 'Export': 'Exportar',
+    'People in the document': 'Personas en el documento', 'Paste a class': 'Pegar una clase', 'Plan of this class': 'Plan de esta clase', 'History': 'Historial', 'Export': 'Exportar',
     'Print / PDF': 'Imprimir / PDF', 'Download HTML': 'Descargar HTML', 'Download Markdown': 'Descargar Markdown', 'Formatting': 'Formato',
     'Heading 1': 'Título 1', 'Heading 2': 'Título 2', 'Heading 3': 'Título 3', 'Normal text': 'Texto normal', 'Bold': 'Negrita', 'Italic': 'Cursiva',
     'Strikethrough': 'Tachado', 'Bulleted list': 'Lista con viñetas', 'Numbered list': 'Lista numerada', 'Quote': 'Cita', 'Link': 'Enlace',
@@ -735,6 +750,8 @@
     'Version saved ✓': 'Versión guardada ✓', 'The document is empty: nothing to save yet.': 'El documento está vacío: todavía no hay nada para guardar.',
     'Close': 'Cerrar', 'The teacher locked the document.': 'El docente bloqueó el documento.', 'Read-only: you cannot edit this document.': 'Solo lectura: no podés editar este documento.',
     'The document changed: open it again.': 'El documento cambió: volvé a abrirlo.', 'That change is too big.': 'Ese cambio es demasiado grande.',
-    'The document is too big.': 'El documento es demasiado grande.', 'Invalid change.': 'Cambio inválido.', 'Invalid version.': 'Versión inválida.',
+    'The document is too big.': 'El documento es demasiado grande.',
+    'The document reached its maximum size (2 MB): delete content you no longer need to keep writing.': 'El documento llegó a su tamaño máximo (2 MB): borrá contenido que ya no uses para seguir escribiendo.',
+    'Too many changes in a row: wait a moment.': 'Demasiados cambios seguidos: esperá un momento.', 'Invalid change.': 'Cambio inválido.', 'Invalid version.': 'Versión inválida.',
   });
 })();
