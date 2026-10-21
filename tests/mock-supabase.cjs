@@ -36,7 +36,10 @@ const HTML = RAW_HTML
   .replace('<script src="/attendance.js"></script>', () => `<script>${asset('attendance.js')}</script>`)
   .replace('<script src="/class-doc.js"></script>', () => `<script>${asset('class-doc.js')}</script>`)
   .replace('<link rel="stylesheet" href="/class-board.css">', () => `<style>${asset('class-board.css')}</style>`)
-  .replace('<script src="/class-board.js"></script>', () => `<script>${asset('class-board.js')}</script>`);
+  .replace('<script src="/class-board.js"></script>', () => `<script>${asset('class-board.js')}</script>`)
+  .replace('<link rel="stylesheet" href="/plans.css">', () => `<style>${asset('plans.css')}</style>`)
+  .replace('<script src="/plans.js"></script>', () => `<script>${asset('plans.js')}</script>`)
+  .replace('<script src="/plans-admin.js"></script>', () => `<script>${asset('plans-admin.js')}</script>`);
 // The class-document editor is an ES module loaded on demand (import('/vendor/classdoc-editor.js')): tests that open a
 // document serve it with serveVendor(route) (production: public/vendor/, see vercel.json).
 const VENDOR_EDITOR = fs.readFileSync(path.join(ROOT, 'public/vendor/classdoc-editor.js'), 'utf8');
@@ -67,7 +70,7 @@ const bill = BILL_DEFAULTS();
 let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
 const insights = { fixture: null }; // tests may set insights.fixture = (body) => json
-function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; if (typeof realtime !== 'undefined') realtime.reset(); calls.rpc = []; calls.inserts = {}; calls.otp = []; calls.recover = []; calls.passwords = []; calls.captcha = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; }
+function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; if (typeof realtime !== 'undefined') realtime.reset(); calls.rpc = []; calls.inserts = {}; calls.otp = []; calls.recover = []; calls.passwords = []; calls.captcha = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; if (typeof plans !== 'undefined') plans.reset(); }
 // Default insights: deterministic sample data shaped like public.platform_insights (smaller numbers for a unit)
 function insightsData(body) {
   const days = Math.min(Math.max(Number(body.p_days) || 30, 1), 366); const unit = body.p_unit ? instById(body.p_unit) : null;
@@ -155,6 +158,8 @@ function billingSummary(me, inst) {
   const month = new Date().toISOString().slice(0, 7) + '-01';
   return { root_id: root, root_name: instById(root)?.name, month, resets_on: month, seats: a.seats, seats_used: seatsUsed(root), monthly_tokens: a.monthly_tokens, used_month: used, extra_used_month: 0,
     extra_balance: a.extra, remaining: Math.max(a.monthly_tokens - used, 0) + a.extra, pack_tokens: bill.settings.pack_tokens, pack_price: bill.settings.pack_price, currency: bill.settings.currency,
+    credit_tokens: 25000, packs: plans.state.plans.addons.filter(x => x.kind === 'classes').map(x => ({ id: x.id, credits: x.credits, usd: x.usd, name_es: x.name_es, name_en: x.name_en })),
+    plan_status: a.plan_status || 'none', plan_id: a.plan_id || null,
     can_request: p.role === 'org_admin' && p.institution_id === root, full_detail: scope.includes(root),
     pending: bill.requests.find(r => r.root_id === root && r.status === 'pending') || null,
     by_unit: sum(logs, 'inst_id').map(x => ({ id: x.k, name: instById(x.k)?.name, used: x.used, requests: x.requests })),
@@ -213,7 +218,9 @@ async function handleSupabase(route) {
     if (fn === 'request_token_pack') {
       const root = meP?.institution_id; if (meP?.role !== 'org_admin' || !root || instById(root)?.parent_id) return json(400, { code: 'P0001', message: 'No autorizado: solo los admins de la institución madre pueden comprar tokens' });
       if (bill.requests.some(r => r.root_id === root && r.status === 'pending')) return json(400, { code: 'P0001', message: 'Ya hay una solicitud de compra pendiente para esta institución' });
-      const r = { id: uid(), root_id: root, root_name: instById(root).name, requested_by: me.id, pack_tokens: bill.settings.pack_tokens, price: bill.settings.pack_price, currency: bill.settings.currency, status: 'pending', note: '', created_at: new Date().toISOString(), decided_at: null };
+      const pk = plans.state.plans.addons.filter(x => x.kind === 'classes' && (!body?.p_pack || x.id === body.p_pack)).sort((x, y) => x.credits - y.credits)[0];
+      if (!pk) return json(400, { code: 'P0001', message: 'Ese pack no existe' });
+      const r = { id: uid(), root_id: root, root_name: instById(root).name, requested_by: me.id, pack_tokens: pk.credits * 25000, price: pk.usd, currency: 'USD', pack_id: pk.id, pack_credits: pk.credits, status: 'pending', note: '', created_at: new Date().toISOString(), decided_at: null };
       bill.requests.push(r); return json(200, r);
     }
     if (fn === 'list_purchase_requests') {
@@ -240,8 +247,8 @@ async function handleSupabase(route) {
     }
     if (fn === 'platform_billing_overview') {
       if (!isSA) return NOAUTH();
-      return json(200, { month: new Date().toISOString().slice(0, 7) + '-01', settings: bill.settings, pending_requests: bill.requests.filter(r => r.status === 'pending').length, personal: { users: 0, used_month: 0 },
-        accounts: db.institutions.filter(i => !i.parent_id).map(i => { const a = account(i.id); return { id: i.id, name: i.name, slug: i.slug, seats: a.seats, seats_used: seatsUsed(i.id), monthly_tokens: a.monthly_tokens, extra_balance: a.extra, used_month: bill.usage[i.id] || 0, extra_used_month: 0, pending: bill.requests.some(r => r.root_id === i.id && r.status === 'pending') }; }) });
+      return json(200, { month: new Date().toISOString().slice(0, 7) + '-01', settings: { ...bill.settings, plans: plans.state.plans, ai_model_default: plans.state.modelDefault, ai_price_input_mini: plans.state.mini.input, ai_price_output_mini: plans.state.mini.output }, pending_requests: bill.requests.filter(r => r.status === 'pending').length, personal: { users: 0, used_month: 0 },
+        accounts: db.institutions.filter(i => !i.parent_id).map(i => { const a = account(i.id); return { id: i.id, name: i.name, slug: i.slug, seats: a.seats, seats_used: seatsUsed(i.id), monthly_tokens: a.monthly_tokens, extra_balance: a.extra, used_month: bill.usage[i.id] || 0, extra_used_month: 0, pending: bill.requests.some(r => r.root_id === i.id && r.status === 'pending'), plan_status: a.plan_status || 'none', plan_id: a.plan_id || null }; }) });
     }
     if (fn === 'platform_insights') {
       if (!isSA) return NOAUTH(); if (body.p_unit && !instById(body.p_unit)) return json(400, { code: 'P0001', message: 'Unidad no encontrada' });
@@ -338,6 +345,7 @@ async function handleSupabase(route) {
       return json(200, pl ? { id: pl.id, title: pl.title, content: pl.data?.content || '', student: pl.data?.student || '', params: pl.data?.params || {}, mine: pl.owner_id === me.id } : null);
     }
     if (fn === 'my_data_export') { if (!me) return NOAUTH(); return json(200, { exported_at: new Date().toISOString(), profile: { email: meP.email, name: meP.name, role: meP.role }, plannings: db.plannings.filter(x => x.owner_id === me.id).map(x => ({ title: x.title, data: x.data })) }); }
+    { const r = plans.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = consent.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classInsights.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classBoard.handle(fn, body, me); if (r) return json(r.status, r.data); }
@@ -390,10 +398,11 @@ function inviteMember(inst, email, role, by) {
 }
 const classInsights = require('./mock-insights.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
 const classDoc = require('./mock-classdoc.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
+const plans = require('./mock-plans.cjs')({ db, uid, instById, rootOf, account, bill });
 const consent = require('./mock-consent.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
 const classBoard = require('./mock-classboard.cjs')({ db, uid, classDoc });
 const realtime = require('./mock-realtime.cjs')({ tokUser, canRealtime: (me, t, send) => classDoc.canRealtime(me, t, send) || classBoard.canRealtime(me, t, send),
   publicTopicOk: t => classDoc.publicTopicOk(t) || classBoard.publicTopicOk(t) });
 const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0),
   insightSummaries: (eids, me) => classInsights.summaries(eids, 5, me) });
-module.exports = { consent, students, classInsights, classDoc, classBoard, realtime, serveVendor, serveWhiteboard, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+module.exports = { plans, tokUser, consent, students, classInsights, classDoc, classBoard, realtime, serveVendor, serveWhiteboard, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

@@ -70,6 +70,22 @@
       "destination": "/public/vendor/$1"
     },
     {
+      "source": "/plans.js",
+      "destination": "/public/plans.js"
+    },
+    {
+      "source": "/plans.css",
+      "destination": "/public/plans.css"
+    },
+    {
+      "source": "/plans-admin.js",
+      "destination": "/public/plans-admin.js"
+    },
+    {
+      "source": "/(planes|plans)",
+      "destination": "/public/planes.html"
+    },
+    {
       "source": "/(privacidad|privacy)",
       "destination": "/public/privacidad.html"
     },

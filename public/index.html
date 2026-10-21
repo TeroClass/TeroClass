@@ -786,6 +786,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 <link rel="stylesheet" href="/groups-calendar.css">
 <link rel="stylesheet" href="/class-doc.css">
 <link rel="stylesheet" href="/class-board.css">
+<link rel="stylesheet" href="/plans.css">
 </head>
 <body>
 
@@ -872,6 +873,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
           <button class="va-menu-btn" id="um-viewas" type="button" style="display:none" onclick="openViewAs()">👁 View as…</button>
           <button class="va-menu-btn" id="um-viewas-exit" type="button" style="display:none" onclick="exitViewAs()">✕ Exit View as</button>
           <button class="um-consent" id="um-consent" type="button" style="display:none" title="Recording of my classes"><span aria-hidden="true">🎙️</span> <span>Recording of my classes:</span> <b id="um-consent-state">…</b></button>
+          <a class="um-btn" id="um-plans" href="/planes" target="_blank" rel="noopener">💳 Plans &amp; pricing</a>
           <button class="um-btn" id="um-password" type="button" onclick="openPasswordModal('change')">🔑 Change password</button>
           <button class="um-btn" id="um-mydata" type="button" onclick="downloadMyData()">⬇ Download my data</button>
           <button class="um-btn" id="um-delete" type="button" onclick="openDeleteAccount()">🗑 Delete my account</button>
@@ -912,6 +914,8 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
     </nav>
 
     <div class="main-content">
+      <!-- 2026-10-21: free trial — "Te quedan N clases de prueba · Ver planes" (public/plans.js; never for students / super admin) -->
+      <div id="trial-banner" hidden></div>
       <div id="ctx-bar" aria-live="polite"></div>
 
       <!-- HOME -->
@@ -1335,6 +1339,8 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
           <table class="teachers-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Institution</th><th>Created</th></tr></thead><tbody id="pf-table-body"></tbody></table>
         </div>
         <div id="pf-billing"></div>
+        <!-- 2026-10-21: sales requests, plans & pricing, Docente plans, AI model per kind, compare models (public/plans-admin.js) -->
+        <div id="pf-plans-admin"></div>
       </div>
 
       <!-- SUPER ADMIN: METRICS (product usage analytics; "Insights" are the class insights below) -->
@@ -1438,7 +1444,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="budget-title">
     <div class="modal-title" id="budget-title">AI limit reached</div>
     <div class="modal-sub" id="budget-msg"></div>
-    <div class="modal-notice" id="budget-explain" style="display:none"><span>We'll contact you to complete the payment; tokens are added once confirmed.</span> <span>After you pay, the platform team adds the tokens and you can keep generating.</span></div>
+    <div class="modal-notice" id="budget-explain" style="display:none"><span>We'll contact you to complete the payment; the classes are added once confirmed.</span> <span>After you pay, the platform team adds the classes and you can keep generating.</span></div>
     <div class="modal-actions" id="budget-actions"></div>
   </div>
 </div>
@@ -1773,6 +1779,7 @@ function setUiLang(lang){
   document.querySelectorAll('.lang-toggle button').forEach(b=>b.classList.toggle('active',b.dataset.lang===lang));
   i18nBusy=true;try{translateTree(document.body);}finally{i18nBusy=false;}
   if(currentUser){renderClasses();if(document.getElementById('panel-admin')?.classList.contains('active'))renderDashboard();renderInstSwitch();if(isActivePanel('metrics'))renderInsightsHtml();window.GC?.onLang?.();window.TCInsightsPanel?.onLang?.();}
+  window.TCPlans?.onLang?.();
 }
 function uiLocale(){return uiLang==='es'?'es-UY':'en-US';}
 function fmtDate(d,opts){try{return new Date(d).toLocaleDateString(uiLocale(),opts);}catch(e){return '';}}
@@ -1990,6 +1997,10 @@ function getOrgSlugFromUrl(){const m=window.location.pathname.match(/\/org\/([^/
 window.onload=async()=>{
   renderSliders();setupSubjectsInput();initI18n();initTeachLang();
   renderEnvBadge();loadAppConfig();
+  // 2026-10-21: plans, free trial and sales form (public/plans.js) + super admin tools (public/plans-admin.js)
+  window.TCPlans?.init({sb,lang:()=>uiLang,user:()=>currentUser,isViewAs:()=>!!viewAs,toast:(m,k,ms)=>showToast(m,k,ms),
+    institutionName:()=>{const o=currentUser?.orgId&&orgsCache[currentUser.orgId];return o?(hierPathLabel(o.id)||o.name||'').split(' › ')[0]:'';},
+    onLead:()=>{if(currentUser?.isSuperAdmin)window.TCPlansAdmin?.refreshBadge?.();}});
   const slug=getOrgSlugFromUrl();
   if(slug)applyOrgBranding(slug);
   if(/[?&]student\b/.test(location.search))switchTab('student');
@@ -2452,7 +2463,7 @@ function goToLogin(msg){
 function goToLoginNow(msg){
   if(viewAs){viewAs=null;vaRenderChrome();}
   window.GC?.leaveStudentMode?.();
-  currentUser=null;plannings=[];currentOrgId=null;orgsCache={};currentResult=null;
+  currentUser=null;plannings=[];currentOrgId=null;orgsCache={};currentResult=null;window.TCPlans?.reset();
   docDirty=false;genToken++;generating=false;saving=false;clearInterval(loadingTimer);
   closeUserMenu();['modal-invite','modal-create-inst'].forEach(closeModal);
   const out=document.getElementById('ai-output');out.innerHTML='';out.classList.remove('visible');
@@ -2487,6 +2498,7 @@ function renderUserMenu(){
   const show=(id,on)=>{const el=document.getElementById(id);if(el)el.style.display=on?'block':'none';};
   show('um-viewas',sa&&!viewAs);show('um-viewas-exit',!!viewAs);
   ['um-password','um-mydata','um-delete'].forEach(id=>show(id,!viewAs));
+  show('um-plans',!u.isStudent); // 2026-10-21: /planes (students never see plans)
   const pf=document.getElementById('btn-pf-viewas');if(pf)pf.style.display=sa&&!viewAs?'':'none';
 }
 
@@ -2527,6 +2539,8 @@ async function enterAppInner(){
     if(org){applyOrgBrandingToApp({...org,...hierEffBranding(org.id)});currentOrgId=currentUser.orgId;hierApplyOwnBranding();}
   }
   await loadPlannings();if(!currentUser)return;renderClasses();
+  window.TCPlans?.refreshTrial(); // free trial banner (server-side state; students / super admin: nothing)
+  if(currentUser.isSuperAdmin)window.TCPlansAdmin?.refreshBadge?.(); // "new sales requests" badge on Platform
   setTimeout(()=>initSkillsDrag(),200);
   iswRestore();hierApplyMode(); // top bar switcher: last unit this person chose (if they can still access it)
   if(currentUser.isSuperAdmin&&!Object.keys(orgsCache).length){
@@ -2728,6 +2742,7 @@ async function generatePlanning(){
   if(generating)return; // M1: Enter / button / Regenerate can't start a second request
   const prompt=document.getElementById('prompt-input').value.trim();
   if(!prompt){showToast('Enter a topic or prompt first.','err');return;}
+  if(window.TCPlans&&!TCPlans.beforeGenerate())return; // free trial used up: the plans pop-up instead of a request (the server also refuses it)
   const sliders=getSliderValues();
   const params={prompt,language:document.getElementById('st-language').value,level:document.getElementById('st-level').value,age:document.getElementById('st-age')?.value||'',groupSize:String(clampGroupSize()),duration:document.getElementById('st-duration').value,subjects:getSubjects(),skills:getSkillsPriority(),...sliders};
   generating=true;const myGen=++genToken;
@@ -2740,11 +2755,12 @@ async function generatePlanning(){
     const result=await callAI(params);
     if(myGen!==genToken){showToast('Previous generation discarded');return;} // M4: user opened another class meanwhile
     clearInterval(loadingTimer);displayResult(result,params);
+    window.TCPlans?.afterGeneration(); // free trial: banner + the pop-up after the 2nd / 4th class (3 s after the class is on screen)
   }catch(err){
     if(myGen!==genToken||!currentUser)return;
     clearInterval(loadingTimer);document.getElementById('ai-loading').classList.remove('visible');
     if(hadResult&&currentResult)document.getElementById('ai-output').classList.add('visible');else document.getElementById('ai-empty').style.display='flex';
-    if(err.code!=='budget')showToast('Error: '+err.message,'err');
+    if(err.code!=='budget'&&err.code!=='trial_limit')showToast('Error: '+err.message,'err');
   }finally{
     if(myGen===genToken){generating=false;setGenerateBusy(false);}
   }
@@ -3007,13 +3023,13 @@ function aiMeta(p){
   const bars={};(METHODOLOGIES.concat(activeMethodologies()||[])).forEach(m=>{const v=Number(p[m.key]);if(/^[a-z][a-z0-9_]{0,40}$/.test(m.key)&&Number.isFinite(v))bars[m.key]=Math.round(v);});
   return {subjects:(p.subjects||[]).slice(0,5),language:p.language||null,age_band:ageBand(p.age),level:p.level||null,bars};
 }
-async function callAIMessagesFull(messages,temperature=.7,kind='generate',meta=null){
-  // Same friendly errors/timeouts as callAIMessages, but also returns finish_reason
-  const r=await callAIMessages(messages,temperature,{full:true,kind,meta});
+async function callAIMessagesFull(messages,temperature=.7,kind='generate',meta=null,extra=null){
+  // Same friendly errors/timeouts as callAIMessages, but also returns finish_reason. extra: {model, onData} (Compare models)
+  const r=await callAIMessages(messages,temperature,{...(extra||{}),full:true,kind,meta});
   return {text:r.content||'',finish:r.finish_reason||'stop'};
 }
 
-async function continueTruncated(sys,user,partial,p){
+async function continueTruncated(sys,user,partial,p,extra=null){
   const H=langPack(p.language);
   const cut=partial.lastIndexOf('\n');const kept=cut>0?partial.slice(0,cut):partial; // drop the half-written last line
   const instr=`The class plan below was cut off because of its length. Continue it EXACTLY from the point where it stops: do not repeat anything already written, do not restart, do not summarise. Same language (${p.language}), same format and headings, plain text without ** or #. Finish the remaining sections in order (${H.mat}, ${H.ans}, ${H.opt}, ${H.meth}) and keep it as short as possible while keeping every material and solution complete. Output ONLY the continuation.`;
@@ -3021,7 +3037,7 @@ async function continueTruncated(sys,user,partial,p){
   if(avail<4000)return kept+'\n\n'+langExtra(p.language).trunc;
   const userPart=user.length<avail*0.45?'ORIGINAL INSTRUCTIONS:\n'+user+'\n\n':'';
   let tail=kept.slice(-(avail-userPart.length));const nl=tail.indexOf('\n');if(nl>0&&tail.length<kept.length)tail=tail.slice(nl+1);
-  const r=await callAIMessagesFull([{role:'system',content:sys},{role:'user',content:userPart+instr+'\n\nDOCUMENT SO FAR (last part):\n"""\n'+tail+'\n"""'}],0.4,'continue',aiMeta(p));
+  const r=await callAIMessagesFull([{role:'system',content:sys},{role:'user',content:userPart+instr+'\n\nDOCUMENT SO FAR (last part):\n"""\n'+tail+'\n"""'}],0.4,'continue',aiMeta(p),extra);
   let out=kept+'\n'+r.text.replace(/^"""\s*/,'').replace(/\s*"""$/,'');
   if(r.finish==='length')out+='\n\n'+langExtra(p.language).trunc;
   return out;
@@ -3082,14 +3098,14 @@ function applyVerifierPatches(text,patches){
   return {text:doc,applied,failed};
 }
 
-async function verifyStemGuide(text,p){
+async function verifyStemGuide(text,p,extra=null){
   if(text.length>70000)return text; // stay under the server's 80 000-char cap
   const prof=subjectProfile(p);
   try{
     const r=await callAIMessagesFull([
       {role:'system',content:`You are a meticulous ${prof.subjects} teacher and exam reviewer. You recompute every result yourself and fix errors with minimal, exact patches. You never restyle text.`},
       {role:'user',content:buildVerifierPrompt(text,p)}
-    ],0,'verify',aiMeta(p));
+    ],0,'verify',aiMeta(p),extra);
     const patches=parseVerifierPatches(r.text);
     if(!patches.length)return text;
     const res=applyVerifierPatches(text,patches);
@@ -3219,7 +3235,8 @@ const AI_MSG={
   empty:'The AI returned an empty answer. Try again.',
   bad:'Unexpected answer from the server. Try again in a moment.',
   long:'This request is too long for the AI. Shorten your prompt, the institution prompt or the playbook and try again.',
-  budget:'Your institution has reached its monthly AI limit. Tell your admin so they can add more tokens.'
+  budget:'Your institution has used all its classes for this month. Tell your admin so they can add a class pack.',
+  trial:"You've used your free trial classes. Everything you created is still here to view and export. To create new classes, choose a plan."
 };
 // Returns the content string; with opts.full===true returns {content, finish_reason}.
 async function callAIMessages(messages,temperature=.7,opts={}){
@@ -3232,7 +3249,7 @@ async function callAIMessages(messages,temperature=.7,opts={}){
     let res;
     try{
       res=await fetch('/api/generate',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
-        body:JSON.stringify({messages,temperature,kind:opts.kind||'generate',meta:opts.meta||undefined})});
+        body:JSON.stringify({messages,temperature,kind:opts.kind||'generate',meta:opts.meta||undefined,model:opts.model||undefined})});
     }catch(e){throw new Error(e?.name==='AbortError'?AI_MSG.timeout:AI_MSG.offline);}
     const isJson=/application\/json/i.test(res.headers.get('content-type')||'');
     let data=null;
@@ -3240,6 +3257,7 @@ async function callAIMessages(messages,temperature=.7,opts={}){
     if(!res.ok){
       const srv=typeof data?.error==='string'?data.error:(data?.error?.message||'');
       if(res.status===401){await sessionExpired();throw new Error(AI_MSG.expired);}
+      if(res.status===402&&data?.code==='trial_limit'){const te=new Error(srv||AI_MSG.trial);te.code='trial_limit';window.TCPlans?.onTrialLimit?.(data);throw te;} // free trial used up → plans pop-up
       if(res.status===402&&data?.code==='budget'){const be=new Error(srv||AI_MSG.budget);be.code='budget';be.budget=data;showBudgetModal(data);throw be;}
       if(res.status===429)throw new Error(/^quota/.test(data?.code||'')&&srv?srv:AI_MSG.busy);
       if(res.status===504||res.status===408)throw new Error(AI_MSG.timeout);
@@ -3251,6 +3269,7 @@ async function callAIMessages(messages,temperature=.7,opts={}){
     const choice=data.choices?.[0];
     const content=choice?.message?.content;
     if(data.budget)noteBudget(data.budget);
+    opts.onData?.(data); // Compare models: tokens + model used of every request
     if(typeof content!=='string'||!content.trim())throw new Error(choice?.finish_reason==='content_filter'?AI_MSG.filter:AI_MSG.empty);
     return opts.full===true?{content,finish_reason:choice.finish_reason||null}:content;
   }catch(e){
@@ -3258,17 +3277,36 @@ async function callAIMessages(messages,temperature=.7,opts={}){
     throw e;
   }finally{clearTimeout(timer);}
 }
-async function callAI(params){
+async function callAI(params,extra=null){
   const sys=buildSystemPrompt();const user=buildUserPrompt(params);
   const stem=isStemClass(params);
-  let {text,finish}=await callAIMessagesFull([{role:'system',content:sys},{role:'user',content:user}],stem?0.5:0.7,'generate',aiMeta(params));
-  if(finish==='length'){try{text=await continueTruncated(sys,user,text,params);}catch(e){console.warn('continuation failed',e);text+='\n\n'+langExtra(params.language).trunc;}}
+  let {text,finish}=await callAIMessagesFull([{role:'system',content:sys},{role:'user',content:user}],stem?0.5:0.7,'generate',aiMeta(params),extra);
+  if(finish==='length'){try{text=await continueTruncated(sys,user,text,params,extra);}catch(e){console.warn('continuation failed',e);text+='\n\n'+langExtra(params.language).trunc;}}
   if(stem){
-    const ls=document.getElementById('loading-step');if(ls)ls.textContent='🔎 Checking calculations…';
-    text=await verifyStemGuide(text,params);
+    const ls=document.getElementById('loading-step');if(ls&&!extra)ls.textContent='🔎 Checking calculations…';
+    text=await verifyStemGuide(text,params,extra);
   }
   return text;
 }
+// Compare models (super admin, public/plans-admin.js): the SAME full pipeline as a teacher's class — guide (+ continuation,
+// + calculation check) and student handout — with model 'default' | 'mini' (the server accepts it only from the super admin).
+// Returns {guide, handout, ms, prompt_tokens, completion_tokens, deployment, fallback}.
+async function generateFullForCompare(params,model){
+  const acc={prompt_tokens:0,completion_tokens:0,deployment:null,fallback:false,requests:0};
+  const extra={model,onData:d=>{acc.requests++;acc.prompt_tokens+=Number(d?.usage?.prompt_tokens)||0;acc.completion_tokens+=Number(d?.usage?.completion_tokens)||0;
+    if(d?.model?.deployment)acc.deployment=d.model.deployment;if(d?.model?.fallback)acc.fallback=true;}};
+  const t0=performance.now();
+  const guide=await callAI(params,extra);
+  let handout=await callAIMessages([
+    {role:'system',content:'You are a materials designer. You produce ONLY the worksheet/handout a student holds in their hands: the class "not done yet", with blanks to complete. You never write for the teacher and never reveal answers.'},
+    {role:'user',content:buildStudentPrompt(guide,params)}],0.3,{kind:'student',meta:aiMeta(params),...extra});
+  handout=cleanStudentHandout(handout);
+  return {guide,handout,ms:Math.round(performance.now()-t0),...acc};
+}
+window.TCGenerateFull=generateFullForCompare;
+// The generator's current settings (Compare models: "Use the generator's settings")
+window.TCCurrentParams=()=>{const prompt=document.getElementById('prompt-input')?.value.trim()||'';if(!prompt)return null;
+  return {prompt,language:document.getElementById('st-language').value,level:document.getElementById('st-level').value,age:document.getElementById('st-age')?.value||'',groupSize:String(clampGroupSize()),duration:document.getElementById('st-duration').value,subjects:getSubjects(),skills:getSkillsPriority(),...getSliderValues()};};
 
 function formatDoc(text){return (text||'').split('\n').map((l,i)=>fmtLine(l,i)).join('');}
 function fmtLine(line,idx){
@@ -3566,7 +3604,10 @@ function exportPDF(){
 .cls-wrong{text-decoration:line-through;color:#e53e3e;opacity:.7}.cls-arrow{color:#888;margin:0 4px}.cls-right{color:#276749;font-weight:600}
 .cls-line{margin:1px 0}.cls-link{color:#7c5cbf}.footer{margin-top:28px;padding-top:10px;border-top:1px solid #eee;font-size:10px;color:#999;text-align:center}
 @media print{body{margin:10px}@page{margin:1.5cm}}`;
-  const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${title}</title><style>${css}</style></head><body>${body}<div class="footer">${esc(trText('Generated with TeroClass'))} · ${today}</div><script>window.addEventListener('load',function(){setTimeout(function(){window.print();},300);});<\/script></body></html>`;
+  // 2026-10-21: free trial → watermark on every page ("Creado con TeroClass — versión de prueba"); paid plans: none
+  const wm=window.TCPlans?.watermark?.()?esc(TCPlans.watermarkText()):'';
+  const wmCss=wm?`.tc-wm{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:9}.tc-wm span{transform:rotate(-30deg);font-size:34px;font-weight:700;color:rgba(124,92,191,.13);white-space:nowrap}.wm-foot{color:#7c5cbf;font-weight:600}`:'';
+  const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${title}</title><style>${css}${wmCss}</style></head><body>${wm?`<div class="tc-wm" aria-hidden="true"><span>${wm}</span></div>`:''}${body}<div class="footer">${wm?`<span class="wm-foot">${wm}</span> · `:''}${esc(trText('Generated with TeroClass'))} · ${today}</div><script>window.addEventListener('load',function(){setTimeout(function(){window.print();},300);});<\/script></body></html>`;
   const url=URL.createObjectURL(new Blob([html],{type:'text/html'}));
   const w=window.open(url,'_blank');
   if(!w){URL.revokeObjectURL(url);showToast('Allow pop-ups to export the PDF','err',5000);return;}
@@ -4164,7 +4205,9 @@ document.addEventListener('keydown',e=>{
 // ══ PLAN & USAGE (seats + monthly AI tokens + token packs) ══
 // Accounts = main institutions (madre). Admins see "Plan & usage"; the super admin manages settings,
 // plans and purchase requests in Platform. Token limits are enforced by /api/generate (server key).
-const TOKENS_PER_CLASS=23000; // rough average of one generated class (guide + checks + handout)
+// 2026-10-21: the customer sees "classes", not tokens (1 class = credit_tokens = 25,000 tokens, plans.json); token packs
+// became class packs (50 for USD 25, 200 for USD 85). Old requests (token packs) still show, as ≈ classes.
+const TOKENS_PER_CLASS=25000;
 const BL={summary:null,confirmBuy:false,confirmTimer:null,warned:false,overview:null,requests:[],status:null,modal:null};
 function blJson(d){if(typeof d==='string'){try{return JSON.parse(d);}catch(e){return null;}}return d;}
 function fmtTokens(n){
@@ -4175,9 +4218,17 @@ function fmtTokens(n){
 function fmtInt(n){return (Number(n)||0).toLocaleString(uiLocale());}
 // P-26: the price in the local format ("USD 11,99" in Spanish)
 function fmtMoney(price,cur){return `${String(cur||'USD').replace(/[^A-Z]/g,'').slice(0,3)||'USD'} ${(Number(price)||0).toLocaleString(uiLocale(),{minimumFractionDigits:2,maximumFractionDigits:2})}`;}
-function blBuyLabelHtml(pack,price,cur){return `<span>Buy</span> <b data-no-i18n>${esc(fmtTokens(pack))}</b> <span>tokens for</span> <b data-no-i18n>${esc(fmtMoney(price,cur))}</b>`;}
+function blCredit(s){return Number(s?.credit_tokens)||TOKENS_PER_CLASS;}
+function blClasses(tokens,s){return Math.floor((Number(tokens)||0)/blCredit(s));}
+function blPackName(p){return (uiLang==='es'?p.name_es:p.name_en)||p.name_es||p.id;}
+function blPackLabel(r,s){ // a request: "50 classes" (pack) or "≈ 80 classes (2M tokens)" (old token pack)
+  if(r.pack_credits)return `${fmtInt(r.pack_credits)} ${trText('classes')}`;
+  return `≈ ${fmtInt(blClasses(r.pack_tokens,s))} ${trText('classes')} (${fmtTokens(r.pack_tokens)} tokens)`;}
+function blBuyLabelHtml(p){return `<span>Ask for</span> <b data-no-i18n>${esc(blPackName(p))}</b> · <b data-no-i18n>${esc(window.TCPlans?TCPlans.money(p.usd,'USD'):fmtMoney(p.usd,'USD'))}</b>`;}
 function blWarn(s){const m=Number(s.monthly_tokens)||0,r=Number(s.remaining)||0;return m>0?r<=m*0.2:r<=0;}
 function blStatusBadge(st){const k={pending:'Pending',approved:'Approved',rejected:'Rejected'}[st]||'Pending';return `<span class="bl-badge ${esc(st)}">${k}</span>`;}
+const PLAN_STATUS_LABEL={none:'No plan (trial)',pilot:'Pilot',active:'Active',founder:'Founding institution',enterprise:'Enterprise',cancelled:'Plan cancelled'};
+const PLAN_ACTIVE=['pilot','active','founder','enterprise'];
 
 // ── Admin: "Plan & usage" screen ──
 async function renderBilling(){
@@ -4196,57 +4247,62 @@ async function renderBilling(){
 function billingHtml(s){
   const allow=Number(s.monthly_tokens)||0,used=Number(s.used_month)||0,extra=Number(s.extra_balance)||0,rem=Number(s.remaining)||0;
   const pct=allow>0?Math.min(100,Math.round(used/allow*100)):(used>0?100:0);
-  const classes=Math.floor(rem/TOKENS_PER_CLASS);
+  const classes=blClasses(rem,s);
   const blocked=rem<=0,warn=!blocked&&blWarn(s);
   const resets=fmtDate(s.resets_on+'T00:00:00Z',{day:'numeric',month:'long',timeZone:'UTC'});
-  const pending=s.pending;
-  const buy=pending?`<div class="bl-pending">⏳ <span>Purchase request pending</span> · <span data-no-i18n>${esc(fmtTokens(pending.pack_tokens))} · ${esc(fmtMoney(pending.price,pending.currency))} · ${esc(fmtDate(pending.created_at,{day:'numeric',month:'short'}))}</span><div class="bl-hint">We'll contact you to complete the payment; tokens are added once confirmed.</div></div>`
-    :s.can_request?`<button class="btn-modal-save bl-buy${BL.confirmBuy?' confirm':''}" data-bl="buy">${BL.confirmBuy?'<span>Click again to send the request</span>':blBuyLabelHtml(s.pack_tokens,s.pack_price,s.currency)}</button><div class="bl-hint">We'll contact you to complete the payment; tokens are added once confirmed.</div>`
-    :'<div class="bl-hint">Only admins of the main institution can buy tokens.</div>';
-  const banner=blocked?`<div class="bl-banner block" role="alert"><b>Your institution has used all its AI tokens for this month.</b> <span>Teachers can't generate classes until more tokens are added or the month renews on</span> <b data-no-i18n>${esc(resets)}</b>.</div>`
-    :warn?`<div class="bl-banner warn" role="status"><b>Your institution has used most of this month's AI tokens.</b> <span>Consider buying a token pack so classes are not interrupted.</span></div>`:'';
-  const row=(name,email,u,r)=>`<tr><td data-no-i18n>${esc(name)}${email?`<div class="bl-sub">${esc(email)}</div>`:''}</td><td data-no-i18n>${esc(fmtTokens(u))}</td><td data-no-i18n>${esc(fmtInt(r))}</td></tr>`;
+  const pending=s.pending;const packs=Array.isArray(s.packs)?s.packs:[];
+  const buy=pending?`<div class="bl-pending">⏳ <span>Purchase request pending</span> · <span data-no-i18n>${esc(blPackLabel(pending,s))} · ${esc(fmtMoney(pending.price,pending.currency))} · ${esc(fmtDate(pending.created_at,{day:'numeric',month:'short'}))}</span><div class="bl-hint">We'll contact you to complete the payment; the classes are added once confirmed.</div></div>`
+    :s.can_request?`<div class="bl-packs">${packs.map(p=>`<button class="btn-modal-save bl-buy${BL.confirmBuy===p.id?' confirm':''}" data-bl="buy" data-pack="${esc(p.id)}">${BL.confirmBuy===p.id?'<span>Click again to send the request</span>':blBuyLabelHtml(p)}</button>`).join('')}</div><div class="bl-hint">We'll contact you to complete the payment; the classes are added once confirmed. Packs are used after the monthly classes.</div>`
+    :'<div class="bl-hint">Only admins of the main institution can buy class packs.</div>';
+  const st=s.plan_status||'none';
+  const planLine=PLAN_ACTIVE.includes(st)?`<span class="bl-plan on">${esc(trText(PLAN_STATUS_LABEL[st]||st))}</span>`
+    :`<span class="bl-plan off">${esc(trText('No active plan'))}</span> <span class="bl-sub">${esc(trText('Your teachers and admins are using the free trial (5 classes each).'))}</span>`;
+  const banner=blocked?`<div class="bl-banner block" role="alert"><b>Your institution has used all its classes for this month.</b> <span>Teachers can't generate classes until a pack is added or the month renews on</span> <b data-no-i18n>${esc(resets)}</b>.</div>`
+    :warn?`<div class="bl-banner warn" role="status"><b>Your institution has used most of this month's classes.</b> <span>Consider adding a class pack so classes are not interrupted.</span></div>`:'';
+  const row=(name,email,u,r)=>`<tr><td data-no-i18n>${esc(name)}${email?`<div class="bl-sub">${esc(email)}</div>`:''}</td><td data-no-i18n>≈ ${esc(fmtInt(Math.round((Number(u)||0)/blCredit(s)*10)/10))}</td><td data-no-i18n>${esc(fmtInt(r))}</td></tr>`;
   const units=(s.by_unit||[]),teachers=(s.by_teacher||[]),reqs=(s.requests||[]);
   const empty3='<tr><td colspan="3" class="muted-cell">No AI usage this month yet.</td></tr>';
   return `${banner}
-  <div class="bl-account"><span>Account:</span> <b data-no-i18n>${esc(s.root_name||'')}</b> <span class="bl-sub">· <span>Month</span> <span data-no-i18n>${esc(fmtDate(s.month+'T00:00:00Z',{month:'long',year:'numeric',timeZone:'UTC'}))}</span> (UTC)</span></div>
+  <div class="bl-account"><span>Account:</span> <b data-no-i18n>${esc(s.root_name||'')}</b> <span class="bl-sub">· <span>Month</span> <span data-no-i18n>${esc(fmtDate(s.month+'T00:00:00Z',{month:'long',year:'numeric',timeZone:'UTC'}))}</span> (UTC)</span>
+    <div class="bl-planrow"><span>Plan:</span> ${planLine} · <a href="/planes" target="_blank" rel="noopener" id="bl-plans-link">See plans &amp; pricing</a></div></div>
   <div class="metrics-grid bl-metrics">
     <div class="metric-card"><div class="metric-label">Seats</div><div class="metric-value" id="bl-seats" data-no-i18n>${esc(fmtInt(s.seats_used))} / ${esc(fmtInt(s.seats))}</div><div class="metric-sub">Teachers and admins in use</div></div>
-    <div class="metric-card"><div class="metric-label">AI tokens this month</div><div class="metric-value" id="bl-used" data-no-i18n>${esc(fmtTokens(used))} / ${esc(fmtTokens(allow))}</div>
-      <div class="bl-bar${blocked?' full':warn?' warn':''}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div><div class="metric-sub"><span data-no-i18n>${pct}%</span> <span>of the monthly allowance</span></div></div>
-    <div class="metric-card"><div class="metric-label">Classes left (approx.)</div><div class="metric-value" id="bl-classes" data-no-i18n>≈ ${esc(fmtInt(classes))}</div><div class="metric-sub">Estimate: about 23,000 tokens per class</div></div>
-    <div class="metric-card"><div class="metric-label">Extra tokens</div><div class="metric-value" id="bl-extra" data-no-i18n>${esc(fmtTokens(extra))}</div><div class="metric-sub">Purchased packs · they don't expire</div></div>
+    <div class="metric-card"><div class="metric-label">Classes this month</div><div class="metric-value" id="bl-used" data-no-i18n>${esc(fmtInt(blClasses(used,s)))} / ${esc(fmtInt(blClasses(allow,s)))}</div>
+      <div class="bl-bar${blocked?' full':warn?' warn':''}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div><div class="metric-sub"><span data-no-i18n>${pct}%</span> <span>of the monthly classes</span></div></div>
+    <div class="metric-card"><div class="metric-label">Classes left</div><div class="metric-value" id="bl-classes" data-no-i18n>${esc(fmtInt(classes))}</div><div class="metric-sub">1 class = guide + handout + check. Regenerating a part uses a fraction.</div></div>
+    <div class="metric-card"><div class="metric-label">Extra classes (packs)</div><div class="metric-value" id="bl-extra" data-no-i18n>${esc(fmtInt(blClasses(extra,s)))}</div><div class="metric-sub">Used after the monthly classes</div></div>
   </div>
-  <div class="admin-card bl-buy-card${blocked?' blocked':''}"><div class="admin-card-title">Need more tokens? <span>Used after the monthly allowance</span></div>${buy}</div>
+  <div class="admin-card bl-buy-card${blocked?' blocked':''}"><div class="admin-card-title">Need more classes? <span>Class packs</span></div>${buy}</div>
   <div class="admin-grid">
-    <div class="admin-card"><div class="admin-card-title">Usage by unit <span>This month</span></div><table class="teachers-table"><thead><tr><th>Unit</th><th>Tokens</th><th>Requests</th></tr></thead><tbody id="bl-units">${units.length?units.map(u=>row(u.name,'',u.used,u.requests)).join(''):empty3}</tbody></table></div>
-    <div class="admin-card"><div class="admin-card-title">Top teachers <span>This month · top 10</span></div><table class="teachers-table"><thead><tr><th>Name</th><th>Tokens</th><th>Requests</th></tr></thead><tbody id="bl-teachers">${teachers.length?teachers.map(t=>t.masked?row(trText('TeroClass team'),'',t.used,t.requests):row(t.name,t.email&&t.email!==t.name?t.email:'',t.used,t.requests)).join(''):empty3}</tbody></table></div>
+    <div class="admin-card"><div class="admin-card-title">Usage by unit <span>This month</span></div><table class="teachers-table"><thead><tr><th>Unit</th><th>Classes</th><th>Requests</th></tr></thead><tbody id="bl-units">${units.length?units.map(u=>row(u.name,'',u.used,u.requests)).join(''):empty3}</tbody></table></div>
+    <div class="admin-card"><div class="admin-card-title">Top teachers <span>This month · top 10</span></div><table class="teachers-table"><thead><tr><th>Name</th><th>Classes</th><th>Requests</th></tr></thead><tbody id="bl-teachers">${teachers.length?teachers.map(t=>t.masked?row(trText('TeroClass team'),'',t.used,t.requests):row(t.name,t.email&&t.email!==t.name?t.email:'',t.used,t.requests)).join(''):empty3}</tbody></table></div>
   </div>
-  <div class="admin-card"><div class="admin-card-title">Purchase requests <span>History</span></div><table class="teachers-table"><thead><tr><th>Date</th><th>Pack</th><th>Price</th><th>Status</th><th>Note</th></tr></thead><tbody id="bl-requests">${reqs.length?reqs.map(r=>`<tr><td data-no-i18n>${esc(fmtDate(r.created_at,{year:'numeric',month:'short',day:'numeric'}))}</td><td data-no-i18n>${esc(fmtTokens(r.pack_tokens))}</td><td data-no-i18n>${esc(fmtMoney(r.price,r.currency))}</td><td>${blStatusBadge(r.status)}</td><td data-no-i18n>${esc(r.note||'')}</td></tr>`).join(''):'<tr><td colspan="5" class="muted-cell">No purchase requests yet.</td></tr>'}</tbody></table></div>`;
+  <div class="admin-card"><div class="admin-card-title">Purchase requests <span>History</span></div><table class="teachers-table"><thead><tr><th>Date</th><th>Pack</th><th>Price</th><th>Status</th><th>Note</th></tr></thead><tbody id="bl-requests">${reqs.length?reqs.map(r=>`<tr><td data-no-i18n>${esc(fmtDate(r.created_at,{year:'numeric',month:'short',day:'numeric'}))}</td><td data-no-i18n>${esc(blPackLabel(r,s))}</td><td data-no-i18n>${esc(fmtMoney(r.price,r.currency))}</td><td>${blStatusBadge(r.status)}</td><td data-no-i18n>${esc(r.note||'')}</td></tr>`).join(''):'<tr><td colspan="5" class="muted-cell">No purchase requests yet.</td></tr>'}</tbody></table></div>`;
 }
-async function billingBuy(btn){
+async function billingBuy(btn,pack){
   if(vaBlocked()){BL.confirmBuy=false;return;}
-  if(!BL.confirmBuy){
-    BL.confirmBuy=true;clearTimeout(BL.confirmTimer);
+  pack=pack||btn?.dataset.pack||null;
+  if(BL.confirmBuy!==pack){
+    BL.confirmBuy=pack;clearTimeout(BL.confirmTimer);
     BL.confirmTimer=setTimeout(()=>{BL.confirmBuy=false;if(isActivePanel('billing')&&BL.summary)document.getElementById('billing-root').innerHTML=billingHtml(BL.summary);},5000);
-    if(BL.summary)document.getElementById('billing-root').innerHTML=billingHtml(BL.summary);
-    document.querySelector('#billing-root [data-bl="buy"]')?.focus();
+    if(BL.summary&&isActivePanel('billing'))document.getElementById('billing-root').innerHTML=billingHtml(BL.summary);
+    document.querySelector(`#billing-root [data-bl="buy"][data-pack="${CSS.escape(pack||'')}"]`)?.focus();
     return;
   }
   BL.confirmBuy=false;clearTimeout(BL.confirmTimer);
   if(btn)btn.disabled=true;
-  const {error}=await sb.rpc('request_token_pack');
+  const {error}=await sb.rpc('request_token_pack',{p_pack:pack});
   if(error){if(btn)btn.disabled=false;showToast('Error: '+error.message,'err');renderBilling();return;}
-  showToast("Request sent ✓ We'll contact you to complete the payment; tokens are added once confirmed.",'ok',6000);
+  showToast("Request sent ✓ We'll contact you to complete the payment; the classes are added once confirmed.",'ok',6000);
   closeModal('modal-budget');
   if(isActivePanel('billing'))renderBilling();
 }
 
-// ── Generation blocked by the token budget ──
+// ── Generation blocked by the monthly classes ──
 async function showBudgetModal(info){
   info=info||{};BL.modal=info;
   const m=document.getElementById('modal-budget');if(!m)return;
-  document.getElementById('budget-msg').textContent=info.error||'Your institution has reached its monthly AI limit. Tell your admin so they can add more tokens.';
+  document.getElementById('budget-msg').textContent=info.error||AI_MSG.budget;
   const acts=document.getElementById('budget-actions');
   const admin=!!info.is_admin;
   acts.innerHTML=`<button class="btn-modal-cancel" data-bl="budget-close">${admin?'Close':'OK'}</button>${admin?'<button class="btn-modal-cancel" data-bl="open-billing">See Plan &amp; usage</button>':''}`;
@@ -4256,8 +4312,9 @@ async function showBudgetModal(info){
     const {data}=await sb.rpc('get_billing_summary',{p_inst:currentUser?.orgId||null});
     const s=blJson(data);if(!s||BL.modal!==info||!m.classList.contains('active'))return;
     BL.summary={...s,_inst:currentUser?.orgId||null};
-    const extra=s.pending?`<div class="bl-hint bl-modal-hint">⏳ <span>Purchase request pending</span> — <span>We'll contact you to complete the payment; tokens are added once confirmed.</span></div>`
-      :`<button class="btn-modal-save" data-bl="buy-now">${blBuyLabelHtml(s.pack_tokens,s.pack_price,s.currency)}</button>`;
+    const p=(s.packs||[])[0];
+    const extra=s.pending?`<div class="bl-hint bl-modal-hint">⏳ <span>Purchase request pending</span> — <span>We'll contact you to complete the payment; the classes are added once confirmed.</span></div>`
+      :p?`<button class="btn-modal-save" data-bl="buy-now" data-pack="${esc(p.id)}">${blBuyLabelHtml(p)}</button>`:'';
     acts.insertAdjacentHTML('beforeend',extra);
     if(!s.pending)document.getElementById('budget-explain').style.display='block';
   }
@@ -4295,6 +4352,7 @@ async function renderPlatformBilling(){
   if(e1||e2){box.innerHTML=`<div class="admin-card bl-empty">${esc(dbErr((e1||e2).message))}</div>`;return;}
   BL.overview=blJson(ov)||{};BL.requests=blJson(rq)||[];
   box.innerHTML=platformBillingHtml();
+  window.TCPlansAdmin?.render?.({overview:BL.overview,status:st}); // plans & pricing, sales requests, Docente plans, AI model, compare models
 }
 function platformBillingHtml(){
   const o=BL.overview||{},s=o.settings||{},accts=o.accounts||[],reqs=BL.requests||[];
@@ -4304,11 +4362,9 @@ function platformBillingHtml(){
   return `<div class="admin-card bl-pf-card" id="pf-requests-card"><div class="admin-card-title">Token purchase requests <span>Approve once you have received the payment (transfer, Mercado Pago…)</span></div>
     <table class="teachers-table"><thead><tr><th>Institution</th><th>Pack</th><th>Price</th><th>Requested by</th><th>Date</th><th></th></tr></thead><tbody id="pf-requests">${pend.length?pend.map(r=>reqRow(r)+`<td class="bl-actions"><input type="text" class="settings-input bl-note" maxlength="500" placeholder="Note (optional)" aria-label="Note (optional)"><button class="tree-btn primary" data-bl="pf-approve" data-id="${esc(r.id)}">Approve</button><button class="tree-btn danger" data-bl="pf-reject" data-id="${esc(r.id)}">Reject</button></td></tr>`).join(''):'<tr><td colspan="6" class="muted-cell">No pending requests.</td></tr>'}</tbody></table>
     ${done.length?`<div class="bl-subtitle">Recently decided</div><table class="teachers-table"><tbody id="pf-requests-done">${done.map(r=>reqRow(r)+`<td>${blStatusBadge(r.status)}${r.note?` <span class="bl-sub" data-no-i18n>${esc(r.note)}</span>`:''}</td></tr>`).join('')}</tbody></table>`:''}</div>
-  <div class="admin-card bl-pf-card" id="pf-settings-card"><div class="admin-card-title">Plans &amp; pricing <span>Token pack and defaults</span></div>
-    <div class="bl-settings">${num('pfs-pack',s.pack_tokens,'Token pack size (tokens)','1000')}${num('pfs-price',s.pack_price,'Pack price','0.01')}
-      <label class="bl-field"><span class="modal-label">Currency</span><input type="text" id="pfs-currency" class="settings-input" maxlength="3" value="${esc(s.currency||'USD')}"></label>
-      ${num('pfs-personal',s.personal_monthly_tokens,'Free monthly tokens (users without an institution)','1000')}${num('pfs-seats',s.default_seats,'Default seats for a new institution')}${num('pfs-monthly',s.default_monthly_tokens,'Default monthly tokens for a new institution','1000')}</div>
-    <div class="bl-row"><button class="btn-modal-save" data-bl="pf-save-settings">Save settings</button> <span class="bl-hint">Buy button preview:</span> <span class="bl-preview" id="pfs-preview">${blBuyLabelHtml(s.pack_tokens,s.pack_price,s.currency)}</span></div></div>
+  <div class="admin-card bl-pf-card" id="pf-settings-card"><div class="admin-card-title">Defaults <span>Free allowance and new institutions (prices and packs: Plans &amp; pricing below)</span></div>
+    <div class="bl-settings">${num('pfs-personal',s.personal_monthly_tokens,'Free monthly tokens (users without an institution)','1000')}${num('pfs-seats',s.default_seats,'Default seats for a new institution')}${num('pfs-monthly',s.default_monthly_tokens,'Default monthly tokens for a new institution','1000')}</div>
+    <div class="bl-row"><button class="btn-modal-save" data-bl="pf-save-settings">Save settings</button> <span class="bl-hint">1 class = 25,000 tokens.</span></div></div>
   <div class="admin-card bl-pf-card" id="pf-ai-prices-card"><div class="admin-card-title">AI cost estimate <span>Used by Metrics · USD per 1M tokens</span></div>
     <div class="bl-settings">${num('pfs-ai-in',s.ai_price_input??2.5,'Input tokens (USD per 1M)','0.01')}${num('pfs-ai-out',s.ai_price_output??10,'Output tokens (USD per 1M)','0.01')}</div>
     <div class="bl-row"><button class="btn-modal-save" data-bl="pf-save-prices">Save prices</button> <span class="bl-hint">Default: GPT-4o (input 2.50 · output 10.00). Only an estimate: check your Azure bill for the real cost.</span></div></div>
@@ -4316,18 +4372,23 @@ function platformBillingHtml(){
     <div class="bl-settings">${num('pfs-cap-inst',s.ai_daily_tokens_institution??3000000,'Per institution (all its people)','100000')}${num('pfs-cap-user',s.ai_daily_tokens_user??400000,'Per teacher (admins ×2)','10000')}</div>
     <div class="bl-row"><button class="btn-modal-save" data-bl="pf-save-caps">Save limits</button> <span class="bl-hint">A class is about 10,000–25,000 estimated tokens. Accounts without an institution get much less (30,000–150,000). Also set a budget alert in Azure.</span></div></div>
   <div class="admin-card bl-pf-card" id="pf-plans-card"><div class="admin-card-title">Institutions: plan and usage <span>This month (UTC)</span></div>
-    <table class="teachers-table"><thead><tr><th>Institution</th><th>Seats</th><th>Tokens / month</th><th>Used this month</th><th>Extra tokens</th><th></th></tr></thead><tbody id="pf-plans">${accts.length?accts.map(a=>{const pct=a.monthly_tokens>0?Math.min(100,Math.round(a.used_month/a.monthly_tokens*100)):(a.used_month>0?100:0);return `<tr data-root="${esc(a.id)}"><td data-no-i18n>${esc(a.name)}${a.pending?' <span class="bl-badge pending">Pending</span>':''}</td>
+    <div class="bl-hint">No plan: its teachers and admins are on the free trial (5 classes each). Pilot, Active, Founding institution or Enterprise: active plan, no trial limit. Set it by hand once they pay (there is no online payment yet). "Apply plan" sets the monthly classes to seats × the plan's classes per teacher.</div>
+    <div class="pf-table-scroll"><table class="teachers-table"><thead><tr><th>Institution</th><th>Plan</th><th>Seats</th><th>Tokens / month</th><th>Used this month</th><th>Extra tokens</th><th></th></tr></thead><tbody id="pf-plans">${accts.length?accts.map(a=>{const pct=a.monthly_tokens>0?Math.min(100,Math.round(a.used_month/a.monthly_tokens*100)):(a.used_month>0?100:0);const st=a.plan_status||'none';return `<tr data-root="${esc(a.id)}" data-status="${esc(st)}" data-plan="${esc(a.plan_id||'')}"><td data-no-i18n>${esc(a.name)}${a.pending?' <span class="bl-badge pending">Pending</span>':''}</td>
+      <td class="pf-planc"><select class="settings-input bl-sel" data-f="status" aria-label="Plan status">${Object.keys(PLAN_STATUS_LABEL).map(k=>`<option value="${k}"${k===st?' selected':''}>${esc(trText(PLAN_STATUS_LABEL[k]))}</option>`).join('')}</select>
+        <select class="settings-input bl-sel" data-f="plan" aria-label="Plan"><option value=""${a.plan_id?'':' selected'}>—</option><option value="institucion"${a.plan_id==='institucion'?' selected':''}>${esc(trText('Institution'))}</option><option value="institucion_plus"${a.plan_id==='institucion_plus'?' selected':''}>${esc(trText('Institution+'))}</option></select>
+        <label class="bl-apply"><input type="checkbox" data-f="apply"> <span>Apply plan</span></label></td>
       <td><span data-no-i18n>${esc(fmtInt(a.seats_used))} /</span> <input type="number" min="0" class="settings-input bl-num" data-f="seats" value="${esc(a.seats)}" aria-label="Seats"></td>
       <td><input type="number" min="0" step="100000" class="settings-input bl-num wide" data-f="monthly" value="${esc(a.monthly_tokens)}" aria-label="Tokens / month"></td>
       <td><div class="bl-bar small${pct>=100?' full':pct>=80?' warn':''}"><span style="width:${pct}%"></span></div><span class="bl-sub" data-no-i18n>${esc(fmtTokens(a.used_month))} (${pct}%)</span></td>
-      <td data-no-i18n>${esc(fmtTokens(a.extra_balance))}</td><td><button class="tree-btn" data-bl="pf-save-plan" data-id="${esc(a.id)}">Save</button></td></tr>`;}).join(''):'<tr><td colspan="6" class="muted-cell">No institutions yet</td></tr>'}</tbody></table>
+      <td data-no-i18n>${esc(fmtTokens(a.extra_balance))}</td><td><button class="tree-btn" data-bl="pf-save-plan" data-id="${esc(a.id)}">Save</button></td></tr>`;}).join(''):'<tr><td colspan="7" class="muted-cell">No institutions yet</td></tr>'}</tbody></table></div>
     <div class="bl-hint">Personal accounts (no institution) this month: <b data-no-i18n>${esc(fmtInt(o.personal?.users||0))}</b> · <b data-no-i18n>${esc(fmtTokens(o.personal?.used_month||0))}</b> <span>tokens</span></div></div>`;
 }
 const blIntOk=v=>/^\d+$/.test(String(v).trim());
 async function platformSaveSettings(btn){
   if(vaBlocked())return;
   const g=id=>document.getElementById(id)?.value.trim()||'';
-  const vals={pack:g('pfs-pack'),price:g('pfs-price'),cur:g('pfs-currency').toUpperCase(),personal:g('pfs-personal'),seats:g('pfs-seats'),monthly:g('pfs-monthly')};
+  const o=BL.overview?.settings||{}; // the old token-pack fields are kept as they are (packs now live in the plans)
+  const vals={pack:String(o.pack_tokens??2000000),price:String(o.pack_price??11.99),cur:String(o.currency||'USD').toUpperCase(),personal:g('pfs-personal'),seats:g('pfs-seats'),monthly:g('pfs-monthly')};
   if(![vals.pack,vals.personal,vals.seats,vals.monthly].every(blIntOk)||!/^\d+(\.\d{1,2})?$/.test(vals.price)){showToast('Use whole numbers for tokens and seats, and a price like 11.99.','err');return;}
   if(!/^[A-Z]{3}$/.test(vals.cur)){showToast('The currency must be a 3-letter code (e.g. USD).','err');return;}
   btn.disabled=true;
@@ -4365,8 +4426,14 @@ async function platformSavePlan(id,btn){
   if(!blIntOk(seats)||!blIntOk(monthly)){showToast('Use whole numbers for tokens and seats, and a price like 11.99.','err');return;}
   btn.disabled=true;
   const {error}=await sb.rpc('set_institution_plan',{p_root:id,p_seats:Number(seats),p_monthly_tokens:Number(monthly)});
+  if(error){btn.disabled=false;showToast('Error: '+error.message,'err');return;}
+  // 2026-10-21: plan status (none → trial for its people; pilot / active / … → no trial limit)
+  const st=tr?.querySelector('[data-f="status"]')?.value,plan=tr?.querySelector('[data-f="plan"]')?.value||null,apply=!!tr?.querySelector('[data-f="apply"]')?.checked;
+  if(st&&(st!==tr.dataset.status||(plan||'')!==(tr.dataset.plan||'')||apply)){
+    const r2=await sb.rpc('set_institution_plan_status',{p_root:id,p_status:st,p_plan:plan,p_apply_limits:apply});
+    if(r2.error){btn.disabled=false;showToast('Error: '+dbErr(r2.error.message),'err');return;}
+  }
   btn.disabled=false;
-  if(error){showToast('Error: '+error.message,'err');return;}
   showToast('Plan saved ✓','ok');renderPlatformBilling();
 }
 async function platformDecide(id,approve,btn){
@@ -4385,7 +4452,7 @@ document.addEventListener('click',e=>{
   const el=e.target.closest('[data-bl]');if(!el)return;
   switch(el.dataset.bl){
     case 'buy':billingBuy(el);break;
-    case 'buy-now':BL.confirmBuy=true;billingBuy(el);break;
+    case 'buy-now':BL.confirmBuy=el.dataset.pack||null;billingBuy(el);break;
     case 'budget-close':closeModal('modal-budget');break;
     case 'open-billing':closeModal('modal-budget');showPanel('billing');break;
     case 'pf-save-settings':platformSaveSettings(el);break;
@@ -4396,12 +4463,7 @@ document.addEventListener('click',e=>{
     case 'pf-reject':platformDecide(el.dataset.id,false,el);break;
   }
 });
-document.addEventListener('input',e=>{
-  if(!e.target.closest?.('#pf-settings-card'))return;
-  const p=document.getElementById('pfs-preview');if(!p)return;
-  const g=id=>document.getElementById(id)?.value||'';
-  p.innerHTML=blBuyLabelHtml(g('pfs-pack'),g('pfs-price'),g('pfs-currency').toUpperCase());
-});
+
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal('modal-budget');});
 ADMIN_PANELS.push('billing','metrics','unit-insights');
 DB_ERRORS.push(
@@ -4838,12 +4900,13 @@ async function renderInsights(){
   inFilters();
   const unit=inUnit();const key=[IN.days,unit||'',IN.excl].join('|');const seq=++IN.seq;
   if(!IN.data||IN.key!==key)box.innerHTML='<div class="in-loading">Loading…</div>';
-  const [res,st,cons]=await Promise.all([sb.rpc('platform_insights',{p_days:IN.days,p_unit:unit,p_exclude_self:IN.excl}),IN.status===undefined?loadBillingStatus():Promise.resolve(IN.status),
-    sb.rpc('platform_consent_counts',{p_unit:unit}).then(r=>r.error?null:blJson(r.data),()=>null)]); // recording consent: totals only
+  const [res,st,cons,fun]=await Promise.all([sb.rpc('platform_insights',{p_days:IN.days,p_unit:unit,p_exclude_self:IN.excl}),IN.status===undefined?loadBillingStatus():Promise.resolve(IN.status),
+    sb.rpc('platform_consent_counts',{p_unit:unit}).then(r=>r.error?null:blJson(r.data),()=>null), // recording consent: totals only
+    sb.rpc('platform_funnel',{p_days:IN.days}).then(r=>r.error?null:blJson(r.data),()=>null)]); // free trial → sales funnel (whole platform)
   if(seq!==IN.seq||!currentUser||!isActivePanel('metrics'))return;
   IN.status=st;
   if(res.error){box.innerHTML=`<div class="admin-card in-empty">${esc(dbErr(res.error.message))}</div>`;return;}
-  IN.data=blJson(res.data);IN.key=key;IN.consent=cons||null;
+  IN.data=blJson(res.data);IN.key=key;IN.consent=cons||null;IN.funnel=fun||null;
   renderInsightsHtml();
 }
 function inTile(label,value,sub,id){return `<div class="metric-card"${id?` id="${id}"`:''}><div class="metric-label">${label}</div><div class="metric-value" data-no-i18n>${value}</div>${sub?`<div class="metric-sub">${sub}</div>`:''}</div>`;}
@@ -4864,6 +4927,21 @@ function inDayChart(days){
     <div class="in-axis" data-no-i18n><span>${esc(lbl(days[0].day))}</span><span>${esc(lbl(mid.day))}</span><span>${esc(lbl(days[days.length-1].day))}</span></div>`;
 }
 function inInstName(r){return r.id?r.name:trText('No institution (personal / platform team)');}
+// 2026-10-21: free trial → sales funnel (whole platform; totals only). Cohort = teacher / admin accounts created in the period.
+function inFunnelHtml(f){
+  if(!f)return '';
+  const base=Number(f.signups)||0;const pc=v=>base>0?Math.round((Number(v)||0)/base*100)+'%':'—';
+  const step=(label,v,sub,id)=>inTile(label,fmtInt(v),sub??`<span data-no-i18n>${pc(v)}</span> <span>of new accounts</span>`,id);
+  return `<div class="in-section" id="in-funnel"><div class="in-section-title">Free trial → plans <span>All institutions · accounts created in the period</span></div>
+    <div class="in-tiles">
+      ${step('Trial users',f.trial,`<span>New accounts:</span> <span data-no-i18n>${fmtInt(base)}</span> · <span>on trial today (all):</span> <span data-no-i18n>${fmtInt(f.trial_now)}</span>`,'in-f-trial')}
+      ${step('Reached the 2nd class',f.reached_2nd,null,'in-f-2nd')}
+      ${step('Saw the plans pop-up',f.saw_paywall,null,'in-f-paywall')}
+      ${step('Used the whole trial',f.hit_limit,null,'in-f-limit')}
+      ${inTile('Sales requests',fmtInt(f.leads),'In the period (with or without an account)','in-f-leads')}
+      ${inTile('Converted',fmtInt((Number(f.converted_institutions)||0)+(Number(f.converted_individuals)||0)),`<span>Institutions:</span> <span data-no-i18n>${fmtInt(f.converted_institutions)}</span> · <span>Teacher plans:</span> <span data-no-i18n>${fmtInt(f.converted_individuals)}</span>`,'in-f-conv')}
+    </div><div class="bl-hint">Converted = moved to an active plan in the period (set by hand in Platform).</div></div>`;
+}
 function renderInsightsHtml(){
   const box=document.getElementById('metrics-root');const d=IN.data;if(!box||!d)return;
   inFilters();
@@ -4917,7 +4995,7 @@ function renderInsightsHtml(){
   }else if(!notConfigured)costBody='<div class="admin-card in-empty" id="in-cost-empty">No AI token usage recorded in this period.</div>';
   const prices=`<div class="bl-hint" style="margin-top:10px"><span>Prices per 1M tokens:</span> <span data-no-i18n>input USD ${esc(Number(k.price_input??2.5).toFixed(2))} · output USD ${esc(Number(k.price_output??10).toFixed(2))}</span> · <button class="ctx-change" type="button" data-in="prices">Change in Platform</button></div>`;
   const costs=`<div class="in-section" id="in-costs"><div class="in-section-title">Costs <span>Estimated from the tokens recorded by the server</span></div>${notice}${costBody}${prices}</div>`;
-  box.innerHTML=`<div class="bl-account" id="in-scope">${scope}</div>${tracking}${usage}${content}${costs}`;
+  box.innerHTML=`<div class="bl-account" id="in-scope">${scope}</div>${tracking}${usage}${inFunnelHtml(IN.funnel)}${content}${costs}`;
 }
 document.addEventListener('click',e=>{
   const dd=e.target.closest('[data-in-days]');if(dd){IN.days=Number(dd.dataset.inDays)||30;renderInsights();return;}
@@ -5395,6 +5473,37 @@ const I18N_ES_FIX={
 'Test version':'Versión de prueba',
 };
 Object.assign(I18N_ES,I18N_ES_FIX);
+// 2026-10-21: plans, free trial, class packs (Plan & usage), plan status (Platform), funnel (Metrics)
+const I18N_ES_PLANS={
+'💳 Plans & pricing':'💳 Planes y precios',"You've used your free trial classes. Everything you created is still here to view and export. To create new classes, choose a plan.":'Usaste tus clases de prueba. Todo lo que creaste sigue acá: podés verlo y exportarlo. Para generar clases nuevas, elegí un plan.',
+'Ask for':'Pedir','classes':'clases','No plan (trial)':'Sin plan (prueba)','Pilot':'Piloto','Active':'Activo','Founding institution':'Institución fundadora','Enterprise':'Enterprise','Plan cancelled':'Plan cancelado',
+'No active plan':'Sin plan activo','Your teachers and admins are using the free trial (5 classes each).':'Tus docentes y admins están usando la prueba gratis (5 clases cada uno).',
+'Plan:':'Plan:','See plans & pricing':'Ver planes y precios','Classes this month':'Clases este mes','of the monthly classes':'de las clases del mes','Classes left':'Clases restantes',
+'1 class = guide + handout + check. Regenerating a part uses a fraction.':'1 clase = guía + material + chequeo. Regenerar una parte usa una fracción.',
+'Extra classes (packs)':'Clases extra (packs)','Used after the monthly classes':'Se usan después de las clases del mes','Need more classes?':'¿Necesitás más clases?','Class packs':'Packs de clases',
+"We'll contact you to complete the payment; the classes are added once confirmed.":'Te vamos a contactar para completar el pago; las clases se suman cuando se confirma.',
+"We'll contact you to complete the payment; the classes are added once confirmed. Packs are used after the monthly classes.":'Te vamos a contactar para completar el pago; las clases se suman cuando se confirma. Los packs se usan después de las clases del mes.',
+'Only admins of the main institution can buy class packs.':'Solo los admins de la institución madre pueden comprar packs de clases.',
+'Your institution has used all its classes for this month.':'Tu institución usó todas sus clases de este mes.',
+"Teachers can't generate classes until a pack is added or the month renews on":'Los docentes no pueden generar clases hasta que se sume un pack o se renueve el mes, el',
+"Your institution has used most of this month's classes.":'Tu institución ya usó casi todas las clases de este mes.',
+'Consider adding a class pack so classes are not interrupted.':'Conviene sumar un pack de clases para que no se corten.','Classes':'Clases',
+"Request sent ✓ We'll contact you to complete the payment; the classes are added once confirmed.":'Pedido enviado ✓ Te vamos a contactar para completar el pago; las clases se suman cuando se confirma.',
+'After you pay, the platform team adds the classes and you can keep generating.':'Después del pago, el equipo de la plataforma suma las clases y podés seguir generando.',
+'Defaults':'Valores por defecto','Free allowance and new institutions (prices and packs: Plans & pricing below)':'Asignación gratuita e instituciones nuevas (precios y packs: Planes y precios, más abajo)',
+'1 class = 25,000 tokens.':'1 clase = 25.000 tokens.','Plan':'Plan','Apply plan':'Aplicar plan','Plan status':'Estado del plan','Institution':'Institución','Institution+':'Institución+',
+'No plan: its teachers and admins are on the free trial (5 classes each). Pilot, Active, Founding institution or Enterprise: active plan, no trial limit. Set it by hand once they pay (there is no online payment yet). "Apply plan" sets the monthly classes to seats × the plan\'s classes per teacher.':
+  'Sin plan: sus docentes y admins están en la prueba gratis (5 clases cada uno). Piloto, Activo, Institución fundadora o Enterprise: plan activo, sin límite de prueba. Se pone a mano cuando pagan (todavía no hay pago online). "Aplicar plan" pone las clases del mes en asientos × clases por docente del plan.',
+'Free trial → plans':'Prueba gratis → planes','All institutions · accounts created in the period':'Todas las instituciones · cuentas creadas en el período',
+'Trial users':'Usuarios en prueba','New accounts:':'Cuentas nuevas:','on trial today (all):':'en prueba hoy (todas):','of new accounts':'de las cuentas nuevas',
+'Reached the 2nd class':'Llegaron a la 2ª clase','Saw the plans pop-up':'Vieron el pop-up de planes','Used the whole trial':'Usaron toda la prueba','Sales requests':'Pedidos de ventas',
+'In the period (with or without an account)':'En el período (con o sin cuenta)','Converted':'Convertidos','Institutions:':'Instituciones:','Teacher plans:':'Planes Docente:',
+'Converted = moved to an active plan in the period (set by hand in Platform).':'Convertidos = pasaron a un plan activo en el período (se pone a mano en Plataforma).',
+'Your institution has used all its classes for this month. Add a class pack to keep generating.':'Tu institución usó todas sus clases de este mes. Sumá un pack de clases para seguir generando.',
+"Your institution has used all its classes for this month. Ask the main institution's admin to add a class pack.":'Tu institución usó todas sus clases de este mes. Pedile al admin de la institución madre que sume un pack de clases.',
+'Your institution has used all its classes for this month. Tell your admin so they can add a class pack.':'Tu institución usó todas sus clases de este mes. Avisale a tu admin para que sume un pack de clases.'
+};
+Object.assign(I18N_ES,I18N_ES_PLANS);
 I18N_RULES_ES.push([/^They open it and create their account with (.+)\.$/,'La abre y crea su cuenta con $1.']);
 </script>
 <script src="/insights-view.js"></script>
@@ -5405,5 +5514,7 @@ I18N_RULES_ES.push([/^They open it and create their account with (.+)\.$/,'La ab
 <script src="/attendance.js"></script>
 <script src="/class-doc.js"></script>
 <script src="/class-board.js"></script>
+<script src="/plans.js"></script>
+<script src="/plans-admin.js"></script>
 </body>
 </html>

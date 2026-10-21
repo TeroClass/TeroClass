@@ -1,4 +1,4 @@
-// Plan & usage: seats + monthly AI tokens + token packs (mock Supabase + mock /api/generate and /api/billing/status).
+// Plan & usage: seats + monthly classes (AI tokens) + class packs (2026-10-21: shown as classes, 1 class = 25,000 tokens) (mock Supabase + mock /api/generate and /api/billing/status).
 // Usage: NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-billing.cjs
 const { chromium } = require('playwright');
 const M = require('./mock-supabase.cjs');
@@ -94,19 +94,19 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await page.click('#nav-billing');
     await page.waitForSelector('#panel-billing.active #bl-seats');
     if ((await text(page, '#bl-seats')).trim() !== '4 / 10') throw new Error('seats: ' + await text(page, '#bl-seats'));
-    if ((await text(page, '#bl-used')).trim() !== '210k / 250k') throw new Error('tokens: ' + await text(page, '#bl-used'));
+    if ((await text(page, '#bl-used')).trim() !== '8 / 10') throw new Error('classes used: ' + await text(page, '#bl-used'));
     if (!/84%/.test(await text(page, '.bl-metrics'))) throw new Error('percent');
-    if ((await text(page, '#bl-classes')).trim() !== '≈ 1') throw new Error('classes: ' + await text(page, '#bl-classes'));
-    if (!/approx/i.test(await text(page, '.bl-metrics')) || !/23,000 tokens per class/.test(await text(page, '.bl-metrics'))) throw new Error('estimate not labelled');
+    if ((await text(page, '#bl-classes')).trim() !== '1') throw new Error('classes: ' + await text(page, '#bl-classes'));
+    if (!/1 class = guide \+ handout \+ check/.test(await text(page, '.bl-metrics')) || /tokens/i.test(await text(page, '.bl-metrics'))) throw new Error('classes not explained / raw tokens shown');
     if ((await text(page, '#bl-extra')).trim() !== '0') throw new Error('extra');
     if (!(await page.isVisible('#billing-root .bl-banner.warn')) || await page.$('#billing-root .bl-banner.block')) throw new Error('warning banner at ≥80%');
     if (!/Colegio <b>Madre<\/b>/.test(await text(page, '.bl-account'))) throw new Error('account name (escaped)');
     if (!/Colegio <b>Madre<\/b>/.test(await text(page, '#bl-units')) || !/Sede Norte/.test(await text(page, '#bl-units'))) throw new Error('by unit');
     const teachers = await text(page, '#bl-teachers');
-    if (!teachers.includes('Tina ' + XSS) || !/Tomás Norte/.test(teachers) || !/150k/.test(teachers)) throw new Error('by teacher: ' + teachers);
+    if (!teachers.includes('Tina ' + XSS) || !/Tomás Norte/.test(teachers) || !/≈ 6/.test(teachers)) throw new Error('by teacher: ' + teachers);
     if (await page.$('#bl-teachers img')) throw new Error('teacher name not escaped');
-    if (!/Buy 2M tokens for USD 11\.99/.test((await text(page, '[data-bl="buy"]')).replace(/\s+/g, ' '))) throw new Error('buy label: ' + await text(page, '[data-bl="buy"]'));
-    if (!/We'll contact you to complete the payment; tokens are added once confirmed\./.test(await text(page, '.bl-buy-card'))) throw new Error('explanation');
+    if (!/Ask for 50-class pack · USD 25/.test((await text(page, '.bl-packs')).replace(/\s+/g, ' ')) || !/200-class pack · USD 85/.test((await text(page, '.bl-packs')).replace(/\s+/g, ' '))) throw new Error('buy labels: ' + await text(page, '.bl-packs'));
+    if (!/We'll contact you to complete the payment; the classes are added once confirmed\./.test(await text(page, '.bl-buy-card'))) throw new Error('explanation');
     if (!/No purchase requests yet/.test(await text(page, '#bl-requests'))) throw new Error('empty history');
     if (await page.isVisible('#ctx-bar') && !/Colegio/.test(await text(page, '#ctx-bar'))) throw new Error('context bar');
   });
@@ -115,20 +115,21 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     const t = seed();
     await login(page, 'madm@h.com');
     await page.click('#nav-billing');
-    await page.waitForSelector('[data-bl="buy"]');
-    await page.click('[data-bl="buy"]');
-    if (!/Click again to send the request/.test(await text(page, '[data-bl="buy"]'))) throw new Error('no confirmation step');
+    const B50 = '[data-bl="buy"][data-pack="pack_clases_50"]';
+    await page.waitForSelector(B50);
+    await page.click(B50);
+    if (!/Click again to send the request/.test(await text(page, B50))) throw new Error('no confirmation step');
     if (bill.requests.length) throw new Error('request created on the first click');
-    await page.click('[data-bl="buy"]');
+    await page.click(B50);
     await waitToast(page, /Request sent ✓ We'll contact you/);
     await page.waitForSelector('.bl-pending');
-    if (bill.requests.length !== 1 || bill.requests[0].status !== 'pending' || bill.requests[0].pack_tokens !== 2000000) throw new Error('request: ' + JSON.stringify(bill.requests));
+    if (bill.requests.length !== 1 || bill.requests[0].status !== 'pending' || bill.requests[0].pack_tokens !== 1250000 || bill.requests[0].pack_id !== 'pack_clases_50') throw new Error('request: ' + JSON.stringify(bill.requests));
     if (calls.rpc.filter(c => c.fn === 'request_token_pack').length !== 1) throw new Error('rpc count');
     if (await page.$('[data-bl="buy"]')) throw new Error('buy button still shown while pending');
-    if (!/Pending/.test(await text(page, '#bl-requests')) || !/USD 11\.99/.test(await text(page, '#bl-requests'))) throw new Error('history');
+    if (!/Pending/.test(await text(page, '#bl-requests')) || !/50 classes/.test(await text(page, '#bl-requests')) || !/USD 25\.00/.test(await text(page, '#bl-requests'))) throw new Error('history: ' + await text(page, '#bl-requests'));
     // stale screen: the server refuses a second pending request with a clear message
     await page.evaluate(() => { BL.summary.pending = null; document.getElementById('billing-root').innerHTML = billingHtml(BL.summary); });
-    await page.click('[data-bl="buy"]'); await page.click('[data-bl="buy"]');
+    await page.click(B50); await page.click(B50);
     await waitToast(page, /already a pending purchase request/);
     if (bill.requests.length !== 1) throw new Error('duplicate request');
   });
@@ -138,14 +139,14 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await login(page, 'madm@h.com');
     await page.click('#nav-billing');
     await page.waitForSelector('.bl-banner.block');
-    if (!/used all its AI tokens for this month/.test(await text(page, '.bl-banner.block'))) throw new Error('block text');
+    if (!/used all its classes for this month/.test(await text(page, '.bl-banner.block'))) throw new Error('block text');
     if (!(await page.$('.bl-buy-card.blocked [data-bl="buy"]'))) throw new Error('no buy button in blocked state');
-    if ((await text(page, '#bl-classes')).trim() !== '≈ 0') throw new Error('classes');
+    if ((await text(page, '#bl-classes')).trim() !== '0') throw new Error('classes');
     bill.accounts[Object.keys(bill.accounts)[0]].extra = 2000000;
     await page.click('#nav-structure'); await page.click('#nav-billing');
-    await page.waitForFunction(() => document.getElementById('bl-extra')?.textContent.trim() === '2M');
+    await page.waitForFunction(() => document.getElementById('bl-extra')?.textContent.trim() === '80');
     if (await page.$('#billing-root .bl-banner')) throw new Error('banner with 2M extra left');
-    if ((await text(page, '#bl-classes')).trim() !== '≈ 86') throw new Error('classes with extra: ' + await text(page, '#bl-classes'));
+    if ((await text(page, '#bl-classes')).trim() !== '80') throw new Error('classes with extra: ' + await text(page, '#bl-classes'));
   });
 
   await run('Sub-unit admin: sees the account (read-only, own unit detail), cannot buy; teacher has no Plan screen', browser, async ({ page }) => {
@@ -154,7 +155,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await page.click('#nav-billing');
     await page.waitForSelector('#bl-seats');
     if (await page.$('[data-bl="buy"]')) throw new Error('sub-unit admin sees buy button');
-    if (!/Only admins of the main institution can buy tokens/.test(await text(page, '.bl-buy-card'))) throw new Error('explanation');
+    if (!/Only admins of the main institution can buy class packs/.test(await text(page, '.bl-buy-card'))) throw new Error('explanation');
     const units = await text(page, '#bl-units'); if (/Madre/.test(units) || !/Sede Norte/.test(units)) throw new Error('unit detail scope: ' + units);
     if (/Tina/.test(await text(page, '#bl-teachers'))) throw new Error('sees teachers of another unit');
     await page.click('[data-h="go-structure"], #nav-structure').catch(() => {});
@@ -163,7 +164,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
 
   await run('Teacher: generation blocked by budget → friendly modal (contact admin), no buy button, no error toast', browser, async ({ page, st }) => {
     seed();
-    st.ai = () => ({ status: 402, body: { code: 'budget', scope: 'institution', is_admin: false, can_buy: false, error: 'Your institution has reached its monthly AI limit. Tell your admin so they can add more tokens.' } });
+    st.ai = () => ({ status: 402, body: { code: 'budget', scope: 'institution', is_admin: false, can_buy: false, error: 'Your institution has used all its classes for this month. Tell your admin so they can add a class pack.' } });
     await login(page, 't2@h.com');
     if (await page.isVisible('#nav-billing')) throw new Error('teacher sees Plan & usage');
     await page.click('#nav-ai');
@@ -180,17 +181,17 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     if (await page.isDisabled('#btn-generate')) throw new Error('generate button stuck');
   });
 
-  await run('Admin: generation blocked → modal with "Buy 2M tokens for USD 11.99" → creates the request', browser, async ({ page, st }) => {
+  await run('Admin: generation blocked → modal with "Ask for Pack 50 classes · USD 25" → creates the request', browser, async ({ page, st }) => {
     seed({ used: 250000, monthly: 250000 });
-    st.ai = () => ({ status: 402, body: { code: 'budget', scope: 'institution', is_admin: true, can_buy: true, error: 'Your institution has used all its AI tokens for this month. Buy a token pack to keep generating.' } });
+    st.ai = () => ({ status: 402, body: { code: 'budget', scope: 'institution', is_admin: true, can_buy: true, error: 'Your institution has used all its classes for this month. Add a class pack to keep generating.' } });
     await login(page, 'madm@h.com');
     await page.click('[data-mode="teacher"]');
     await page.click('#nav-ai');
     await page.fill('#prompt-input', 'Fractions');
     await page.click('#btn-generate');
     await page.waitForSelector('#modal-budget.active [data-bl="buy-now"]');
-    if (!/Buy a token pack/.test(await text(page, '#budget-msg'))) throw new Error('message');
-    if (!/Buy 2M tokens for USD 11\.99/.test((await text(page, '[data-bl="buy-now"]')).replace(/\s+/g, ' '))) throw new Error('label');
+    if (!/Add a class pack/.test(await text(page, '#budget-msg'))) throw new Error('message');
+    if (!/Ask for 50-class pack · USD 25/.test((await text(page, '[data-bl="buy-now"]')).replace(/\s+/g, ' '))) throw new Error('label');
     if (!(await page.isVisible('#budget-explain'))) throw new Error('explanation');
     await page.click('[data-bl="buy-now"]');
     await waitToast(page, /Request sent/);
@@ -251,14 +252,12 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await waitToast(page, /Request rejected/);
     if (bill.requests[1].status !== 'rejected' || (bill.accounts[t.otra.id]?.extra || 0) !== 0) throw new Error('reject');
     await page.waitForFunction(() => /No pending requests/.test(document.getElementById('pf-requests').textContent));
-    // settings
-    await page.fill('#pfs-pack', '3000000'); await page.fill('#pfs-price', '15'); await page.fill('#pfs-currency', 'eur');
-    if (!/Buy 3M tokens for EUR 15\.00/.test((await text(page, '#pfs-preview')).replace(/\s+/g, ' '))) throw new Error('preview: ' + await text(page, '#pfs-preview'));
+    // settings (defaults; the old token-pack fields are sent unchanged — packs now live in the plans)
     await page.fill('#pfs-personal', '300000'); await page.fill('#pfs-seats', '12'); await page.fill('#pfs-monthly', '4000000');
     await page.click('[data-bl="pf-save-settings"]');
     await waitToast(page, /Settings saved/);
     const c = calls.rpc.find(x => x.fn === 'update_platform_settings').body;
-    if (c.p_pack_tokens !== 3000000 || c.p_pack_price !== 15 || c.p_currency !== 'EUR' || c.p_personal_monthly_tokens !== 300000 || c.p_default_seats !== 12 || c.p_default_monthly_tokens !== 4000000) throw new Error('settings payload ' + JSON.stringify(c));
+    if (c.p_pack_tokens !== 2000000 || c.p_pack_price !== 11.99 || c.p_currency !== 'USD' || c.p_personal_monthly_tokens !== 300000 || c.p_default_seats !== 12 || c.p_default_monthly_tokens !== 4000000) throw new Error('settings payload ' + JSON.stringify(c));
     await page.fill('#pfs-seats', '1.5'); await page.click('[data-bl="pf-save-settings"]');
     await waitToast(page, /whole numbers/);
     await page.fill('#pfs-seats', '12');
@@ -325,11 +324,11 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     if ((await text(page, '#nav-billing .sib-tooltip')) !== 'Plan y consumo') throw new Error('tooltip');
     await page.click('#nav-billing');
     await page.waitForSelector('#bl-seats');
-    if (!/Comprar 2M tokens por USD 11,99/.test((await text(page, '[data-bl="buy"]')).replace(/\s+/g, ' '))) throw new Error('buy ES');
+    if (!/Pedir Pack 50 clases · USD 25/.test((await text(page, '.bl-packs')).replace(/\s+/g, ' '))) throw new Error('buy ES: ' + await text(page, '.bl-packs'));
     let u = await untranslated(page, '#panel-billing'); if (u.length) throw new Error('billing sin traducir: ' + JSON.stringify(u));
-    await page.click('[data-bl="buy"]');
+    await page.click('[data-bl="buy"][data-pack="pack_clases_50"]');
     u = await untranslated(page, '#panel-billing'); if (u.length) throw new Error('confirm sin traducir: ' + JSON.stringify(u));
-    await page.evaluate(() => showBudgetModal({ code: 'budget', is_admin: true, can_buy: true, error: 'Your institution has used all its AI tokens for this month. Buy a token pack to keep generating.' }));
+    await page.evaluate(() => showBudgetModal({ code: 'budget', is_admin: true, can_buy: true, error: 'Your institution has used all its classes for this month. Add a class pack to keep generating.' }));
     await page.waitForSelector('#modal-budget.active [data-bl="buy-now"]');
     u = await untranslated(page, '#modal-budget'); if (u.length) throw new Error('modal sin traducir: ' + JSON.stringify(u));
     await page.keyboard.press('Escape');
@@ -342,7 +341,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await page.click('#nav-platform');
     await page.waitForSelector('#pf-settings-card');
     await page.waitForSelector('#pf-billing-banner', { state: 'visible' });
-    for (const sel of ['#pf-billing-banner', '#pf-requests-card', '#pf-settings-card', '#pf-ai-prices-card', '#pf-plans-card']) { u = await untranslated(page, sel); if (u.length) throw new Error(sel + ' sin traducir: ' + JSON.stringify(u)); }
+    for (const sel of ['#pf-billing-banner', '#pf-requests-card', '#pf-settings-card', '#pf-ai-prices-card', '#pf-plans-card', '#pf-leads-card', '#pf-pricing-card', '#pf-individual-card', '#pf-models-card', '#pf-compare-card']) { u = await untranslated(page, sel); if (u.length) throw new Error(sel + ' sin traducir: ' + JSON.stringify(u)); }
   });
 
   console.log(failed ? `${failed} billing scenario(s) FAILED` : 'All billing scenarios passed');

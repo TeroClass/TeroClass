@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Planes de TeroClass</title>
+<meta name="description" content="Planes de TeroClass: prueba gratis, plan Docente y planes para instituciones. Clases listas para dar, adaptadas a tu metodología; los alumnos son gratis.">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/plans.css">
+</head>
+<!-- Public plans page (/planes, /plans): works without signing in. Plans and prices come from get_plans (Supabase, public);
+     texts and logic in /plans.js (shared with the app). No inline scripts (CSP). -->
+<body class="tp-page" data-sb-url="https://ppvqkjchhejjulrdqkdr.supabase.co" data-sb-key="sb_publishable_D4ZATRSmyiURioJ4PvTb4A_rR_urilK">
+<div class="tp-root">
+  <div class="tp-wrap">
+    <nav class="tp-top" aria-label="TeroClass">
+      <a class="tp-brand" href="/"><img src="/favicon-512.png" alt="" width="28" height="28">TeroClass</a>
+      <div class="tp-top-right">
+        <div class="tp-seg" role="group" aria-label="Idioma / Language"><button type="button" data-tp-lang="es" aria-pressed="true">ES</button><button type="button" data-tp-lang="en" aria-pressed="false">EN</button></div>
+        <a id="tp-back" href="/">Ingresar</a>
+      </div>
+    </nav>
+    <main id="tp-root" data-no-i18n><p class="tp-loading">Cargando planes…</p></main>
+  </div>
+</div>
+<script src="/vendor/supabase-js-2.116.0.js"></script>
+<script src="/plans.js"></script>
+</body>
+</html>

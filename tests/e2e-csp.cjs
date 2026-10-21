@@ -145,6 +145,23 @@ function fileFor(p) {
     await page.evaluate(() => TCClassBoard.close());
   });
 
+  await step('Plans (2026-10-21): the in-app plans pop-up and sales form, then /planes under the real headers (files from public/, no inline script)', async () => {
+    await page.evaluate(() => TCPlans.showPopup('plans'));
+    await page.waitForSelector('#tp-overlay:not([hidden]) .tp-card[data-plan="docente"]');
+    await page.click('#tp-overlay .tp-card[data-plan="institucion"] [data-tp="sales"]');
+    await page.waitForSelector('#tp-form');
+    await page.keyboard.press('Escape');
+    const r = await page.goto(base + '/planes');
+    if (!/frame-ancestors 'none'/.test(r.headers()['content-security-policy'] || '')) throw new Error('no CSP on /planes');
+    await page.waitForSelector('.tp-card[data-plan="institucion"]');
+    for (const f of ['/plans.js', '/plans.css', '/plans-admin.js']) if (!seen.served.has(f)) throw new Error(f + ' not served from public/');
+    if (!(await page.evaluate(() => document.fonts.check('600 14px Inter')))) throw new Error('Inter on /planes');
+    await page.click('[data-tp-cur="EUR"]');
+    await page.click('.tp-card[data-plan="docente"] [data-tp="docente"]');
+    await page.waitForSelector('#tp-form');
+    await page.goBack().catch(() => {});
+  });
+
   await step('TC-11 nothing violated the CSP; third-party script origins are blocked', async () => {
     const v = await page.evaluate(() => window.__csp || []);
     const all = [...v, ...seen.violations].filter(x => !/challenges\.cloudflare\.com/.test(x));
