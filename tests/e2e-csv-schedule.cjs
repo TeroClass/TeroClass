@@ -226,7 +226,7 @@ async function openImport(page, csv) {
     const mk = (offMin, dur, title) => { const s = { id: M.uid(), institution_id: t.centro.id, group_id: g.id, series_id: null, teacher_id: t.prof.id, title, starts_at: new Date(Date.now() + offMin * MIN).toISOString(), ends_at: new Date(Date.now() + (offMin + dur) * MIN).toISOString(), timezone: 'America/Montevideo', status: 'scheduled', seq: 0, modified: false, updated_at: new Date().toISOString() }; db.class_sessions.push(s); return s; };
     const later = mk(180, 60, 'Unit 4: routines'); // 3 hours from now: outside the students' window
     const tomorrow = mk(26 * 60, 60, 'Unit 5: food');
-    const lc = () => page.evaluate(() => ({ id: LiveClass.state.sessionId, role: document.querySelector('input[name="lc-role"]:checked')?.value }));
+    const lc = () => page.evaluate(() => ({ id: LiveClass.state.sessionId, role: LiveClass.state.lobby?.role }));
     const backToCalendar = async () => { await page.evaluate(() => { LiveClass.reset(); showPanel('calendar'); }); await page.waitForSelector('#panel-calendar.active #gc-cal-body .gc-week, #panel-calendar.active #gc-cal-body .gc-agenda'); };
     await login(page, 'prof@sol.uy');
     await page.click('#nav-calendar');
@@ -236,7 +236,7 @@ async function openImport(page, csv) {
     if (!/Unit 4: routines/.test(card) || !/Enter room/.test(card) || !/Students can join from 10 min before/.test(card)) throw new Error('next card: ' + card);
     await shot(page, 'x-teacher-next-card', '.gc-nextcard');
     await page.click('.gc-nextcard [data-gc="join"]');
-    await page.waitForSelector('#panel-live.active #lc-name');
+    await page.waitForSelector('#panel-live.active #lc-joinas');
     let r = await lc(); if (r.id !== later.id || r.role !== 'teacher') throw new Error('next card → live: ' + JSON.stringify(r));
     // 2) week view: click the event → detail with "Enter room"
     await backToCalendar();
@@ -252,7 +252,7 @@ async function openImport(page, csv) {
     await page.waitForSelector('#gc-people .gc-people-list');
     await shot(page, 'event-detail', '#gc-modal-box');
     await page.click('#gc-modal-box .gc-join-row [data-gc="join"]');
-    await page.waitForSelector('#panel-live.active #lc-name');
+    await page.waitForSelector('#panel-live.active #lc-joinas');
     r = await lc(); if (r.id !== tomorrow.id || r.role !== 'teacher') throw new Error('detail → live: ' + JSON.stringify(r));
     // 3) agenda list: inline "Enter room" (does not open the detail)
     await backToCalendar();
@@ -260,7 +260,7 @@ async function openImport(page, csv) {
     await page.click('[data-gc="view"][data-v="agenda"]');
     await page.waitForSelector(`.gc-ag-item[data-id="${later.id}"] [data-gc="join"]`);
     await page.click(`.gc-ag-item[data-id="${later.id}"] [data-gc="join"]`);
-    await page.waitForSelector('#panel-live.active #lc-name');
+    await page.waitForSelector('#panel-live.active #lc-joinas');
     r = await lc(); if (r.id !== later.id || r.role !== 'teacher') throw new Error('agenda → live: ' + JSON.stringify(r));
     if (await page.evaluate(() => document.getElementById('modal-gc').classList.contains('active'))) throw new Error('agenda join also opened the detail');
     // Spanish: everything translated on the calendar (card + agenda)
@@ -297,7 +297,7 @@ async function openImport(page, csv) {
     if (!(await page.$('.gs-cal [data-gc="join"]'))) throw new Error('no join in the student calendar list during the window');
     await shot(page, 'student-inside', '.gs-enter');
     await page.click('.gs-enter .gc-join');
-    await page.waitForSelector('#panel-live.active #lc-name');
+    await page.waitForSelector('#panel-live.active #lc-joinas');
     r = await lc(); if (r.id !== later.id || r.role !== 'student') throw new Error('student → live: ' + JSON.stringify(r));
   });
 

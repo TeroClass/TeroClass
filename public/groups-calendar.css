@@ -373,3 +373,13 @@ body.student-mode .btn-invite,body.student-mode .btn-new-class,body.student-mode
   .gc-cons-table td:nth-child(5){grid-column:2;grid-row:2 / span 2;align-self:end;text-align:right;white-space:normal}
   .gc-cons-table td.muted-cell{grid-column:1 / -1}
 }
+
+/* ── 2026-10: plan of a calendar class (P-06), screen-reader-only labels ── */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.gc-plan-row{margin:2px 0 8px}
+.gc-plan-chip{font-size:12px;padding:4px 10px;white-space:normal}
+.gc-plan-sel{max-width:min(320px,100%)}
+/* P-11: "did not accept" is a legitimate choice → neutral, not alarm red */
+.gc-chip.neutral{background:#f1f1f4;color:#4a4a55}
+.gc-cons-stat.declined b{color:#4a4a55}.gc-cons-stat.revoked b{color:#4a4a55}
+.gc-cons-notext{margin:2px 0 8px}

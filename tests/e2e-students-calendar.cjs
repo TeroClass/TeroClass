@@ -195,7 +195,10 @@ async function magicLink(page, email) {
     await page.fill('#gc-st-search', 'eve');
     if ((await page.$$('.gc-stable tbody tr')).length !== 1) throw new Error('search');
     const rm = page.locator('.gc-stable [data-gc="s-remove"]').first();
-    await rm.click(); await rm.click();
+    await rm.click(); // P-14: a dialog says what is lost (attendance and insights in this unit)
+    await page.waitForSelector('#modal-danger.active');
+    if (!/insights/.test(await page.textContent('#dg-list'))) throw new Error('dialog does not say what is lost');
+    await page.click('#dg-ok');
     await waitToast(page, /Student removed/);
     if (db.student_enrollments.some(e => e.email === 'eve@mail.com')) throw new Error('not removed');
     // Spanish: everything translated
@@ -299,9 +302,9 @@ async function magicLink(page, email) {
     // the later class shows "starts in" (disabled)
     await shot(page, 'student-en');
     await join.click();
-    await page.waitForSelector('#panel-live.active #lc-name');
+    await page.waitForSelector('#panel-live.active #lc-joinas');
     if (await page.evaluate(() => LiveClass.state.sessionId) !== c.soon.id) throw new Error('session id not passed to the live class');
-    if (!(await page.isChecked('input[name="lc-role"][value="student"]'))) throw new Error('lobby role is not student');
+    if ((await page.evaluate(() => LiveClass.state.lobby?.role)) !== 'student') throw new Error('lobby role is not student'); // P-09: no role picker, the role comes from the class
     await page.click('[data-lc="back-home"]');
     await page.waitForSelector('#panel-student.active .gs-enter');
     // error toasts with the tero still work

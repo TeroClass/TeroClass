@@ -257,8 +257,7 @@ async function typeIn(page, text, scope = '#cd-overlay') {
     await T.page.click('#nav-calendar');
     await T.page.waitForSelector('.gc-nextcard [data-gc="join"]');
     await T.page.click('.gc-nextcard [data-gc="join"]');
-    await T.page.waitForSelector('#panel-live.active #lc-name');
-    await T.page.fill('#lc-name', 'Laura Gómez');
+    await T.page.waitForSelector('#panel-live.active #lc-joinas');
     await T.page.check('#lc-consent'); // first class room: the single recording consent (asked once)
     await T.page.click('#lc-join');
     await T.page.waitForSelector('#lc-room');

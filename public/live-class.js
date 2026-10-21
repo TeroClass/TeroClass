@@ -34,8 +34,8 @@
     'The original audio is deleted after 30 days; the insights stay in your TeroClass record.',
     'Each person is identified by their own microphone, never by voiceprint. No emotion detection.',
     'You can turn it off at any time from your profile menu (Recording of my classes).',
-    'Under 18: a parent or guardian must agree.'];
-  const DECLINE_MIN = 10;          // characters of the required justification (same rule in the database)
+    'Under 18: a parent or guardian must agree from their own link.'];
+  // P-11 (2026-10): saying no needs NO justification; an optional comment reaches the institution only if written
   const PAUSE_MAX_S = 5 * 60;      // a teacher's pause resumes by itself after 5 minutes
   const V = window.TCInsightsView; // shared insights view (loaded before this file)
   const DEMO_BANNER = V.DEMO_BANNER;
@@ -140,11 +140,19 @@ Cierre y ticket de salida (5 min)
     async connect(o) {
       this.o = o;
       const local = { id: 'local', isLocal: true, name: o.name, role: o.role, mic: !!o.mic, cam: !!o.cam, consent: allConsent(o.recorded), recorded: !!o.recorded, minor: !!o.minor, guardianOk: !!o.guardianOk, hand: false };
+      // P-07 (2026-10): real people never see invented classmates or teachers. Sample participants only when someone
+      // asks for them ("Show sample participants (demo)" on the live-class home, or the owner's View as).
+      if (!o.simulate) {
+        this._list = [local]; this._timers = []; this._speaker = null; this._hold = 0;
+        await new Promise(r => setTimeout(r, 150));
+        this.emit('participants', this._list);
+        return;
+      }
       const others = DEMO_PEOPLE.map((p, i) => ({
         id: 'sim-' + i, name: p.name, role: 'student', mic: p.mic !== false, cam: p.cam !== false, consent: allConsent(p.yes),
         recorded: !!p.yes && (!p.minor || !!p.guardianOk), minor: !!p.minor, guardianOk: !!p.guardianOk, hand: false,
       }));
-      if (o.role !== 'teacher') { others.splice(5); others.unshift({ id: 'sim-t', name: 'Prof. Laura Méndez', role: 'teacher', mic: true, cam: true, consent: allConsent(true), recorded: true, minor: false, guardianOk: false, hand: false }); }
+      if (o.role !== 'teacher') { others.splice(5); others.unshift({ id: 'sim-t', name: o.teacherName || tr('Teacher (sample)'), role: 'teacher', mic: true, cam: true, consent: allConsent(true), recorded: true, minor: false, guardianOk: false, hand: false }); }
       this._list = [local, ...others];
       this._speaker = null; this._hold = 0; this._t0 = Date.now();
       this._timers = [setInterval(() => this._tick(), 900)];
@@ -156,7 +164,7 @@ Cierre y ticket de salida (5 min)
       this.emit('participants', this._list);
     }
     _later(ms, fn) { this._timers.push(setTimeout(fn, ms)); }
-    // Demo: "Prof. Laura Méndez" shares a slide (a canvas stream), so students see a shared screen
+    // Demo (sample participants on): the teacher shares a slide (a canvas stream), so students see a shared screen
     _startSimShare(o) {
       const c = document.createElement('canvas'); c.width = 1280; c.height = 720;
       if (!c.captureStream) return;
@@ -173,7 +181,7 @@ Cierre y ticket de salida (5 min)
       draw();
       this._screenStream = c.captureStream(5);
       this._timers.push(setInterval(draw, 500));
-      this._screens = [{ id: 'sim-t', name: 'Prof. Laura Méndez' }];
+      this._screens = [{ id: 'sim-t', name: o.teacherName || tr('Teacher (sample)') }];
       this.emit('screens', this._screens);
     }
     attachScreen(id, el) { if (id === 'sim-t' && this._screenStream) { el.srcObject = this._screenStream; return true; } return false; }
@@ -385,22 +393,6 @@ Cierre y ticket de salida (5 min)
   const banner = V.banner;
   const demoChip = V.demoChip;
 
-  function demoSessions() {
-    const now = new Date();
-    const at = (d, h, m) => { const x = new Date(now); x.setDate(x.getDate() + d); x.setHours(h, m, 0, 0); return x; };
-    const fmt = d => { try { return d.toLocaleString(typeof uiLocale === 'function' ? uiLocale() : undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch (e) { return d.toISOString(); } };
-    return {
-      upcoming: [
-        { title: 'Making plans: future forms (B1)', group: 'English B1 · Tue/Thu', when: fmt(at(0, now.getHours() + 1, 0)), people: 8, sample: 'language' },
-        { title: 'Reacciones químicas: balanceo de ecuaciones (3°B)', group: 'Química 3°B', when: fmt(at(1, 10, 30)), people: 24, sample: 'chemistry' },
-      ],
-      past: [
-        { title: 'Making plans: future forms (B1)', group: 'English B1 · Tue/Thu', when: fmt(at(-2, 18, 0)), minutes: 45, sample: 'language' },
-        { title: 'Reacciones químicas: balanceo de ecuaciones (3°B)', group: 'Química 3°B', when: fmt(at(-5, 10, 30)), minutes: 50, sample: 'chemistry' },
-      ],
-    };
-  }
-
   function render() {
     const el = root(); if (!el) return;
     el.dataset.view = S.view;
@@ -416,9 +408,31 @@ Cierre y ticket de salida (5 min)
   // ════════════════════════════════════════════════════════════════════════════════════════
   // HOME (sessions list)
   // ════════════════════════════════════════════════════════════════════════════════════════
+  // P-07 (2026-10): the home lists the person's REAL next classes (calendar); invented sessions are gone
+  const HOME = { rows: null, loading: false, seq: 0 };
+  async function loadHomeSessions() {
+    if (HOME.loading || typeof sb === 'undefined' || !currentUser) return;
+    HOME.loading = true; const seq = ++HOME.seq;
+    try {
+      const from = new Date(Date.now() - 2 * 3600e3); const to = new Date(Date.now() + 14 * 864e5);
+      const { data, error } = await sb.rpc('my_calendar', { p_from: from.toISOString(), p_to: to.toISOString() });
+      if (seq !== HOME.seq) return;
+      HOME.rows = error ? [] : (Array.isArray(data) ? data : []).filter(r => r.status !== 'cancelled' && Date.parse(r.ends_at) > Date.now()).slice(0, 6);
+    } catch (e) { HOME.rows = []; } finally { HOME.loading = false; }
+    if (S.view === 'home' && document.getElementById('lc-up-list')) document.getElementById('lc-up-list').innerHTML = upcomingHtml();
+  }
+  function upcomingHtml() {
+    if (HOME.rows === null) return '<li class="lc-hint">Loading…</li>';
+    if (!HOME.rows.length) return '<li class="lc-hint">No classes in the next two weeks. Schedule them in the Calendar.</li>';
+    const fmt = d => { try { return new Date(d).toLocaleString(typeof uiLocale === 'function' ? uiLocale() : undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); } catch (e) { return d; } };
+    return HOME.rows.map(r => `<li class="lc-session">
+      <div class="lc-session-main"><div class="lc-session-title" data-no-i18n>${esc(r.title || r.group_name || '')}</div>
+      <div class="lc-session-meta"><span data-no-i18n>${esc(fmt(r.starts_at))}</span>${r.group_name ? ` · <span data-no-i18n>${esc(r.group_name)}</span>` : ''}${r.planning_title ? ` · <span class="lc-chip">📖 <span data-no-i18n>${esc(r.planning_title)}</span></span>` : ''}</div></div>
+      <button type="button" class="lc-btn" data-lc="open-cal" data-id="${esc(r.id)}">Open in Calendar</button></li>`).join('');
+  }
   function homeHtml() {
     const list = (typeof plannings !== 'undefined' && Array.isArray(plannings)) ? plannings : [];
-    const ds = demoSessions();
+    if (HOME.rows === null) setTimeout(loadHomeSessions, 0);
     const opts = list.map(p => `<option value="${esc(p.id)}" data-no-i18n>${esc(p.title || 'Class')}</option>`).join('');
     return `<div class="lc-wrap">
       ${banner()}
@@ -431,25 +445,21 @@ Cierre y ticket de salida (5 min)
         <h2 id="lc-start-h">Start a live class</h2>
         <div class="lc-start-row">
           <div class="lc-field"><label for="lc-plan-select">Class plan</label>
-            <select id="lc-plan-select"><option value="">Sample plan (no saved class)</option>${opts}</select></div>
+            <select id="lc-plan-select"><option value="">Sample plan (demo)</option>${opts}</select></div>
           <button type="button" class="lc-btn lc-primary" data-lc="start" id="lc-start-btn">▶ Start live class</button>
         </div>
+        <label class="lc-check lc-sim"><input type="checkbox" id="lc-simulate" ${S.simulate ? 'checked' : ''}> <span>Show sample participants (demo, invented names)</span></label>
         ${list.length ? '' : '<p class="lc-hint">Tip: save a class first and it will appear here with its activity timers.</p>'}
       </section>
       <div class="lc-two">
         <section class="lc-card" aria-labelledby="lc-up-h">
-          <h2 id="lc-up-h">Upcoming sessions</h2>
-          <ul class="lc-sessions">${ds.upcoming.map((s, i) => `<li class="lc-session">
-            <div class="lc-session-main"><div class="lc-session-title" data-no-i18n>${esc(s.title)}</div>
-            <div class="lc-session-meta"><span data-no-i18n>${esc(s.when)}</span> · <span data-no-i18n>${esc(s.group)}</span> · <span data-no-i18n>${s.people}</span> <span>participants</span></div></div>
-            <button type="button" class="lc-btn" data-lc="join-upcoming" data-i="${i}">Open lobby</button></li>`).join('')}</ul>
+          <h2 id="lc-up-h">Your next classes</h2>
+          <ul class="lc-sessions" id="lc-up-list">${upcomingHtml()}</ul>
         </section>
         <section class="lc-card" aria-labelledby="lc-past-h">
-          <h2 id="lc-past-h">Past sessions</h2>
-          <ul class="lc-sessions">${ds.past.map((s, i) => `<li class="lc-session">
-            <div class="lc-session-main"><div class="lc-session-title" data-no-i18n>${esc(s.title)}</div>
-            <div class="lc-session-meta"><span data-no-i18n>${esc(s.when)}</span> · <span data-no-i18n>${s.minutes} min</span> · <span class="lc-chip lc-chip-ok">Insights ready</span></div></div>
-            <button type="button" class="lc-btn" data-lc="past-insights" data-i="${i}">View insights</button></li>`).join('')}</ul>
+          <h2 id="lc-past-h">Past classes</h2>
+          <p class="lc-hint">The insights of the classes you taught are in Insights.</p>
+          <button type="button" class="lc-btn" data-lc="open-insights">💡 <span>Open Insights</span></button>
         </section>
       </div>
       <section class="lc-card lc-how" aria-labelledby="lc-how-h">
@@ -483,8 +493,8 @@ Cierre y ticket de salida (5 min)
       declineOpen: false,
     };
   }
-  const guardianOk = G => !!(G.guardian.name.trim() && EMAIL_RE.test(G.guardian.email.trim()) && G.guardian.consent);
-  const willBeRecorded = L => L.cstate === 'granted' ? L.recorded : (L.cstate === 'ask' && L.agree && (!L.minor || guardianOk(L)) && !inViewAs());
+  // P-10: a minor is recorded only after the guardian confirms from their own link, never right away
+  const willBeRecorded = L => L.cstate === 'granted' ? L.recorded : (L.cstate === 'ask' && L.agree && !L.minor && !inViewAs());
   const inViewAs = () => typeof viewAs !== 'undefined' && !!viewAs;
 
   function consentSummaryHtml(L) {
@@ -518,11 +528,42 @@ Cierre y ticket de salida (5 min)
     return p;
   }
   async function grantConsent(G) {
+    // P-10: a minor's "yes" waits for the guardian, who confirms from their own link (never a box the minor ticks)
     const d = await rpcJson('grant_recording_consent', { p_version: CONSENT_VERSION, p_minor: !!G.minor,
       p_guardian_name: G.minor ? G.guardian.name.trim() : null, p_guardian_email: G.minor ? G.guardian.email.trim() : null,
-      p_guardian_consent: !!(G.minor && G.guardian.consent) });
-    CS.data = d; CS.uid = currentUser?.id; return d;
+      p_guardian_consent: false });
+    CS.data = d; CS.uid = currentUser?.id;
+    if (G.minor && d && d.guardian_token) sendGuardianEmail();
+    return d;
   }
+  // ── P-10: the guardian's link (and an e-mail to the guardian when a provider exists) ──
+  const guardianLink = d => (d && d.guardian_token ? `${location.origin}/tutor?t=${d.guardian_token}` : '');
+  const guardianPending = d => !!(d && d.minor && d.guardian_status && d.guardian_status !== 'confirmed');
+  async function sendGuardianEmail() {
+    try {
+      const cfg = typeof loadAppConfig === 'function' ? await loadAppConfig() : null;
+      if (!cfg || !cfg.email) return false;
+      const { data: { session } = {} } = await sb.auth.getSession();
+      const r = await fetch('/api/notify/guardian', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (session?.access_token || '') },
+        body: JSON.stringify({ lang: typeof uiLang !== 'undefined' && uiLang === 'en' ? 'en' : 'es' }) });
+      const j = await r.json().catch(() => ({})); return !!(j && j.sent);
+    } catch (e) { return false; }
+  }
+  function guardianPendingHtml(d, P) {
+    const link = guardianLink(d);
+    const msg = tr('Hi! To have my classes on TeroClass recorded (audio only), I need you to confirm here:') + ' ' + link;
+    return `<div class="lc-guardian-wait" id="${P}guardian-wait" role="status">
+        <p><span aria-hidden="true">👪</span> <b>${esc(tr(d.guardian_status === 'declined' ? 'Your guardian did not agree: your classes are not recorded.' : 'Waiting for your guardian to confirm.'))}</b></p>
+        <p class="lc-fine">${esc(tr('Until they confirm from their link, you join your classes without being recorded. Send them this link:'))}</p>
+        ${link ? `<div class="lc-share-row"><input type="text" readonly id="${P}guardian-link" value="${esc(link)}" data-no-i18n aria-label="${esc(tr('Link for your guardian'))}">
+          <button type="button" class="lc-btn lc-sm" data-gl="copy" data-link="${esc(link)}">📋 <span>Copy</span></button>
+          <a class="lc-btn lc-sm" href="https://wa.me/?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">WhatsApp</a></div>` : ''}
+      </div>`;
+  }
+  document.addEventListener('click', e => {
+    const b = e.target.closest && e.target.closest('[data-gl="copy"]'); if (!b) return;
+    (navigator.clipboard ? navigator.clipboard.writeText(b.dataset.link) : Promise.reject()).then(() => toast('✓ Copied!', 'ok'), () => toast('Could not copy. Select the text and copy it manually (Ctrl+C / Cmd+C).', 'err'));
+  });
   async function revokeConsent() { const d = await rpcJson('revoke_recording_consent'); CS.data = d; CS.uid = currentUser?.id; return d; }
   async function declineConsent(sessionId, reason) {
     const d = await rpcJson('decline_recording_consent', { p_session: sessionId || null, p_reason: reason });
@@ -543,14 +584,14 @@ Cierre y ticket de salida (5 min)
       <details class="lc-more"><summary>More information</summary><ul>${CONSENT_MORE.map(t => `<li>${esc(t)}</li>`).join('')}</ul></details>
       <label class="lc-check lc-minor"><input type="checkbox" id="${P}minor" ${G.minor ? 'checked' : ''} ${ro ? 'disabled' : ''}> <span><b>I'm under 18</b></span></label>
       <div class="lc-guardian" id="${P}guardian" ${G.minor ? '' : 'hidden'}>
-        <p class="lc-guardian-note"><span aria-hidden="true">👪</span> <span>A parent or guardian must agree for participants under 18.</span></p>
+        <p class="lc-guardian-note"><span aria-hidden="true">👪</span> <span>A parent or guardian must agree for participants under 18. They confirm from their own link: until then you join without being recorded.</span></p>
         <div class="lc-field"><label for="${P}g-name">Guardian's full name</label><input id="${P}g-name" type="text" maxlength="120" autocomplete="off" value="${esc(G.guardian.name)}" ${ro ? 'disabled' : ''}></div>
         <div class="lc-field"><label for="${P}g-email">Guardian's email</label><input id="${P}g-email" type="email" maxlength="254" autocomplete="off" value="${esc(G.guardian.email)}" ${ro ? 'disabled' : ''}></div>
-        <label class="lc-check"><input type="checkbox" id="${P}g-consent" ${G.guardian.consent ? 'checked' : ''} ${ro ? 'disabled' : ''}> <span>I am the parent or guardian and I agree to the above.</span></label>
       </div>`;
   }
   function consentBlockHtml(L) {
     if (L.cstate === 'loading') return '<p class="lc-hint" id="lc-consent-loading">Checking your recording consent…</p>';
+    if (L.cstate === 'granted' && guardianPending(CS.data)) return guardianPendingHtml(CS.data, 'lc-');
     if (L.cstate === 'granted') return `<div class="lc-consent-ok" id="lc-consent-ok"><span aria-hidden="true">✓</span> <span>You already agreed: your classes are recorded (audio only). We won't ask you again.</span></div>
       <p class="lc-fine">You can turn it off at any time from your profile menu (Recording of my classes).</p>`;
     const ro = inViewAs();
@@ -576,16 +617,16 @@ Cierre y ticket de salida (5 min)
     // a native modal <dialog> (top layer: above the app's top bar, focus kept inside, the rest inert)
     return `<dialog class="lc-dialog" id="lc-decline-modal" aria-labelledby="lc-decline-h" aria-describedby="lc-decline-p">
       <div class="lc-modal">
-        <h2 id="lc-decline-h">Explain your answer</h2>
-        <p id="lc-decline-p">Tell us why you don't want your classes to be recorded. Your answer goes to your institution.</p>
+        <h2 id="lc-decline-h">No problem</h2>
         <p class="lc-decline-ok"><span aria-hidden="true">✓</span> <span>You can still join the class without being recorded.</span></p>
-        <div class="lc-field"><label for="lc-decline-text">Your reason (required)</label>
-          <textarea id="lc-decline-text" rows="4" maxlength="1000" required aria-required="true" aria-describedby="lc-decline-min"></textarea>
-          <span class="lc-fine" id="lc-decline-min">At least 10 characters.</span></div>
+        <p id="lc-decline-p">If you want, tell us why (optional). Your answer goes to your institution.</p>
+        <div class="lc-field"><label for="lc-decline-text">Your comment (optional)</label>
+          <textarea id="lc-decline-text" rows="3" maxlength="1000" aria-describedby="lc-decline-min"></textarea>
+          <span class="lc-fine" id="lc-decline-min">You can leave it empty.</span></div>
         <div class="lc-error" id="lc-decline-err" role="alert"></div>
         <div class="lc-modal-actions">
           <button type="button" class="lc-btn" data-lc="decline-back" id="lc-decline-back">← Back</button>
-          <button type="button" class="lc-btn lc-primary" data-lc="decline-send" id="lc-decline-send" disabled>Send and join without recording</button>
+          <button type="button" class="lc-btn lc-primary" data-lc="decline-send" id="lc-decline-send">Join without recording</button>
         </div>
       </div>
     </dialog>`;
@@ -606,21 +647,17 @@ Cierre y ticket de salida (5 min)
     try { (focusCheckbox ? document.getElementById('lc-consent') : L.lastFocus)?.focus(); } catch (e) { /* ignore */ }
   }
   function syncDeclineUi() {
-    const ta = document.getElementById('lc-decline-text'); const b = document.getElementById('lc-decline-send');
-    const ok = !!ta && ta.value.trim().length >= DECLINE_MIN;
-    if (b) b.disabled = !ok;
-    document.getElementById('lc-decline-min')?.classList.toggle('ok', ok);
+    const b = document.getElementById('lc-decline-send'); if (b) b.disabled = false; // the comment is optional (P-11)
   }
   async function sendDecline(btn) {
     const L = S.lobby; const ta = document.getElementById('lc-decline-text'); if (!L || !ta) return;
     const text = ta.value.trim();
     const err = document.getElementById('lc-decline-err');
-    if (text.length < DECLINE_MIN) { if (err) err.textContent = tr('Please write at least 10 characters.'); ta.focus(); return; }
-    if (btn) { btn.disabled = true; btn.textContent = tr('Sending…'); }
+    if (btn) { btn.disabled = true; btn.textContent = tr('Joining…'); }
     try { await declineConsent(S.sessionId, text); }
     catch (e) {
       const m = String(e?.message || '');
-      if (/mínimo 10|Ya diste/.test(m)) { if (err) err.textContent = dbMsg(e); if (btn) { btn.disabled = false; btn.textContent = tr('Send and join without recording'); } return; }
+      if (/Ya diste/.test(m)) { if (err) err.textContent = dbMsg(e); if (btn) { btn.disabled = false; btn.textContent = tr('Join without recording'); } return; }
       console.warn('consent decline not saved', e); toast('Your answer could not be saved. You join without being recorded.', 'err');
     }
     if (S.lobby !== L) return;
@@ -655,11 +692,8 @@ Cierre y ticket de salida (5 min)
         </section>
         <section class="lc-card" aria-labelledby="lc-you-h">
           <h2 id="lc-you-h">About you</h2>
-          <div class="lc-field"><label for="lc-name">Your name</label><input id="lc-name" type="text" maxlength="80" autocomplete="name" value="${esc(L.name)}"></div>
-          <fieldset class="lc-field lc-roles"><legend>Joining as</legend>
-            <label class="lc-radio"><input type="radio" name="lc-role" value="teacher" ${L.role === 'teacher' ? 'checked' : ''}> <span>Teacher</span></label>
-            <label class="lc-radio"><input type="radio" name="lc-role" value="student" ${L.role === 'student' ? 'checked' : ''}> <span>Student</span></label>
-          </fieldset>
+          <!-- P-09 / TC-27: the role and the name come from your account and this class (decided by the server), never chosen here -->
+          <p class="lc-joinas" id="lc-joinas"><span>You join as</span> <b data-no-i18n id="lc-name-show">${esc(L.name || '')}</b> · <span class="lc-chip">${L.role === 'teacher' ? 'Teacher' : 'Student'}</span></p>
           <h2 id="lc-consent-h">Recording and privacy</h2>
           <div class="lc-consent-box" id="lc-consent-box">${consentBlockHtml(L)}</div>
           <div class="lc-consent-summary" id="lc-consent-summary" aria-live="polite">${consentSummaryHtml(L)}</div>
@@ -775,7 +809,7 @@ Cierre y ticket de salida (5 min)
     if (!G.minor) return null;
     if (!G.guardian.name.trim()) return { msg: "Please write the guardian's name.", focus: P + 'g-name' };
     if (!EMAIL_RE.test(G.guardian.email.trim())) return { msg: 'Please write a valid guardian email.', focus: P + 'g-email' };
-    if (!G.guardian.consent) return { msg: 'The guardian must confirm the consent.', focus: P + 'g-consent' };
+    if (currentUser && String(currentUser.email || '').toLowerCase() === G.guardian.email.trim().toLowerCase()) return { msg: "The guardian's email must be different from yours.", focus: P + 'g-email' };
     return null;
   }
   function setLobbyError(msg) {
@@ -785,8 +819,7 @@ Cierre y ticket de salida (5 min)
 
   async function joinFromLobby() {
     const L = S.lobby;
-    L.name = (document.getElementById('lc-name')?.value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-    if (!L.name) { setLobbyError('Please write your name.'); document.getElementById('lc-name')?.focus(); return; }
+    L.name = String(L.name || (currentUser && (currentUser.name || String(currentUser.email || '').split('@')[0])) || tr('Participant')).replace(/\s+/g, ' ').trim().slice(0, 80);
     if (L.cstate === 'loading') { setLobbyError('Checking your recording consent…'); return; }
     if (L.cstate === 'ask' && !inViewAs()) {
       if (!L.agree) { setLobbyError(''); openDecline(); return; }   // a "no" needs a justification first
@@ -797,6 +830,8 @@ Cierre y ticket de salida (5 min)
         if (S.lobby !== L) return;
         if (!consentOk(d)) throw new Error('Could not save your consent.');
         L.cstate = 'granted'; L.recorded = !!d.recorded; L.guardianOkDb = !!d.guardian_consent;
+        // P-10: a minor stays in the lobby once, to see / send the guardian's link; the next click joins (not recorded)
+        if (guardianPending(d)) { renderConsentBlock(); setLobbyError(''); toast('Saved. Send the link to your guardian; you can join now without being recorded.', 'ok'); return; }
       } catch (e) { setLobbyError(dbMsg(e) || 'Could not save your consent.'); return; }
     }
     if (inViewAs()) L.recorded = false;
@@ -816,7 +851,9 @@ Cierre y ticket de salida (5 min)
   async function enterRoom() {
     const L = S.lobby;
     let kind = await detectProviderKind();
-    const planText = (S.planning && S.planning.content) || (S.sampleKey === 'chemistry' ? SAMPLE_PLAN_ES : SAMPLE_PLAN_EN);
+    // P-06: the plan attached to this calendar class; a calendar class without a plan shows none (no invented sample);
+    // only the free "Start live class" with "Sample plan (demo)" uses a sample
+    const planText = (S.planning && S.planning.content) || (S.sessionId ? (S.sessionTitle || '') : (S.sampleKey === 'chemistry' ? SAMPLE_PLAN_ES : SAMPLE_PLAN_EN));
     const plan = parsePlanSections(planText, parseInt(S.planning?.params?.duration, 10) || 45);
     plan.sections.forEach(s => { s.elapsed = 0; });
     // consent from the database (lobby): the LiveKit token reads it there too, never from this browser
@@ -839,6 +876,7 @@ Cierre y ticket de salida (5 min)
     const connectOpts = provider => ({
       room: R.roomName, name: R.name, role: R.role, recorded, minor: R.minor, guardianOk: R.guardianOk,
       localStream: R.stream, mic: R.mic, cam: R.cam, provider, title: S.sessionTitle,
+      simulate: !!S.simulate || inViewAs(), teacherName: S.teacherName || '',
     });
     let provider = createProvider(kind);
     wireProvider(provider, R);
@@ -905,7 +943,7 @@ Cierre y ticket de salida (5 min)
     return `<div class="lc-room${R.side ? ' side-open' : ''}" id="lc-room">
       <div class="lc-room-top">
         <div class="lc-room-title">${demoChip()} <b data-no-i18n>${esc(S.sessionTitle)}</b> <span class="lc-chip" id="lc-provider-chip">${R.kind === 'livekit' ? 'LiveKit' : 'Simulated participants'}</span></div>
-        <div class="lc-rec" id="lc-rec" data-state="${esc(R.rec.state)}" role="status"><span class="lc-rec-dot" aria-hidden="true"></span><span class="lc-rec-label" aria-live="polite">Recording — only people who gave consent</span><span class="lc-rec-time" data-no-i18n id="lc-rec-time"></span><span class="lc-rec-me" id="lc-rec-me"${R.recorded ? ' hidden' : ''}>You: not recorded</span></div>
+        <div class="lc-rec" id="lc-rec" data-state="${esc(R.rec.state)}" role="status"><span class="lc-rec-dot" aria-hidden="true"></span><span class="lc-rec-label" aria-live="polite">Recording — only people who gave consent</span><span class="lc-rec-time" data-no-i18n id="lc-rec-time"></span><span class="lc-rec-me" id="lc-rec-me"${R.recorded ? ' hidden' : ''}>You: not recorded</span>${R.kind === 'demo' ? '<span class="lc-rec-demo" title="' + esc(tr('The recorder is not connected yet: nothing is saved.')) + '">Preview: nothing is recorded yet</span>' : ''}</div>
         <div class="lc-talk" id="lc-talk" role="group" aria-label="${esc(tr('Talk time'))}">
           <span class="lc-talk-lb">Teacher</span> <b data-no-i18n id="lc-talk-t">0%</b>
           <div class="lc-talk-bar" aria-hidden="true"><span id="lc-talk-bar-t"></span></div>
@@ -1047,7 +1085,7 @@ Cierre y ticket de salida (5 min)
       <div class="lc-plan-head">
         <div class="lc-plan-title" data-no-i18n>${esc(P.title || S.sessionTitle)}</div>
         <div class="lc-plan-total"><span>Planned</span> <b data-no-i18n>${total} min</b> · <span>Activities</span> <b data-no-i18n>${P.sections.length}</b></div>
-        ${S.planning ? '' : '<div class="lc-hint">Sample plan — open a saved class to see yours here.</div>'}
+        ${S.planning ? '' : S.sessionId ? '<div class="lc-hint" id="lc-plan-none">No plan attached to this class. Attach a saved class from this class in the Calendar.</div>' : '<div class="lc-hint">Sample plan — open a saved class to see yours here.</div>'}
       </div>
       ${P.intro ? `<details class="lc-plan-intro"><summary>Objectives and notes</summary><div class="cls-doc lc-plan-doc">${formatDoc('\n' + P.intro)}</div></details>` : ''}
       <ol class="lc-secs">${P.sections.map((s, i) => `<li class="lc-sec" id="lc-sec-${i}">
@@ -1259,7 +1297,7 @@ Cierre y ticket de salida (5 min)
     const I = S.insights;
     try {
       if (typeof viewAs !== 'undefined' && viewAs) throw new Error('view as');
-      const payload = V.buildDemoPayload({ key: S.sampleKey, title: sess.title, group: sess.group });
+      const payload = V.buildDemoPayload({ key: S.planning ? null : S.sampleKey, title: sess.title, group: sess.group, plan: (S.planning && S.planning.content) || '' });
       const { error } = await sb.rpc('generate_demo_insights', { p_session: sess.id, p_payload: payload });
       if (error) throw error;
       I.saved = { id: sess.id };
@@ -1414,6 +1452,7 @@ Cierre y ticket de salida (5 min)
     // role in THIS class (calendar row): a teacher enrolled in someone else's group joins as a student
     S.sessionRole = sess && (sess.role === 'teacher' || sess.role === 'student') ? sess.role : null;
     S.sessionGroup = (sess && sess.group) || '';
+    S.teacherName = (sess && sess.teacher) || '';
     S.sampleKey = pickSampleKey(p || { title: [(sess && sess.title) || '', S.sessionGroup].join(' '), params: {} });
     S.sessionTitle = (sess && sess.title) || 'Live class';
     if (typeof showPanel === 'function') showPanel('live');
@@ -1448,21 +1487,13 @@ Cierre y ticket de salida (5 min)
         const id = document.getElementById('lc-plan-select')?.value || '';
         const p = id && Array.isArray(plannings) ? plannings.find(x => String(x.id) === id) : null;
         S.planning = p ? { id: p.id, title: p.title, content: p.content, params: p.params || {} } : null;
-        S.sessionId = null;
+        S.sessionId = null; S.sessionRole = null; S.teacherName = '';
         S.sampleKey = p ? pickSampleKey(p) : 'language';
         S.sessionTitle = p ? (p.title || 'Live class') : SAMPLES.language.title;
         goLobby(); break;
       }
-      case 'join-upcoming': {
-        const s = demoSessions().upcoming[i]; if (!s) break;
-        S.planning = null; S.sessionId = null; S.sampleKey = s.sample; S.sessionTitle = s.title; goLobby(); break;
-      }
-      case 'past-insights': {
-        const s = demoSessions().past[i]; if (!s) break;
-        S.sampleKey = s.sample; S.sessionTitle = s.title;
-        S.insights = { tab: 'student', student: 0, sub: 'overview', role: 'teacher', live: null };
-        S.view = 'insights'; render(); break;
-      }
+      case 'open-cal': if (window.GC?.openSession) window.GC.openSession(el.dataset.id); else if (typeof showPanel === 'function') showPanel('calendar'); break;
+      case 'open-insights': if (typeof showPanel === 'function') showPanel('insights'); break;
       case 'back-home':
         teardownLobby(); S.lobby = null; S.view = 'home';
         if (studentBack()) { window.GC.backFromLive(); break; } // students: back to their dashboard
@@ -1535,14 +1566,13 @@ Cierre y ticket de salida (5 min)
   }
   function onChange(e) {
     const t = e.target; if (!root()?.contains(t)) return;
+    if (t.id === 'lc-simulate') { S.simulate = !!t.checked; return; }
     const L = S.lobby;
     if (L) {
       if (t.id === 'lc-cam-select') { L.camId = t.value; startPreview(); return; }
       if (t.id === 'lc-mic-select') { L.micId = t.value; startPreview(); return; }
-      if (t.name === 'lc-role') { L.role = t.value === 'student' ? 'student' : 'teacher'; return; }
       if (t.id === 'lc-consent') L.agree = t.checked;
       if (t.id === 'lc-minor') L.minor = t.checked;
-      if (t.id === 'lc-g-consent') L.guardian.consent = t.checked;
       if (L.error) setLobbyError('');
       syncConsentUi();
     }
@@ -1637,7 +1667,12 @@ Cierre y ticket de salida (5 min)
     if (typeof closeUserMenu === 'function') closeUserMenu();
     if (inViewAs()) { if (typeof vaBlocked === 'function') vaBlocked(); return; }
     const d = await loadConsent(true);
-    if (consentOk(d)) {
+    if (consentOk(d) && guardianPending(d)) {
+      profileModal(`<h2 id="lc-pm-h">Recording of my classes</h2>
+        ${guardianPendingHtml(d, 'lc-p-')}
+        <div class="lc-error" id="lc-pm-err" role="alert"></div>
+        <div class="lc-modal-actions"><button type="button" class="lc-btn" data-pm="cancel">Close</button><button type="button" class="lc-btn lc-danger" data-pm="revoke" id="lc-pm-revoke">Turn off recording</button></div>`);
+    } else if (consentOk(d)) {
       profileModal(`<h2 id="lc-pm-h">Turn off the recording of your classes?</h2>
         <p>From now on your classes are not recorded and you don't get new insights from them. We'll ask you again at your next class.</p>
         <div class="lc-error" id="lc-pm-err" role="alert"></div>
@@ -1668,7 +1703,8 @@ Cierre y ticket de salida (5 min)
       if (!G.agree) { setErr('Check the box to turn on recording.'); document.getElementById('lc-p-consent')?.focus(); return; }
       const ge = guardianError(G, 'lc-p-'); if (ge) { setErr(ge.msg); document.getElementById(ge.focus)?.focus(); return; }
       b.disabled = true;
-      try { const d = await grantConsent(G); if (!consentOk(d)) throw new Error('Could not save your consent.'); closeProfileModal(); toast('Recording turned on ✓', 'ok'); }
+      try { const d = await grantConsent(G); if (!consentOk(d)) throw new Error('Could not save your consent.'); closeProfileModal();
+        if (guardianPending(d)) { openConsentSettings(); toast('Saved. Your classes are recorded once your guardian confirms.', 'ok'); } else toast('Recording turned on ✓', 'ok'); }
       catch (x) { setErr(dbMsg(x)); b.disabled = false; }
       refreshProfileConsent();
     }
@@ -1679,7 +1715,6 @@ Cierre y ticket de salida (5 min)
     if (t.id === 'lc-p-minor') { G.minor = t.checked; const g = document.getElementById('lc-p-guardian'); if (g) g.hidden = !G.minor; }
     if (t.id === 'lc-p-g-name') G.guardian.name = t.value;
     if (t.id === 'lc-p-g-email') G.guardian.email = t.value;
-    if (t.id === 'lc-p-g-consent') G.guardian.consent = t.checked;
     const err = document.getElementById('lc-pm-err'); if (err && e.type === 'change') err.textContent = '';
   }
 
@@ -1788,7 +1823,23 @@ Cierre y ticket de salida (5 min)
     [CONSENT_MORE[2]]: 'El audio original se borra a los 30 días; los insights quedan en tu registro de TeroClass.',
     [CONSENT_MORE[3]]: 'Cada persona se identifica por su propio micrófono, nunca por huella de voz. Sin detección de emociones.',
     [CONSENT_MORE[4]]: 'Lo podés desactivar cuando quieras desde el menú de tu perfil (Grabación de mis clases).',
-    [CONSENT_MORE[5]]: 'Menores de 18: tiene que aceptar su madre, padre o tutor/a.',
+    [CONSENT_MORE[5]]: 'Menores de 18: tiene que aceptar su madre, padre o tutor/a desde su propio link.',
+    'A parent or guardian must agree for participants under 18. They confirm from their own link: until then you join without being recorded.': 'Para menores de 18, tiene que aceptar su madre, padre o tutor/a. Confirma desde su propio link: hasta entonces entrás sin que te graben.',
+    'Waiting for your guardian to confirm.': 'Esperando la confirmación de tu tutor/a.', 'Your guardian did not agree: your classes are not recorded.': 'Tu tutor/a no aceptó: tus clases no se graban.',
+    'Until they confirm from their link, you join your classes without being recorded. Send them this link:': 'Hasta que confirme desde su link, entrás a tus clases sin que te graben. Mandale este link:',
+    'Link for your guardian': 'Link para tu tutor/a', 'Copy': 'Copiar', 'WhatsApp': 'WhatsApp',
+    'Hi! To have my classes on TeroClass recorded (audio only), I need you to confirm here:': 'Hola: para que se graben mis clases en TeroClass (solo audio), necesito que lo confirmes acá:',
+    'Saved. Send the link to your guardian; you can join now without being recorded.': 'Listo. Mandale el link a tu tutor/a; podés entrar ahora sin que te graben.',
+    'Saved. Your classes are recorded once your guardian confirms.': 'Listo. Tus clases se van a grabar cuando tu tutor/a confirme.',
+    "The guardian's email must be different from yours.": 'El email del tutor/a tiene que ser distinto del tuyo.',
+    'No problem': 'Está bien', 'If you want, tell us why (optional). Your answer goes to your institution.': 'Si querés, contanos por qué (opcional). Tu respuesta le llega a la institución.',
+    'Your comment (optional)': 'Tu comentario (opcional)', 'You can leave it empty.': 'Lo podés dejar vacío.', 'Join without recording': 'Entrar sin que me graben', 'Joining…': 'Entrando…',
+    'You join as': 'Entrás como', 'Preview: nothing is recorded yet': 'Vista previa: todavía no se graba nada', 'The recorder is not connected yet: nothing is saved.': 'El grabador todavía no está conectado: no se guarda nada.',
+    'Show sample participants (demo, invented names)': 'Mostrar participantes de ejemplo (demo, nombres inventados)', 'Sample plan (demo)': 'Plan de ejemplo (demo)',
+    'Your next classes': 'Tus próximas clases', 'Past classes': 'Clases pasadas', 'The insights of the classes you taught are in Insights.': 'Los insights de las clases que diste están en Insights.',
+    'Open Insights': 'Abrir Insights', 'Open in Calendar': 'Abrir en el Calendario', 'No classes in the next two weeks. Schedule them in the Calendar.': 'No tenés clases en las próximas dos semanas. Programalas en el Calendario.',
+    'No plan attached to this class. Attach a saved class from this class in the Calendar.': 'Esta clase no tiene un plan adjunto. Adjuntá una clase guardada desde esta clase en el Calendario.',
+    'Teacher (sample)': 'Docente (ejemplo)', 'Participant': 'Participante',
     'A parent or guardian must agree for participants under 18.': 'Para menores de 18, tiene que aceptar su madre, padre o tutor/a.',
     'I am the parent or guardian and I agree to the above.': 'Soy la madre, el padre o tutor/a y acepto lo de arriba.',
     "We ask only once. If you don't agree, you can still join the class without being recorded.": 'Te lo preguntamos una sola vez. Si no aceptás, podés entrar igual a la clase sin que te graben.',
@@ -1824,7 +1875,7 @@ Cierre y ticket de salida (5 min)
     'Recording turned on ✓': 'Grabación activada ✓', 'Check the box to turn on recording.': 'Marcá la casilla para activar la grabación.',
   });
   if (typeof DB_ERRORS !== 'undefined') DB_ERRORS.unshift(
-    [/La justificación es obligatoria \(mínimo 10 caracteres\)/, 'Please write at least 10 characters.'],
+    [/Menores de 18: el email del tutor\/a tiene que ser distinto del tuyo/, "The guardian's email must be different from yours."],
     [/Ya diste tu consentimiento/, 'You already agreed to the recording.'],
     [/El texto del consentimiento cambió: recargá la página/, 'The consent text changed: please reload the page.'],
     [/Menores de 18: falta el nombre del tutor\/a/, "Please write the guardian's name."],

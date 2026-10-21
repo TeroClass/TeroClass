@@ -3780,8 +3780,13 @@ function hierTwoClick(key,btn,label,confirmLabel){
 function hierClearConfirm(key){clearTimeout(hierConfirm[key]);delete hierConfirm[key];}
 async function hierDeleteUnit(id,btn){
   if(vaBlocked())return;
-  if(!hierTwoClick('del:'+id,btn,'Delete','Click again to delete'))return;
-  hierClearConfirm('del:'+id);btn.disabled=true;
+  // P-14: a dialog that names what is lost and asks to type the unit's name (the database only deletes EMPTY units)
+  const o=orgsCache[id];
+  const ok=await confirmDanger({title:'Delete this unit?',body:'This cannot be undone. To confirm, type the name of the unit.',
+    items:['Its branding, AI settings, playbooks and learning-approach bars','Its invitations','Only an empty unit can be deleted: first move or remove its people, groups and sub-units'],
+    typeWord:o?.name||'',confirmText:'Delete unit'});
+  if(!ok)return;
+  btn.disabled=true;
   const {error}=await sb.rpc('delete_institution',{p_inst:id});
   if(error){btn.disabled=false;showToast('Error: '+error.message,'err');return;}
   if(currentOrgId===id)currentOrgId=currentUser?.orgId||null;
@@ -5180,6 +5185,9 @@ const I18N_ES_FIX={
 'Open join by link?':'¿Abrir el registro por link?','Anyone who gets the link can create an account and join as a teacher of this unit.':'Cualquiera que tenga el link puede crear una cuenta y sumarse como docente de esta unidad.',
 'Each person uses a seat of your plan':'Cada persona ocupa un asiento de tu plan',"They can see this unit's AI settings and playbooks":'Ve los ajustes de IA y los playbooks de esta unidad','You can turn it off at any time':'Lo podés apagar cuando quieras',
 'Turn on':'Encender','Join by link is on.':'El registro por link está encendido.','Join by link is off: only invited people can join.':'El registro por link está apagado: solo se suman las personas invitadas.',
+'Delete this unit?':'¿Borrar esta unidad?','This cannot be undone. To confirm, type the name of the unit.':'No se puede deshacer. Para confirmar, escribí el nombre de la unidad.',
+'Its branding, AI settings, playbooks and learning-approach bars':'Su marca, ajustes de IA, playbooks y barras de enfoque','Its invitations':'Sus invitaciones',
+'Only an empty unit can be deleted: first move or remove its people, groups and sub-units':'Solo se puede borrar una unidad vacía: primero mové o quitá a sus personas, grupos y sub-unidades','Delete unit':'Borrar unidad',
 'Who can join (invitations or a link) is set in':'Quién se puede sumar (invitaciones o link) se define en','Dashboard → Join by link':'Panel → Registro por link',
 // staging badge (P-21)
 'Test version':'Versión de prueba',

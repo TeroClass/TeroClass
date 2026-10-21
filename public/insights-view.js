@@ -665,10 +665,91 @@
   ];
   const scrub = v => (typeof v === 'string' ? NAME_SCRUB.reduce((t, [re, r]) => t.replace(re, r), v)
     : Array.isArray(v) ? v.map(scrub) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrub(x)])) : v);
-  // {key?, title, group} → payload. key defaults to the sample that fits the title / group name.
+  // ── P-08 (2026-10): demo insights that match THE class ──
+  // The fixed samples are a chemistry class and an English class. A class about photosynthesis must not get a report about
+  // balancing equations, so: the chemistry / English samples are used only when the class really is chemistry / a
+  // language; any other class gets a GENERIC sample built from its own plan (title, objectives, sections, key concepts)
+  // or, without a plan, from its title — every text says it is an example.
+  function samplesFit(text) {
+    const t = String(text || '');
+    if (/qu[ií]mic|chem|reacci[oó]n(es)? qu[ií]mic|estequiom|balanceo/i.test(t)) return 'chemistry';
+    if (/\b(english|ingl[eé]s|french|franc[eé]s|portugu[eé]s|portuguese|italian|italiano|german|alem[aá]n|esl|efl|ele)\b|\b[ABC][12]\b/i.test(t)) return 'language';
+    return null;
+  }
+  // a saved class (teacher guide) → {title, objectives[], sections[{title, minutes, bullets[]}], concepts[{word, def}]}
+  function planOutline(text) {
+    const lines = String(text || '').replace(/\r/g, '').split('\n').map(l => l.trim());
+    const out = { title: (lines[0] || '').replace(/^(semana|week)\s*\S+\s*-\s*(clase|class)\s*\S+\s*-\s*/i, ''), objectives: [], sections: [], concepts: [] };
+    let mode = ''; let cur = null;
+    const MIN = /(\d{1,3})\s*(?:min(?:utos?|utes?|s)?\.?|['’′])/i;
+    for (const l of lines.slice(1)) {
+      if (!l) continue;
+      const head = l.replace(/^[\p{Extended_Pictographic}\uFE0F⚡⏱]+\s*/u, '');
+      if (/^(objetivos|today.s (objectives|goals)|objectives)/i.test(head)) { mode = 'obj'; cur = null; continue; }
+      if (/^(conceptos clave|key concepts)/i.test(head)) { mode = 'kc'; cur = null; continue; }
+      if (/^(materiales|materials|respuestas|answer key|soluciones|opcional|optional|metodolog|methodology)/i.test(head)) { mode = 'skip'; cur = null; continue; }
+      const m = head.match(MIN);
+      if (m && head.length <= 100 && !/^[-•*]/.test(head) && !/^⏱/.test(l)) { cur = { title: head, minutes: Math.min(parseInt(m[1], 10) || 10, 240), bullets: [] }; out.sections.push(cur); mode = 'sec'; continue; }
+      const b = head.replace(/^[-•*]\s*/, '');
+      if (mode === 'obj' && /^[-•*]/.test(head)) out.objectives.push(b);
+      else if (mode === 'kc' && /^[-•*]/.test(head)) { const [w, ...d] = b.split(/\s*[:—–]\s+|\s+-\s+/); if (w && w.length <= 60) out.concepts.push({ word: w.trim(), def: d.join(' — ').trim() }); }
+      else if (mode === 'sec' && cur && /^[-•*]/.test(head) && cur.bullets.length < 3) cur.bullets.push(b);
+    }
+    out.objectives = out.objectives.slice(0, 4); out.sections = out.sections.slice(0, 6); out.concepts = out.concepts.slice(0, 6);
+    return out;
+  }
+  function genericSample(o) {
+    const es = !(typeof uiLang !== 'undefined' && uiLang === 'en');
+    const L = (a, b) => (es ? a : b);
+    const P = planOutline(o.plan);
+    const title = String(o.title || P.title || L('Clase', 'Class')).slice(0, 160);
+    const secs = P.sections.length ? P.sections : [
+      { title: L('Inicio', 'Warm-up'), minutes: 10, bullets: [] }, { title: L('Actividad principal', 'Main activity'), minutes: 25, bullets: [] }, { title: L('Cierre', 'Closing'), minutes: 10, bullets: [] }];
+    const topics = (P.sections.length ? P.sections : secs).slice(0, 3).map(sct => ({
+      title: sct.title.replace(/\s*\(?\d{1,3}\s*(?:min(?:utos?|utes?|s)?\.?|['’′])\)?\s*$/i, '') || sct.title,
+      bullets: sct.bullets.length ? sct.bullets.slice(0, 3) : [L('Ejemplo: acá aparece lo que se trabajó en esta parte de la clase.', 'Example: what was worked on in this part of the class appears here.')] }));
+    const concepts = P.concepts.length ? P.concepts : topics.map(t => ({ word: t.title.slice(0, 40), def: '' }));
+    const objective = P.objectives[0] || L(`Objetivo de la clase «${title}»`, `Objective of the class "${title}"`);
+    const ex = L('(ejemplo)', '(example)');
+    const student = (k, sc) => ({
+      name: '', highlight: L(`Ejemplo: participó con una pregunta sobre «${topics[k % topics.length].title}».`, `Example: asked a question about "${topics[k % topics.length].title}".`),
+      progress: { speakingMin: 3 + k, teacherMin: 22, vocab: 6 + 2 * k, vocabDelta: 2 + k, level: L('Explica con apoyo', 'Explains with support'), levelPrev: L('Explica con apoyo', 'Explains with support'), wpm: 2, wpmDelta: 1, score: sc, scoreDelta: 3 },
+      tracker: concepts.slice(0, 4).map((c, i) => ({ concept: c.word, difficulty: [L('Básico', 'Basic'), L('Intermedio', 'Intermediate'), L('Avanzado', 'Advanced')][i % 3], used: 2 + ((i + k) % 4), updated: L('Hoy', 'Today'), mastery: 55 + ((i * 13 + k * 7) % 35) })),
+      pron: concepts.slice(0, 3).map(c => ({ item: c.word, score: 60 + ((k * 11) % 30), tip: L(`Ejemplo: usó «${c.word}» en una explicación ${ex}.`, `Example: used "${c.word}" in an explanation ${ex}.`) })),
+      didWell: [{ text: L(`Ejemplo de algo que dijo en clase sobre «${topics[0].title}».`, `Example of something said in class about "${topics[0].title}".`), note: L('Acá va lo que hizo bien, con su propia frase.', 'What they did well goes here, with their own words.') }],
+      improve: [{ original: L('Ejemplo de una idea a revisar.', 'Example of an idea to review.'), corrected: L('Cómo quedaría corregida.', 'How it would read corrected.'), explanation: L('La explicación breve para el estudiante.', 'A short explanation for the student.') }],
+      vocab: concepts.slice(0, 4).map(c => ({ word: c.word, pos: L('concepto', 'concept'), level: L('Intermedio', 'Intermediate'), def: c.def || L('Definición según la clase.', 'Definition as given in class.'), quote: '', example: '' })),
+    });
+    const area = (area, rating) => ({ area, rating, evidence: L('Ejemplo: acá va la evidencia de la clase (minuto, cita, conteo).', 'Example: the evidence from the class goes here (minute, quote, count).'), impact: L('Ejemplo de impacto en los estudiantes.', 'Example of the impact on students.'), next: L('Ejemplo de próximo paso.', 'Example of a next step.') });
+    return {
+      key: 'generic', kind: 'discipline', lang: es ? 'es' : 'en', title, subject: o.group || title, durationMin: secs.reduce((n, x) => n + (x.minutes || 0), 0) || 45, participants: 8,
+      recap: { summary: L(`Así se va a ver el resumen de «${title}» cuando el aula grabe de verdad: qué se trabajó y los conceptos clave. Estos son datos de ejemplo.`,
+        `This is how the recap of "${title}" will look once the classroom really records: what was covered and the key concepts. This is sample data.`), topics },
+      students: [student(0, 78), student(1, 64), student(2, 88)],
+      teacher: {
+        objective, observation_focus: L('Participación de los estudiantes', 'Student participation'),
+        metrics: [{ label: 'Teacher talk time', value: '48%', sub: L('ejemplo', 'example') }, { label: 'Student talk time', value: '52%', sub: L('meta ≥ 50%', 'target ≥ 50%') },
+          { label: 'Questions asked', value: '20', sub: L('ejemplo', 'example') }, { label: 'Average wait time', value: '2,5 s', sub: L('ejemplo', 'example') }],
+        highlights: [{ title: L('Ejemplo', 'Example'), text: L(`Acá aparece lo que funcionó en «${topics[0].title}», con evidencia de la grabación.`, `What worked in "${topics[0].title}" appears here, with evidence from the recording.`) }],
+        focus: { title: L('Participación', 'Participation'), text: L('Ejemplo de foco de mejora para la próxima clase.', 'Example of a focus for the next class.') },
+        action: { title: L('Próxima clase', 'Next class'), text: L('Ejemplo de un paso concreto para la próxima clase.', 'Example of a concrete step for the next class.') },
+        areas: [area('Purpose & Alignment', 'strength'), area('STT & Participation', 'developing'), area('Questions & Interaction', 'strength'), area('Pacing & Transitions', 'developing'), area('Evidence of Learning', 'focus')],
+        planVsActual: secs.map((x, i) => ({ section: x.title, planned: x.minutes, actual: Math.max(1, x.minutes + [1, 3, -2, 0, 2, -1][i % 6]), note: L('ejemplo', 'example') })),
+        form: { evidence: L('Ejemplo de evidencia observada.', 'Example of observed evidence.'), worked: L('Ejemplo de lo que funcionó.', 'Example of what worked.'), priority: L('Participación', 'Participation'), next: L('Ejemplo de próximo paso.', 'Example of a next step.') },
+      },
+    };
+  }
+  // {key?, title, group, plan?} → payload. An explicit sample key is kept (the free demo); otherwise the class decides (P-08).
   function buildDemoPayload(o) {
     o = o || {};
-    const key = SAMPLES[o.key] ? o.key : pickSampleKey({ title: [o.title, o.group].filter(Boolean).join(' '), params: {} });
+    const fit = samplesFit([o.title, o.group, planOutline(o.plan).title].filter(Boolean).join(' '));
+    const key = SAMPLES[o.key] ? o.key : fit;
+    if (!key) {
+      const G = model(genericSample(o)); const T = G.teacher;
+      return { kind: G.kind, lang: G.lang, subject: G.subject, title: G.title, duration_min: G.durationMin, recap: G.recap, generic: true,
+        teacher: { objective: T.objective, observation_focus: T.observation_focus, metrics: T.metrics, highlights: T.highlights, focus: T.focus, action: T.action, areas: T.areas, planVsActual: T.planVsActual, form: T.form },
+        students: Array.from({ length: 12 }, (_, i) => ({ ...variant(G, i), highlight: G.students[i % G.students.length].highlight })) };
+    }
     const X = sampleModel(key); const T = X.teacher;
     return {
       kind: X.kind, lang: X.lang, subject: o.group || X.subject, title: o.title || X.title, duration_min: X.durationMin, recap: X.recap,
@@ -680,7 +761,7 @@
 
   window.TCInsightsView = {
     DEMO_BANNER, SAMPLES, LABELS, SUBTABS, banner, demoChip, pickSampleKey, initials, colorFor,
-    model, sampleModel, modelFromSession, modelFromStudent,
+    model, sampleModel, modelFromSession, modelFromStudent, planOutline, samplesFit,
     studentPickerHtml, subtabsHtml, studentTabsHtml, teacherReportHtml, draftMessage, buildDemoPayload, fmtWhen,
   };
 

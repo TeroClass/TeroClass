@@ -21,7 +21,10 @@ module.exports = function install(ctx) {
     const c = active(userId); const rev = lastUserRevoke(userId);
     return { current_version: VERSION, status: !c ? (rev ? 'revoked' : 'none') : c.version !== VERSION ? 'outdated' : 'granted',
       granted: !!c && c.version === VERSION, recorded: !!c && c.version === VERSION && (!c.is_minor || c.guardian_consent),
-      version: c ? c.version : null, granted_at: c ? c.granted_at : null, revoked_at: c ? null : rev, minor: !!c?.is_minor, guardian_consent: c?.is_minor ? c.guardian_consent : null };
+      version: c ? c.version : null, granted_at: c ? c.granted_at : null, revoked_at: c ? null : rev, minor: !!c?.is_minor, guardian_consent: c?.is_minor ? c.guardian_consent : null,
+      // P-10: the guardian confirms from their own link
+      guardian_status: c?.is_minor ? (c.guardian_consent ? 'confirmed' : c.guardian_declined_at ? 'declined' : 'pending') : null,
+      guardian_token: c?.is_minor && !c.guardian_consent && !c.guardian_declined_at ? c.guardian_token : null };
   }
   const sess = id => db.class_sessions.find(s => s.id === id);
   const group = id => db.class_groups.find(g => g.id === id);
@@ -42,6 +45,13 @@ module.exports = function install(ctx) {
 
   function handle(fn, body, me) {
     const b = body || {};
+    // P-10: the guardian's link (anon)
+    if (fn === 'guardian_consent_info' || fn === 'guardian_consent_respond') {
+      const c = db.user_consents.find(x => x.guardian_token && x.guardian_token === b.p_token && !x.revoked_at);
+      if (!c) return fn === 'guardian_consent_info' ? ok({ status: 'invalid' }) : err('Link inválido');
+      if (fn === 'guardian_consent_respond') { if (b.p_accept) { c.guardian_consent = true; c.guardian_declined_at = null; } else { c.guardian_consent = false; c.guardian_declined_at = now(); } }
+      return ok({ status: c.guardian_consent ? 'confirmed' : c.guardian_declined_at ? 'declined' : 'pending', student: (prof(c.user_id)?.name || db.student_enrollments.find(e => e.user_id === c.user_id)?.name || '').trim().split(' ')[0], guardian_name: c.guardian_name });
+    }
     if (fn === 'my_consent') { if (!me) return err('No autorizado'); return ok(myConsent(me.id)); }
     if (fn === 'grant_recording_consent') {
       if (!me) return err('No autorizado');
@@ -49,10 +59,11 @@ module.exports = function install(ctx) {
       const minor = !!b.p_minor; const name = String(b.p_guardian_name || '').trim(); const email = String(b.p_guardian_email || '').trim();
       if (minor && !name) return err('Menores de 18: falta el nombre del tutor/a');
       if (minor && !EMAIL_RE.test(email)) return err('Menores de 18: email del tutor/a inválido');
-      if (minor && !b.p_guardian_consent) return err('Menores de 18: el tutor/a tiene que confirmar el consentimiento');
+      if (minor && email.toLowerCase() === String(me.email || '').toLowerCase()) return err('Menores de 18: el email del tutor/a tiene que ser distinto del tuyo');
       db.user_consents.filter(c => c.user_id === me.id && !c.revoked_at).forEach(c => { c.revoked_at = now(); c.revoked_reason = 'superseded'; });
       db.user_consents.push({ id: uid(), user_id: me.id, version: VERSION, granted_at: now(), revoked_at: null, revoked_reason: null, is_minor: minor,
-        guardian_name: minor ? name : null, guardian_email: minor ? email : null, guardian_consent: minor });
+        guardian_name: minor ? name : null, guardian_email: minor ? email : null, guardian_consent: false,
+        guardian_token: minor ? require('crypto').randomBytes(32).toString('hex') : null });
       calls.grant.push({ user: me.id, minor });
       return ok(myConsent(me.id));
     }
@@ -65,7 +76,7 @@ module.exports = function install(ctx) {
     if (fn === 'decline_recording_consent') {
       if (!me) return err('No autorizado');
       const reason = String(b.p_reason || '').trim();
-      if (reason.length < 10) return err('La justificación es obligatoria (mínimo 10 caracteres)');
+      // P-11 (2026-10): the comment is optional
       if (myConsent(me.id).granted) return err('Ya diste tu consentimiento');
       const s = b.p_session ? sess(b.p_session) : null;
       if (b.p_session && !s) return err('No autorizado');
@@ -83,13 +94,13 @@ module.exports = function install(ctx) {
       if (!b.p_unit || !instById(b.p_unit) || !isAdminOf(me, b.p_unit)) return err('No autorizado');
       const units = scope(b.p_unit);
       const decl = db.consent_declines.filter(d => units.includes(d.institution_id));
-      if (fn === 'consent_new_declines') return ok(decl.filter(d => !b.p_since || d.created_at > b.p_since).length);
+      if (fn === 'consent_new_declines') return ok(decl.filter(d => String(d.reason || '').trim() && (!b.p_since || d.created_at > b.p_since)).length);
       const staff = db.profiles.filter(p => units.includes(p.institution_id) && ['teacher', 'org_admin'].includes(p.role))
-        .map(p => ({ kind: 'teacher', name: p.name || p.email, email: p.email, unit_id: p.institution_id, user_id: p.id }));
+        .map(p => ({ kind: 'teacher', admin: p.role === 'org_admin', name: p.name || p.email, email: p.email, unit_id: p.institution_id, user_id: p.id }));
       const studs = db.student_enrollments.filter(e => units.includes(e.institution_id))
         .map(e => ({ kind: 'student', name: e.name || e.email, email: e.email, unit_id: e.institution_id, user_id: e.user_id || null }));
       const people = [...staff, ...studs].map(x => { const st = personStatus(x.user_id, units); const minor = st.status === 'granted' && !!st.c?.is_minor;
-        return { kind: x.kind, name: x.name, email: x.email, unit_id: x.unit_id, unit_name: instById(x.unit_id)?.name || '', linked: !!x.user_id, status: st.status, status_at: st.at,
+        return { kind: x.kind, admin: !!x.admin, name: x.name, email: x.email, unit_id: x.unit_id, unit_name: instById(x.unit_id)?.name || '', linked: !!x.user_id, status: st.status, status_at: st.at,
           minor, guardian_consent: minor ? st.c.guardian_consent : null, declines: x.user_id ? decl.filter(d => d.user_id === x.user_id).length : 0 }; })
         .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
       const declines = decl.slice().sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).map(d => {

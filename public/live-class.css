@@ -111,7 +111,7 @@
 .lc-room-title{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 260px;font-size:13.5px}
 .lc-room-title b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px}
 .lc-room-title .lc-chip:not(.lc-chip-demo){background:#262633;color:#b8b8cc}
-.lc-rec{display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;background:#262633;color:#a3a3b8;letter-spacing:.3px}
+.lc-rec{display:inline-flex;flex-wrap:wrap;max-width:100%;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;background:#262633;color:#a3a3b8;letter-spacing:.3px}
 .lc-rec-dot{width:9px;height:9px;border-radius:50%;background:#6b6b80}
 .lc-rec[data-state="on"]{background:#dc2626;color:#fff;box-shadow:0 0 0 3px rgba(220,38,38,.25)}
 .lc-rec[data-state="on"] .lc-rec-dot{background:#fff;animation:lc-blink 1.2s infinite}
@@ -273,3 +273,13 @@ dialog.lc-dialog .lc-modal{max-width:none;box-shadow:0 18px 50px rgba(0,0,0,.3)}
 @media (prefers-reduced-motion:reduce){
   .lc-root *{animation:none!important;transition:none!important}
 }
+
+/* ── 2026-10 (audit fixes) ── */
+.lc-joinas{margin:0 0 12px;font-size:14px;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.lc-sim{margin-top:10px;font-size:13px}
+.lc-guardian-wait{border:1.5px solid #f0d9a8;background:#fff9ec;border-radius:12px;padding:12px 14px;margin:6px 0}
+.lc-guardian-wait p{margin:0 0 6px}
+.lc-share-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.lc-share-row input{flex:1;min-width:0;font:inherit;font-size:12px;padding:6px 8px;border:1px solid var(--lc-border,#e2dff0);border-radius:8px;background:#fff}
+.lc-share-row a.lc-btn{text-decoration:none}
+.lc-rec-demo{font-size:11px;font-weight:600;background:#f1f1f4;color:#4a4a55;border-radius:999px;padding:2px 8px;margin-left:6px;white-space:nowrap}

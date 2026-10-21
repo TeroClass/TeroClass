@@ -312,7 +312,9 @@ function generateAs(user, s) {
     await page.waitForSelector('#panel-unit-insights.active #ins-list');
     let titles = await page.$$eval('#panel-unit-insights #ins-list .ins-title', e => e.map(x => x.textContent));
     if (JSON.stringify(titles) !== '["Making plans"]') throw new Error('centro admin list: ' + JSON.stringify(titles));
-    if (!/Future forms review/.test(await text(page, '#ins-pending'))) throw new Error('admin pending list');
+    // P-23: Institution → Insights is read-only: no "Generate demo insights" list for admins
+    if (await page.$('#panel-unit-insights #ins-pending')) throw new Error('admin sees the demo-generation list');
+    if (await page.$('#panel-unit-insights [data-lc="ins-generate"]')) throw new Error('admin sees a generate button');
     if (!/Read-only/.test(await text(page, '#ins-ro'))) throw new Error('read-only chip');
     await page.click('#panel-unit-insights [data-lc="ins-open"]');
     await page.waitForSelector('#panel-unit-insights .ins-obs-head');

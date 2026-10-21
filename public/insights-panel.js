@@ -132,7 +132,8 @@
   }
   function pendingHtml(list) {
     if (!list.length) return '';
-    const ro = inViewAs();
+    const ro = inViewAs() || IP.scope === 'unit'; // P-23: Institution → Insights is read-only (no demo generation for admins)
+    if (IP.scope === 'unit') return '';
     return `<section class="lc-card" aria-labelledby="ins-pending-h" id="ins-pending">
       <h2 id="ins-pending-h">Recent classes without insights</h2>
       <p class="lc-hint">${ro ? 'View as is read-only: nothing can be generated.' : 'Generate sample insights to see how they look with your real groups and students. They are marked as demo.'}</p>
@@ -186,7 +187,7 @@
     const s = d.session || {}; const X = detailModel(); const rows = Array.isArray(d.students) ? d.students : [];
     const demo = !!(d.teacher && d.teacher.is_demo) || rows.some(r => r.is_demo);
     const missing = !d.teacher || rows.length < (Number(s.students_total) || 0);
-    const genBtn = !inViewAs() && missing && s.status !== 'cancelled' ? `<button type="button" class="lc-btn lc-sm" data-lc="ins-generate" data-id="${E(s.id)}" data-title="${E(s.title || '')}" data-group="${E(s.group_name || '')}" data-reopen="1">✨ ${d.teacher ? '<span>Add missing students</span>' : '<span>Generate demo insights</span>'}</button>` : '';
+    const genBtn = !inViewAs() && IP.scope !== 'unit' && missing && s.status !== 'cancelled' ? `<button type="button" class="lc-btn lc-sm" data-lc="ins-generate" data-id="${E(s.id)}" data-title="${E(s.title || '')}" data-group="${E(s.group_name || '')}" data-reopen="1">✨ ${d.teacher ? '<span>Add missing students</span>' : '<span>Generate demo insights</span>'}</button>` : '';
     root.innerHTML = `<div class="lc-wrap ins-wrap ins-detail">
       <button type="button" class="lc-link" data-lc="ins-back">← <span>All insights</span></button>
       <header class="lc-head ins-detail-head"><div><h1 data-no-i18n>${E(s.title || s.group_name || tr('Class'))}</h1>
@@ -261,7 +262,10 @@
   async function generate(id, meta, btn) {
     if (blocked()) return false;
     if (btn) { btn.disabled = true; btn.classList.add('busy'); }
-    const payload = V.buildDemoPayload({ title: meta && meta.title, group: meta && meta.group });
+    // P-08: the demo follows the class: its attached plan when there is one (only its teacher can read it)
+    let plan = meta && meta.plan;
+    if (plan == null) { try { const r = await rpc('session_plan', { p_session: id }); plan = r && !r.error && r.data ? (typeof r.data === 'string' ? JSON.parse(r.data) : r.data).content || '' : ''; } catch (e) { plan = ''; } }
+    const payload = V.buildDemoPayload({ title: meta && meta.title, group: meta && meta.group, plan });
     const { data, error } = await rpc('generate_demo_insights', { p_session: id, p_payload: payload });
     if (btn) { btn.disabled = false; btn.classList.remove('busy'); }
     if (error) { toast(errMsg(error), 'err'); return false; }

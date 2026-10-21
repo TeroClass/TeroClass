@@ -1,6 +1,6 @@
 // Recording consent (one checkbox per person) + auto-recording, end to end:
 //  · first class room → ONE checkbox (ES); "yes" is stored in the database and the next entry doesn't ask;
-//  · "no" → required "Justificá tu respuesta" pop-up (can't send empty / short), joins NOT recorded, asked again next
+//  · "no" → "Está bien" pop-up with an OPTIONAL comment (P-11: can be sent empty), joins NOT recorded, asked again next
 //    class (nothing prefilled), the admin sees it in Groups → Consentimientos (badge, filters, CSV), email API called;
 //  · profile menu "Grabación de mis clases: Activada / Desactivada" (confirmation; next entry asks again; turn back on);
 //  · minor: guardian name + valid email + confirmation required; admin sees the flag, never the guardian's data;
@@ -33,6 +33,9 @@ async function newCtx(browser, opts = {}) {
     if (u.pathname === '/api/notify/session') return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ configured: false, sent: 0 }) });
     if (u.pathname === '/api/billing/status') return r.fulfill({ contentType: 'application/json', body: '{"billing_configured":true,"billing_ok":true}' });
     if (u.pathname.startsWith('/api/')) return r.fulfill({ status: 404, body: '{}' });
+    // P-10: the guardian's page (public/tutor.html, as vercel.json serves it)
+    if (u.pathname === '/tutor') return r.fulfill({ contentType: 'text/html', body: fs.readFileSync(require('path').join(__dirname, '..', 'public', 'tutor.html'), 'utf8') });
+    if (u.pathname === '/legal.css') return r.fulfill({ contentType: 'text/css', body: fs.readFileSync(require('path').join(__dirname, '..', 'public', 'legal.css'), 'utf8') });
     return r.fulfill({ contentType: 'text/html', body: HTML });
   });
   const page = await ctx.newPage();
@@ -60,6 +63,7 @@ async function login(page, email, lang = 'es') {
   await page.fill('#login-email', email); await page.fill('#login-password', 'secreto123');
   await page.click('#tab-login .auth-btn');
   await page.waitForSelector('#screen-app.active');
+  await page.waitForFunction(() => !appBooting); // the app finishes choosing its first screen before the test navigates
 }
 async function studentLogin(page, u, lang = 'es') {
   await page.goto('http://teroclass.test/?student');
@@ -72,7 +76,7 @@ async function studentLobby(page, u) {
   await studentLogin(page, u);
   await page.waitForFunction(() => { const b = document.querySelector('.gs-enter .gc-join'); return b && !b.disabled; });
   await page.click('.gs-enter .gc-join');
-  await page.waitForSelector('#panel-live.active #lc-name');
+  await page.waitForSelector('#panel-live.active #lc-joinas');
   await page.waitForSelector('#lc-consent, #lc-consent-ok');
 }
 const text = (page, sel) => page.textContent(sel).then(t => (t || '').replace(/\s+/g, ' ').trim());
@@ -134,7 +138,7 @@ async function openConsents(page) {
     const t = seed();
     const S = await open();
     await studentLobby(S.page, t.ana);
-    if ((await S.page.$$('#lc-consent-box input[type=checkbox]')).length !== 3) throw new Error('expected: consent + under 18 (+ guardian, hidden)');
+    if ((await S.page.$$('#lc-consent-box input[type=checkbox]')).length !== 2) throw new Error('expected: consent + under 18 (the guardian confirms from their own link, P-10)');
     if (!/^Acepto que mis clases en TeroClass se graben \(solo audio\) y que la IA las analice para generar mis insights y mejorar las clases\.$/.test(await text(S.page, '.lc-consent-main'))) throw new Error('text: ' + await text(S.page, '.lc-consent-main'));
     if (!/Más información/.test(await text(S.page, '.lc-more summary'))) throw new Error('more info link');
     if (!/Te lo preguntamos una sola vez. Si no aceptás, podés entrar igual/.test(await text(S.page, '#lc-consent-box'))) throw new Error('can join anyway');
@@ -166,22 +170,20 @@ async function openConsents(page) {
     if (calls.rpc.filter(x => x.fn === 'grant_recording_consent').length !== 1) throw new Error('granted twice');
   });
 
-  await run('Saying no (ES): required justification pop-up (not empty, ≥10 chars); joins NOT recorded; asked again next class; the admin sees it in Consentimientos (badge, filters, CSV)', browser, async open => {
+  await run('Saying no (ES): OPTIONAL comment pop-up (P-11); joins NOT recorded; asked again next class; the admin sees it neutrally in Consentimientos (badge, filters, CSV)', browser, async open => {
     const t = seed(); grant(t.ana);
     const S = await open();
     await studentLobby(S.page, t.beto);
     await S.page.click('#lc-join');
     await S.page.waitForSelector('#lc-decline-modal[open]');
-    if (!/^Justificá tu respuesta$/.test(await text(S.page, '#lc-decline-h'))) throw new Error('title: ' + await text(S.page, '#lc-decline-h'));
-    if (!/Contanos por qué no querés que se graben tus clases. Tu respuesta le llega a la institución./.test(await text(S.page, '#lc-decline-p'))) throw new Error('neutral wording');
+    if (!/^Está bien$/.test(await text(S.page, '#lc-decline-h'))) throw new Error('title: ' + await text(S.page, '#lc-decline-h'));
+    if (!/Si querés, contanos por qué \(opcional\)\. Tu respuesta le llega a la institución\./.test(await text(S.page, '#lc-decline-p'))) throw new Error('neutral wording');
     if (!/Podés entrar igual a la clase sin que te graben/.test(await text(S.page, '.lc-decline-ok'))) throw new Error('"you can still join" not visible');
     if (await S.page.evaluate(() => document.activeElement.id) !== 'lc-decline-text') throw new Error('focus not in the text box');
     if (await S.page.inputValue('#lc-decline-text') !== '') throw new Error('prefilled');
-    if (!(await S.page.isDisabled('#lc-decline-send'))) throw new Error('can send empty');
+    if (await S.page.isDisabled('#lc-decline-send')) throw new Error('the comment is optional: sending empty must be possible');
     let un = await untranslated(S.page, '#lc-decline-modal'); if (un.length) throw new Error('untranslated: ' + JSON.stringify(un));
     await shot(S.page, 'decline-es', '#lc-decline-modal .lc-modal');
-    await S.page.fill('#lc-decline-text', '   no    ');
-    if (!(await S.page.isDisabled('#lc-decline-send'))) throw new Error('can send < 10 chars');
     await S.page.keyboard.press('Escape');
     await S.page.waitForSelector('#lc-decline-modal', { state: 'hidden' });
     if (db.consent_declines.length || calls.rpc.some(x => x.fn === 'decline_recording_consent')) throw new Error('saved on cancel');
@@ -208,6 +210,9 @@ async function openConsents(page) {
     await S.page.click('#lc-join');
     await S.page.waitForSelector('#lc-decline-modal[open]');
     if (await S.page.inputValue('#lc-decline-text') !== '') throw new Error('justification prefilled');
+    await S.page.click('#lc-decline-send'); // this time without a comment: joins not recorded
+    await S.page.waitForSelector('#lc-room');
+    if (db.consent_declines.length !== 2 || db.consent_declines[1].reason !== '') throw new Error('empty "no": ' + JSON.stringify(db.consent_declines));
     // admin of the main institution: badge on Groups, Consentimientos tab
     const A = await open();
     await login(A.page, 'adm@sol.uy');
@@ -220,6 +225,8 @@ async function openConsents(page) {
     if (await A.page.$('#nav-groups .sib-badge')) throw new Error('badge not cleared after viewing');
     const body = await text(A.page, '#gc-cons-results');
     if (!/Beto Ruiz/.test(body) || !/No aceptó/.test(body) || !/Ana Pérez/.test(body) || !/Aceptó/.test(body) || !/Caro Díaz/.test(body) || !/Pendiente/.test(body) || !/Laura Gómez/.test(body)) throw new Error('people: ' + body);
+    if (!/Respuestas sin comentario: 1/.test(body)) throw new Error('empty answers counted, not listed: ' + body);
+    if (await A.page.$('.gc-cons-table .gc-chip.err')) throw new Error('"did not accept" shown in alarm red (P-11)');
     if (/Roberto \(Otra\)/.test(body)) throw new Error('another institution\'s name');
     const item = await text(A.page, '.gc-cons-item');
     if (!/Me da vergüenza que graben mi voz <b>todavía<\/b>/.test(item) || !/Unit 4: food/.test(item)) throw new Error('justification: ' + item);
@@ -236,7 +243,7 @@ async function openConsents(page) {
     await A.page.click('.gc-cons-stat.declined');
     const [dl] = await Promise.all([A.page.waitForEvent('download'), A.page.click('[data-gc="cons-csv"]')]);
     const csv = fs.readFileSync(await dl.path(), 'utf8');
-    if (!/^﻿Nombre;Email;Rol;Unidad;Estado;Fecha;Menor de 18;Última justificación;Clase/.test(csv) || !/beto@mail\.com;Estudiante;Sede Centro;No aceptó;.*Me da vergüenza.*;Unit 4: food/.test(csv)) throw new Error('CSV: ' + csv.slice(0, 400));
+    if (!/^﻿Nombre;Email;Rol;Unidad;Estado;Fecha;Menor de 18;Último comentario;Clase/.test(csv) || !/beto@mail\.com;Estudiante;Sede Centro;No aceptó;.*Me da vergüenza.*;Unit 4: food/.test(csv)) throw new Error('CSV: ' + csv.slice(0, 400));
     if (!/^consentimientos-/.test(dl.suggestedFilename())) throw new Error('file name ' + dl.suggestedFilename());
     await A.page.locator('#gc-groups-body').scrollIntoViewIfNeeded();
     await shot(A.page, 'admin');
@@ -295,7 +302,7 @@ async function openConsents(page) {
     if (!db.user_consents.some(x => x.user_id === t.ana.id && !x.revoked_at)) throw new Error('not granted again');
   });
 
-  await run('Under 18: guardian name + valid email + confirmation required; recorded with "Tutor/a ✓"; the admin sees the flag but never the guardian\'s data', browser, async open => {
+  await run('Under 18 (P-10): guardian name + valid email; NOT recorded until the guardian confirms from their own link; then "Tutor/a ✓"; the admin never sees the guardian\'s data', browser, async open => {
     const t = seed();
     const S = await open();
     await studentLobby(S.page, t.dani);
@@ -309,24 +316,48 @@ async function openConsents(page) {
     await S.page.fill('#lc-g-email', 'no-es-email');
     await S.page.click('#lc-join');
     if (!/email válido del tutor/.test(await text(S.page, '#lc-lobby-err'))) throw new Error('valid email required');
+    if (calls.rpc.some(x => x.fn === 'grant_recording_consent')) throw new Error('saved before the guardian part was complete');
+    if (await S.page.$('#lc-g-consent')) throw new Error('the minor must not tick the guardian\'s box (P-10)');
     await S.page.fill('#lc-g-email', 'laura.tutora@example.com');
     await S.page.click('#lc-join');
-    if (!/tutor\/a tiene que confirmar/.test(await text(S.page, '#lc-lobby-err'))) throw new Error('guardian confirmation required');
-    if (calls.rpc.some(x => x.fn === 'grant_recording_consent')) throw new Error('saved before the guardian part was complete');
+    // saved, waiting for the guardian: the lobby shows the link to send (copy / WhatsApp)
+    await S.page.waitForSelector('#lc-guardian-wait');
+    const link = await S.page.inputValue('#lc-guardian-link');
+    if (!/\/tutor\?t=[0-9a-f]{64}$/.test(link)) throw new Error('guardian link: ' + link);
+    let c = db.user_consents.find(x => x.user_id === t.dani.id && !x.revoked_at);
+    if (!c || !c.is_minor || c.guardian_email !== 'laura.tutora@example.com' || c.guardian_consent) throw new Error('minor consent must wait for the guardian: ' + JSON.stringify(c));
     const un = await untranslated(S.page, '.lc-lobby'); if (un.length) throw new Error('untranslated: ' + JSON.stringify(un));
-    await S.page.check('#lc-g-consent');
+    await shot(S.page, 'minor-waiting', '.lc-lobby');
     await S.page.click('#lc-join');
     await S.page.waitForSelector('#lc-room');
-    const c = db.user_consents.find(x => x.user_id === t.dani.id && !x.revoked_at);
-    if (!c || !c.is_minor || c.guardian_email !== 'laura.tutora@example.com' || !c.guardian_consent) throw new Error('minor consent: ' + JSON.stringify(c));
-    if (!/Tutor\/a ✓/.test(await text(S.page, '.lc-tile[data-pid="local"] .lc-tile-top'))) throw new Error('guardian badge');
+    if (await S.page.evaluate(() => LiveClass.state.room.recorded)) throw new Error('a minor recorded before the guardian confirmed');
+    // the admin sees "waiting for the guardian", never the guardian's data
     const A = await open();
     await login(A.page, 'adm@sol.uy');
     await A.page.evaluate(() => setAppMode('admin'));
     await openConsents(A.page);
-    const row = await A.page.locator('.gc-cons-table tr', { hasText: 'dani@mail.com' }).textContent();
+    let row = await A.page.locator('.gc-cons-table tr', { hasText: 'dani@mail.com' }).textContent();
+    if (!/Menor de 18 · esperando al tutor\/a/.test(row)) throw new Error('admin row (waiting): ' + row);
+    // the guardian opens their link (no account) and confirms
+    const G = await open();
+    await G.page.goto(link.replace(/^https?:\/\/[^/]+/, 'http://teroclass.test') + '&lang=es');
+    await G.page.waitForSelector('#tu-yes');
+    if (!/Dani/.test(await text(G.page, '#tu-body'))) throw new Error('guardian page: ' + await text(G.page, '#tu-body'));
+    await shot(G.page, 'guardian-page');
+    await G.page.click('#tu-yes');
+    await G.page.waitForFunction(() => /Aceptaste/.test(document.getElementById('tu-body').textContent));
+    c = db.user_consents.find(x => x.user_id === t.dani.id && !x.revoked_at);
+    if (!c.guardian_consent) throw new Error('guardian confirmation not stored');
+    await openConsents(A.page);
+    row = await A.page.locator('.gc-cons-table tr', { hasText: 'dani@mail.com' }).textContent();
     if (!/Aceptó/.test(row) || !/Menor de 18 · tutor\/a ✓/.test(row)) throw new Error('admin row: ' + row);
     if (/laura\.tutora|Laura Pérez/.test(await A.page.textContent('#gc-groups-root'))) throw new Error('guardian data shown to the admin');
+    // next class: recorded, with the guardian badge
+    await studentLobby(S.page, t.dani);
+    await S.page.waitForSelector('#lc-consent-ok');
+    await S.page.click('#lc-join');
+    await S.page.waitForSelector('#lc-room');
+    if (!/Tutor\/a ✓/.test(await text(S.page, '.lc-tile[data-pid="local"] .lc-tile-top'))) throw new Error('guardian badge');
   });
 
   await run('Auto-recording for everyone: the teacher is asked once too, sees the indicator and can pause / resume; the student sees the indicator', browser, async open => {
@@ -379,7 +410,6 @@ async function openConsents(page) {
     await P.page.waitForSelector('#lc-consent');
     if (!(await P.page.isDisabled('#lc-consent'))) throw new Error('checkbox enabled in View as');
     if (!/solo lectura/.test(await text(P.page, '#lc-consent-box'))) throw new Error('read-only note');
-    await P.page.fill('#lc-name', 'Vista previa');
     await P.page.click('#lc-join');
     await P.page.waitForSelector('#lc-room', { timeout: 5000 }).catch(async e => { throw new Error('no room: ' + await text(P.page, '#lc-lobby-err') + ' / ' + P.st.errors.join(' | ') + ' / ' + await text(P.page, '#toast')); });
     if (calls.rpc.some(x => /grant_recording_consent|decline_recording_consent|revoke_recording_consent|my_consent/.test(x.fn))) throw new Error('consent RPC in View as: ' + calls.rpc.map(x => x.fn).filter(f => /consent/.test(f)));

@@ -4603,15 +4603,16 @@ begin
   v_scope := public.tc_unit_scope(p_unit);
   return json_build_object('version', v,
     'people', coalesce((select json_agg(json_build_object(
-        'kind', x.kind, 'name', x.name, 'email', x.email, 'unit_id', x.institution_id, 'unit_name', i.name, 'linked', x.user_id is not null,
+        'kind', x.kind, 'admin', x.is_admin, 'name', x.name, 'email', x.email, 'unit_id', x.institution_id, 'unit_name', i.name, 'linked', x.user_id is not null,
         'status', st.status, 'status_at', st.at, 'minor', coalesce(c.is_minor, false) and st.status = 'granted',
         'guardian_consent', case when c.is_minor and st.status = 'granted' then c.guardian_consent end,
         'declines', (select count(*) from public.consent_declines d2 where d2.user_id = x.user_id and d2.institution_id = any(v_scope)))
         order by lower(x.name), lower(x.email))
-      from (select 'teacher'::text as kind, coalesce(nullif(btrim(p.name), ''), p.email) as name, p.email, p.institution_id, p.id as user_id
+      from (select 'teacher'::text as kind, coalesce(nullif(btrim(p.name), ''), p.email) as name, p.email, p.institution_id, p.id as user_id,
+                   p.role = 'org_admin' as is_admin   -- P-34: admins are labelled "Admin", not "Teacher"
               from public.profiles p where p.institution_id = any(v_scope) and p.role in ('teacher','org_admin')
             union all
-            select 'student', coalesce(nullif(btrim(e.name), ''), e.email), e.email, e.institution_id, e.user_id
+            select 'student', coalesce(nullif(btrim(e.name), ''), e.email), e.email, e.institution_id, e.user_id, false
               from public.student_enrollments e where e.institution_id = any(v_scope)) x
       join public.institutions i on i.id = x.institution_id
       left join public.user_consents c on c.user_id = x.user_id and c.revoked_at is null and c.version = v
@@ -4978,7 +4979,9 @@ begin
   end if;
   return json_build_object(
     'status', case when c.guardian_consent then 'confirmed' when c.guardian_declined_at is not null then 'declined' else 'pending' end,
-    'student', coalesce((select split_part(nullif(btrim(p.name), ''), ' ', 1) from public.profiles p where p.id = c.user_id), ''),
+    -- first name only: the profile's, or the name the institution loaded (magic-link student accounts have no profile name)
+    'student', coalesce((select split_part(nullif(btrim(p.name), ''), ' ', 1) from public.profiles p where p.id = c.user_id),
+                        (select split_part(nullif(btrim(e.name), ''), ' ', 1) from public.student_enrollments e where e.user_id = c.user_id order by e.created_at limit 1), ''),
     'guardian_name', c.guardian_name, 'requested_at', c.granted_at);
 end $$;
 create or replace function public.guardian_consent_respond(p_token text, p_accept boolean) returns json
@@ -5010,7 +5013,8 @@ $$
 begin
   if auth.uid() is null then raise exception 'No autorizado'; end if;
   return (select json_build_object('guardian_email', c.guardian_email, 'guardian_name', c.guardian_name, 'token', c.guardian_token,
-                                   'student', coalesce((select nullif(btrim(p.name), '') from public.profiles p where p.id = c.user_id), ''))
+                                   'student', coalesce((select nullif(btrim(p.name), '') from public.profiles p where p.id = c.user_id),
+                                                       (select nullif(btrim(e.name), '') from public.student_enrollments e where e.user_id = c.user_id order by e.created_at limit 1), ''))
             from public.user_consents c
            where c.user_id = auth.uid() and c.revoked_at is null and c.is_minor and not c.guardian_consent
              and c.guardian_token is not null and coalesce(c.guardian_token_expires_at, now()) > now());

@@ -112,10 +112,13 @@ function seedTree() {
     const cat = nodeRow(page, 'Cátedra de Física');
     if (!/Department \/ Area/.test(await cat.textContent())) throw new Error('level 3 label');
     if (await cat.locator('[data-h="add-unit"]').count()) throw new Error('level 3 offers "+ Sub-unit"');
-    // delete the empty cátedra with two clicks (no confirm())
+    // P-14: deleting the empty cátedra asks in a dialog where the unit's name must be typed (no confirm())
     await cat.locator('[data-h="del"]').click();
+    await page.waitForSelector('#modal-danger.active');
+    if (!(await page.isDisabled('#dg-ok'))) throw new Error('delete enabled before typing the name');
     if (!db.institutions.some(i => i.name === 'Cátedra de Física')) throw new Error('deleted on first click');
-    await cat.locator('[data-h="del"]').click();
+    await page.fill('#dg-type', 'cátedra de física'); // case-insensitive
+    await page.click('#dg-ok');
     await waitToast(page, /Unit deleted/);
     if (db.institutions.some(i => i.name === 'Cátedra de Física')) throw new Error('not deleted');
     // switch to teacher mode, remembered after reload

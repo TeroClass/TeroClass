@@ -68,13 +68,16 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.waitForSelector('#screen-app.active');
   });
 
-  await step('Sidebar: "Live class" abre el panel con banner Demo y lista de sesiones', async () => {
+  await step('Sidebar: "Live class" abre el panel con banner Demo y SUS clases (sin sesiones inventadas, P-07)', async () => {
     await page.click('#nav-live');
     await page.waitForSelector('#panel-live.active .lc-wrap');
     if (!(await page.isVisible('#nav-live'))) throw new Error('nav oculto');
     const h1 = await text('#lc-root h1'); if (!/Live class/.test(h1)) throw new Error(h1);
     const b = await text('#lc-root .lc-banner'); if (!/Demo data — real insights activate when the live classroom is connected/.test(b)) throw new Error('banner: ' + b);
-    if ((await page.$$('.lc-session')).length !== 4) throw new Error('sesiones demo');
+    await page.waitForFunction(() => /No classes in the next two weeks/.test(document.getElementById('lc-up-list')?.textContent || ''));
+    if ((await page.$$('.lc-session')).length !== 0) throw new Error('sesiones inventadas');
+    if (/Making plans|Reacciones químicas: balanceo|Insights ready/.test(await text('#lc-root'))) throw new Error('contenido de demo inventado en el inicio');
+    if (await page.isChecked('#lc-simulate')) throw new Error('participantes de ejemplo encendidos por defecto');
     const opts = await page.$$eval('#lc-plan-select option', os => os.map(o => o.textContent));
     if (!opts.some(o => o.includes('Reacciones químicas 3°B <script>'))) throw new Error('la clase guardada no aparece: ' + opts);
     await page.waitForFunction(() => true);
@@ -82,7 +85,8 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
   await shot('1-home');
 
   await step('Lobby: vista previa real de cámara/micrófono y selectores de dispositivo', async () => {
-    await page.click('[data-lc="join-upcoming"][data-i="0"]');
+    await page.check('#lc-simulate'); // sample participants only when asked for (P-07)
+    await page.click('#lc-start-btn');
     await page.waitForSelector('#lc-preview-video');
     await page.waitForFunction(() => { const v = document.getElementById('lc-preview-video'); return v && v.srcObject && v.srcObject.getVideoTracks().length && v.readyState >= 2; }, null, { timeout: 8000 });
     await page.waitForFunction(() => document.querySelectorAll('#lc-cam-select option').length >= 1 && document.querySelectorAll('#lc-mic-select option').length >= 1);
@@ -98,7 +102,8 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
   await step('Consentimiento (primera vez): UNA sola casilla; menor exige tutor', async () => {
     await page.waitForSelector('#lc-consent');
     if (await page.$('#lc-c-recording, #lc-c-ai, #lc-c-storage')) throw new Error('siguen las 3 casillas viejas');
-    if ((await page.$$('#lc-consent-box input[type=checkbox]')).length !== 3) throw new Error('consentimiento + menor + tutor');
+    if ((await page.$$('#lc-consent-box input[type=checkbox]')).length !== 2) throw new Error('consentimiento + menor (el tutor confirma desde su link, P-10)');
+    if (await page.$('input[name="lc-role"], #lc-name')) throw new Error('el rol / nombre no se eligen en la sala (P-09 / TC-27)');
     if (!/recorded \(audio only\) and that AI analyses them/.test(await text('.lc-consent-main'))) throw new Error('texto: ' + await text('.lc-consent-main'));
     if (!/without being recorded/.test(await text('#lc-consent-summary'))) throw new Error('resumen inicial');
     await page.click('.lc-more summary');
@@ -115,16 +120,10 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.click('#lc-join');
     if (!/valid guardian email/.test(await text('#lc-lobby-err'))) throw new Error('sin error de email');
     await page.fill('#lc-g-email', 'laura@example.com');
-    await page.click('#lc-join');
-    if (!/must confirm/.test(await text('#lc-lobby-err'))) throw new Error('sin error de confirmación');
-    await page.check('#lc-g-consent');
-    if (!/You will be recorded/.test(await text('#lc-consent-summary'))) throw new Error('con tutor debería grabar');
+    if (!/Waiting for guardian consent/.test(await text('#lc-consent-summary'))) throw new Error('un menor no se graba hasta que confirme el tutor');
     await page.uncheck('#lc-minor'); // the full minor path is in tests/e2e-consent.cjs; Ana joins as an adult
+    if (!/You will be recorded/.test(await text('#lc-consent-summary'))) throw new Error('adulta que acepta → se graba');
     if (M.consent.calls.grant.length) throw new Error('guardó el consentimiento antes de entrar');
-    await page.fill('#lc-name', '');
-    await page.click('#lc-join');
-    if (!/write your name/.test(await text('#lc-lobby-err'))) throw new Error('nombre vacío aceptado');
-    await page.fill('#lc-name', 'Ana Profe');
   });
   await shot('2-lobby');
 
@@ -313,7 +312,9 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
   });
 
   await step('Como estudiante: indicador de grabación visible, sin control de pausa; plan parseado y escapado', async () => {
-    await page.check('input[name="lc-role"][value="student"]');
+    // P-09: there is no role picker (the role comes from the class); the student UI is checked by setting it here
+    await page.check('#lc-simulate').catch(() => {});
+    await page.evaluate(() => { LiveClass.state.lobby.role = 'student'; LiveClass.state.simulate = true; });
     if (!/You will be recorded/.test(await text('#lc-consent-summary'))) throw new Error('resumen');
     await page.click('#lc-join');
     await page.waitForSelector('#lc-room');
@@ -325,7 +326,8 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     // the (simulated) teacher shares a slide: students see it as a large tile with a live video track
     await page.waitForSelector('.lc-share-tile.remote[data-pid="screen-sim-t"] video', { timeout: 8000 });
     await page.waitForFunction(() => { const v = document.querySelector('.lc-share-tile.remote video'); return v && v.srcObject && v.srcObject.getVideoTracks()[0]?.readyState === 'live'; });
-    if (!/Prof\. Laura Méndez/.test(await text('.lc-share-tile.remote')) || !/is presenting/.test(await text('.lc-share-tile.remote'))) throw new Error('etiqueta pantalla remota');
+    if (/Laura Méndez/.test(await text('#lc-room'))) throw new Error('docente inventado (P-07)');
+    if (!/Teacher \(sample\)/.test(await text('.lc-share-tile.remote')) || !/is presenting/.test(await text('.lc-share-tile.remote'))) throw new Error('etiqueta pantalla remota');
     await page.waitForFunction(() => /is sharing their screen/.test(document.getElementById('toast').textContent), null, { timeout: 4000 }).catch(() => {});
     { const box = await page.$eval('.lc-share-tile.remote', e => e.getBoundingClientRect().width); const tile = await page.$eval('.lc-tile[data-pid="local"]', e => e.getBoundingClientRect().width); if (box <= tile) throw new Error('la pantalla compartida no es la vista grande'); }
     if (await page.isHidden('#lc-side-chat')) await page.click('#lc-ctl-chat'); // students start with the chat open
@@ -416,7 +418,9 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await check('inicio');
     // Ana revoked her consent (from another device): the lobby asks again
     M.db.user_consents.filter(c => !c.revoked_at).forEach(c => { c.revoked_at = new Date().toISOString(); c.revoked_reason = 'user'; });
-    await page.click('[data-lc="join-upcoming"][data-i="1"]');
+    await page.selectOption('#lc-plan-select', { index: 1 }); // the saved chemistry class
+    await page.check('#lc-simulate');
+    await page.click('#lc-start-btn');
     await page.waitForSelector('.lc-lobby');
     if (!/Entrar a la clase/.test(await text('#lc-join'))) throw new Error('botón entrar');
     await page.waitForSelector('#lc-consent');

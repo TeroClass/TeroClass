@@ -178,6 +178,8 @@
     return false;
   }
   const busy = (btn, on) => { if (btn) { btn.disabled = !!on; btn.classList.toggle('busy', !!on); } };
+  // P-14: destructive actions ask in a dialog that says what is lost (index.html confirmDanger); fallback: two clicks
+  const danger = (opts, key, btn, label) => (typeof window.confirmDanger === 'function' ? window.confirmDanger(opts) : Promise.resolve(twoClick(key, btn, label)));
 
   // ════════════════════════════════════════════════════════════════════════════════════════════
   // STUDENT SIGN-IN (magic link, no password)
@@ -498,6 +500,7 @@
       <div class="gc-chips">${s.group_name ? `<span class="gc-chip"><span>Group:</span> <b data-no-i18n>${esc(s.group_name)}</b></span>` : '<span class="gc-chip">Without a group</span>'}
         ${s.series_id ? '<span class="gc-chip">🔁 <span>Weekly</span></span>' : ''}${roleChip(s)}${s.teacher_name && s.role !== 'teacher' ? `<span class="gc-chip"><span>Teacher:</span> <b data-no-i18n>${esc(s.teacher_name)}</b></span>` : ''}</div>
       <div class="gc-join-row">${joinButtonHtml(s)}${isStaffRow(s) || s.status === 'cancelled' ? '' : '<span class="gc-hint">The class opens 10 minutes before it starts.</span>'}</div>
+      ${staff && s.role !== 'admin' ? planSectionHtml(s, canEdit) : ''}
       <div class="gc-sec-title">Class document</div>
       <div class="gc-btn-row"><button type="button" class="tree-btn primary" data-gc="doc" data-id="${esc(s.id)}">📄 <span>Open class document</span></button><span class="gc-hint">Everyone in the class can write in it at the same time; it stays as a record.</span></div>
       <div class="gc-sec-title">Add to calendar</div>
@@ -505,7 +508,7 @@
       ${staff ? `<div class="gc-sec-title">Attendance</div>${attStarted ? '<div id="gc-att" class="gc-att"><div class="in-loading">Loading…</div></div>' : '<div class="gc-hint">Attendance is recorded when students enter the room.</div>'}
         ${s.group_id && window.TCAttendance ? `<div class="gc-btn-row gc-att-actions"><button type="button" class="tree-btn" data-gc="att-report" data-id="${esc(s.id)}" data-g="${esc(s.group_id)}">📊 <span>Group attendance report</span></button></div>` : ''}` : ''}
       ${staff && s.status !== 'cancelled' && Date.parse(s.starts_at) <= endOfToday() && window.TCInsightsPanel ? `<div class="gc-sec-title">Insights</div>
-        <div class="gc-btn-row"><button type="button" class="tree-btn" data-gc="ins-view" data-id="${esc(s.id)}">💡 <span>View insights</span></button>${inViewAs() ? '' : `<button type="button" class="tree-btn" data-gc="ins-gen" data-id="${esc(s.id)}">✨ <span>Generate demo insights</span></button>`}</div>` : ''}
+        <div class="gc-btn-row"><button type="button" class="tree-btn" data-gc="ins-view" data-id="${esc(s.id)}">💡 <span>View insights</span></button>${inViewAs() || s.role === 'admin' ? '' : `<button type="button" class="tree-btn" data-gc="ins-gen" data-id="${esc(s.id)}">✨ <span>Generate demo insights</span></button>`}</div>` : ''}
       ${staff ? `<div class="gc-sec-title"><span>Students</span> <span class="gc-count">(<b>${Number(s.people) || 0}</b>)</span></div><div id="gc-people" class="gc-people"><div class="in-loading">Loading…</div></div>` : ''}
       ${canEdit ? `<div class="gc-sec-title">Invite</div>
         <div class="gc-btn-row"><button type="button" class="tree-btn" data-gc="notify" data-id="${esc(s.id)}" data-kind="invite">✉️ <span>Email the students</span></button><button type="button" class="tree-btn" data-gc="copy-invite" data-id="${esc(s.id)}">🔗 <span>Copy invitation link</span></button></div>
@@ -523,6 +526,37 @@
       box.innerHTML = (data || []).length ? `<ul class="gc-people-list">${data.map(p => `<li><span class="gc-p-name" data-no-i18n>${esc(p.name || '—')}</span> <span class="gc-p-mail" data-no-i18n>${esc(p.email)}</span>${p.via === 'invite' ? ' <span class="gc-chip">Invited</span>' : ''}</li>`).join('')}</ul>`
         : '<div class="pb-empty">No students yet.</div>';
     }
+  }
+  // ── P-06: the class plan (a saved class) attached to this calendar class; the live room shows THAT plan ──
+  function planSectionHtml(s, canEdit) {
+    const mine = (typeof plannings !== 'undefined' && Array.isArray(plannings)) ? plannings : [];
+    const opts = mine.map(p => `<option value="${esc(p.id)}"${p.id === s.planning_id ? ' selected' : ''} data-no-i18n>${esc(p.title || tr('Class'))}</option>`).join('');
+    return `<div class="gc-sec-title">Class plan</div>
+      <div class="gc-plan-row" id="gc-plan-row">${s.planning_id
+        ? `<span class="gc-chip gc-plan-chip">📖 <b data-no-i18n>${esc(s.planning_title || tr('Saved class'))}</b></span>`
+        : '<span class="gc-hint">No plan attached yet: the live room will show this plan to you (never to students).</span>'}</div>
+      ${canEdit ? (mine.length ? `<div class="gc-btn-row gc-plan-pick"><label class="sr-only" for="gc-plan-sel">Choose a saved class</label>
+          <select id="gc-plan-sel" class="member-role gc-plan-sel"><option value="">${esc(tr('— Choose a saved class —'))}</option>${opts}</select>
+          <button type="button" class="tree-btn primary" data-gc="plan-attach" data-id="${esc(s.id)}">📎 <span>Attach plan</span></button>
+          ${s.planning_id ? `<button type="button" class="tree-btn" data-gc="plan-detach" data-id="${esc(s.id)}"><span>Remove plan</span></button>` : ''}</div>`
+        : '<div class="gc-hint">Create and save a class in Classes to attach it here.</div>') : ''}`;
+  }
+  async function attachPlan(id, planning, btn) {
+    if (blocked()) return;
+    if (planning === '') { showToast('Choose a saved class first.', 'err'); return; }
+    busy(btn, true);
+    const { data, error } = await rpc('set_session_plan', { p_session: id, p_planning: planning || null });
+    busy(btn, false);
+    if (error) { errToast(error); return; }
+    const s = findRow(id);
+    if (s) { s.planning_id = data?.planning_id || null; s.planning_title = data?.planning_title || null; }
+    showToast(planning ? 'Plan attached ✓ The live room will show it.' : 'Plan removed', 'ok');
+    openSessionDetail(id);
+  }
+  // The plan of a calendar class for whoever teaches it (null for students: the guide has the answers)
+  async function sessionPlan(id) {
+    try { const { data, error } = await rpc('session_plan', { p_session: id }); if (error || !data) return null; return typeof data === 'string' ? JSON.parse(data) : data; }
+    catch (e) { return null; }
   }
   function editOneForm(id) {
     const s = findRow(id); if (!s) return;
@@ -683,7 +717,9 @@
   async function cancelSeries(id, btn) {
     if (blocked()) return;
     const s = findRow(id); if (!s?.series_id) return;
-    if (!twoClick('cs' + id, btn, tr('Click again to cancel the series'))) return;
+    const n = (CAL.rows || []).filter(r => r.series_id === s.series_id && r.status !== 'cancelled' && Date.parse(r.starts_at) > Date.now()).length;
+    if (!(await danger({ title: tr('Cancel the whole series?'), body: tr('Every future class of this series is cancelled (students see it as cancelled in their calendars). Past classes are kept.'),
+      items: [n ? `${tr('Future classes in view:')} ${n}` : '', tr('Classes edited one by one are cancelled too')], confirmText: tr('Cancel the series') }, 'cs' + id, btn, tr('Click again to cancel the series')))) return;
     busy(btn, true);
     const { error } = await rpc('cancel_series', { p_series: s.series_id });
     busy(btn, false);
@@ -744,12 +780,15 @@
   }
 
   // ── join → live class demo ──
-  function join(id) {
+  async function join(id) {
     const s = findRow(id); if (!s) return;
     const j = joinState(s); const staff = isStaffRow(s);
     if (j.k === 'cancelled' || (!staff && j.k !== 'open')) { showToast(j.k === 'soon' ? opensAt(s) : 'This class is not available.', 'err'); return; }
     closeGc();
-    if (window.LiveClass?.openSession) window.LiveClass.openSession({ id: s.id, title: sTitle(s), group: s.group_name || '', role: staff ? 'teacher' : 'student' });
+    // P-06: the room shows the plan attached to THIS class (teacher / substitute only); P-09: the role comes from the server row
+    const plan = staff && !inViewAs() ? await sessionPlan(s.id) : null;
+    if (window.LiveClass?.openSession) window.LiveClass.openSession({ id: s.id, title: sTitle(s), group: s.group_name || '', role: staff ? 'teacher' : 'student',
+      teacher: s.teacher_name || '', planning: plan ? { id: plan.id, title: plan.title, content: plan.content, params: plan.params || {} } : null });
     else showToast('The live class is not available.', 'err');
   }
 
@@ -878,7 +917,8 @@
       </tbody></table></div>`;
   }
   // ── Consents (recording consent: one checkbox per person; 001_base.sql consent_overview) ──
-  const CST = { granted: ['Granted', 'ok'], declined: ['Declined', 'err'], revoked: ['Revoked', 'warn'], pending: ['Pending', ''] };
+  // P-11: saying no is a legitimate choice → shown in a neutral colour, never in alarm red
+  const CST = { granted: ['Granted', 'ok'], declined: ['Declined', 'neutral'], revoked: ['Revoked', 'neutral'], pending: ['Pending', ''] };
   const seenKey = unit => 'tc-cons-seen:' + unit;
   function markConsentsSeen(unit) {
     try { localStorage.setItem(seenKey(unit), new Date().toISOString()); } catch (e) { /* private mode: the badge just stays */ }
@@ -891,7 +931,7 @@
     if (n > 0) {
       if (!b) { b = document.createElement('span'); b.className = 'sib-badge'; b.setAttribute('data-no-i18n', ''); nav.appendChild(b); }
       b.textContent = n > 99 ? '99+' : String(n);
-      b.title = `${n} ${tr(n === 1 ? 'new justification (recording consent)' : 'new justifications (recording consent)')}`;
+      b.title = `${n} ${tr(n === 1 ? 'new comment (recording consent)' : 'new comments (recording consent)')}`;
     } else if (b) b.remove();
   }
   // new "no" justifications since the admin last opened Consents (per unit, remembered in this browser)
@@ -924,7 +964,7 @@
     const d = GR.cons; if (!d) return '<div class="in-loading">Loading…</div>';
     const f = GR.cf;
     const opt = (v, l, cur) => `<option value="${v}"${cur === v ? ' selected' : ''}>${esc(tr(l))}</option>`;
-    return `<div class="gc-hint">🎙️ <span>One consent per person: recording (audio only), AI analysis and storage. Each person is asked once; a "no" is asked again at their next class. Only this institution sees the people it loaded and the justifications addressed to it.</span></div>
+    return `<div class="gc-hint">🎙️ <span>One consent per person: recording (audio only), AI analysis and storage. Each person is asked once; a "no" is asked again at their next class, and the comment is optional. Saying no is a valid choice: those people join their classes normally, without being recorded. Only this institution sees the people it loaded and the comments addressed to it.</span></div>
       <div class="gc-cons-filters" role="group" aria-label="${esc(tr('Filters'))}">
         <label class="gc-cons-f"><span>Status</span><select id="gc-cons-status" class="member-role">${opt('all', 'All statuses', f.status)}${opt('granted', 'Granted', f.status)}${opt('declined', 'Declined', f.status)}${opt('revoked', 'Revoked', f.status)}${opt('pending', 'Pending', f.status)}</select></label>
         <label class="gc-cons-f"><span>Role</span><select id="gc-cons-kind" class="member-role">${opt('all', 'Everyone', f.kind)}${opt('student', 'Students', f.kind)}${opt('teacher', 'Teachers', f.kind)}</select></label>
@@ -939,18 +979,21 @@
     const stats = `<div class="gc-cons-sum">${Object.keys(CST).map(k => `<button type="button" class="gc-cons-stat ${k}${f.status === k ? ' active' : ''}" data-gc="cons-stat" data-s="${k}" aria-pressed="${f.status === k}"><b data-no-i18n>${counts[k] || 0}</b><span>${CST[k][0]}</span></button>`).join('')}</div>`;
     const rows = people.map(p => `<tr>
         <td><span data-no-i18n>${esc(p.name || '—')}</span>${unitBadge(p)}</td><td data-no-i18n class="gc-mail">${esc(p.email || '')}</td>
-        <td><span class="gc-chip">${p.kind === 'teacher' ? 'Teacher' : 'Student'}</span></td>
-        <td><span class="gc-chip ${CST[p.status]?.[1] || ''}">${CST[p.status]?.[0] || 'Pending'}</span>${p.minor ? ` <span class="gc-chip" title="${esc(tr('Under 18: the guardian gave consent'))}">👪 <span>Under 18 · guardian ✓</span></span>` : ''}${!p.linked ? ' <span class="gc-muted">(<span>not signed in yet</span>)</span>' : ''}</td>
+        <td><span class="gc-chip">${p.admin ? 'Admin' : p.kind === 'teacher' ? 'Teacher' : 'Student'}</span></td>
+        <td><span class="gc-chip ${CST[p.status]?.[1] || ''}">${CST[p.status]?.[0] || 'Pending'}</span>${p.minor ? (p.guardian_consent ? ` <span class="gc-chip" title="${esc(tr('Under 18: the guardian gave consent'))}">👪 <span>Under 18 · guardian ✓</span></span>` : ` <span class="gc-chip neutral" title="${esc(tr('Under 18: not recorded until the guardian confirms from their link'))}">👪 <span>Under 18 · waiting for the guardian</span></span>`) : ''}${!p.linked ? ' <span class="gc-muted">(<span>not signed in yet</span>)</span>' : ''}</td>
         <td data-no-i18n class="gc-cons-date">${esc(consDate(p.status_at))}</td></tr>`).join('');
     const people_ = `<h2 class="gc-cons-h"><span>People</span> <span class="gc-muted" data-no-i18n>(${people.length})</span></h2>
       ${(d.people || []).length ? `<div class="admin-card gc-tablecard"><table class="teachers-table gc-cons-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Date</th></tr></thead><tbody>
         ${rows || `<tr><td colspan="5" class="muted-cell">${esc(tr('No one matches these filters.'))}</td></tr>`}</tbody></table></div>` : '<div class="bl-empty">No people loaded in this unit yet.</div>'}`;
-    const decl = `<h2 class="gc-cons-h"><span>Justifications</span> <span class="gc-muted" data-no-i18n>(${declines.length})</span></h2>
-      ${declines.length ? `<ul class="gc-cons-decl">${declines.map(x => `<li class="gc-cons-item">
+    // P-11: comments are optional; a "no" without a comment is counted, not listed as something to read
+    const withText = declines.filter(x => String(x.reason || '').trim()); const noText = declines.length - withText.length;
+    const decl = `<h2 class="gc-cons-h"><span>Comments</span> <span class="gc-muted" data-no-i18n>(${withText.length})</span></h2>
+      ${noText ? `<p class="gc-hint gc-cons-notext"><span>Answers without a comment:</span> <b data-no-i18n>${noText}</b></p>` : ''}
+      ${withText.length ? `<ul class="gc-cons-decl">${withText.map(x => `<li class="gc-cons-item">
           <div class="gc-cons-top"><b data-no-i18n>${esc(x.name || '—')}</b> <span class="gc-chip">${x.role === 'teacher' ? 'Teacher' : 'Student'}</span>${unitBadge(x)} <span class="gc-muted gc-cons-when" data-no-i18n>${esc(consDate(x.created_at))}</span></div>
           ${x.class_title ? `<div class="gc-cons-class"><span>Class:</span> <span data-no-i18n>${esc(x.class_title)}${x.class_starts_at ? ' · ' + esc(fDay(x.class_starts_at)) : ''}</span></div>` : ''}
           <blockquote class="gc-cons-reason" data-no-i18n>${esc(x.reason)}</blockquote></li>`).join('')}</ul>`
-        : `<div class="bl-empty">${esc(tr('No justifications yet.'))}</div>`}`;
+        : `<div class="bl-empty">${esc(tr('No comments yet.'))}</div>`}`;
     return stats + people_ + decl;
   }
   function consentsCsv() {
@@ -958,8 +1001,8 @@
     const es = uiLang === 'es'; const sep = es ? ';' : ',';
     const q = v => { const x = String(v ?? ''); return /[",;\n\r]/.test(x) || /^[=+\-@\t]/.test(x) ? '"' + (/^[=+\-@\t]/.test(x) ? "'" : '') + x.replace(/"/g, '""') + '"' : x; };
     const { people } = consFiltered();
-    const latest = p => (d.declines || []).filter(x => x.unit_id === p.unit_id && String(x.email || '').toLowerCase() === String(p.email || '').toLowerCase())[0];
-    const head = ['Name', 'Email', 'Role', 'Unit', 'Status', 'Date', 'Under 18', 'Latest justification', 'Class'].map(tr);
+    const latest = p => (d.declines || []).filter(x => x.unit_id === p.unit_id && String(x.email || '').toLowerCase() === String(p.email || '').toLowerCase() && String(x.reason || '').trim())[0];
+    const head = ['Name', 'Email', 'Role', 'Unit', 'Status', 'Date', 'Under 18', 'Latest comment', 'Class'].map(tr);
     const rows = people.map(p => { const l = latest(p); return [p.name, p.email, tr(p.kind === 'teacher' ? 'Teacher' : 'Student'), p.unit_name, tr(CST[p.status]?.[0] || 'Pending'),
       p.status_at ? new Date(p.status_at).toISOString().slice(0, 16).replace('T', ' ') : '', p.minor ? tr('Yes') : '', l ? l.reason : '', l ? (l.class_title || '') : '']; });
     const csv = '\ufeff' + [head, ...rows].map(r => r.map(q).join(sep)).join('\r\n') + '\r\n';
@@ -988,7 +1031,11 @@
     try {
       const root = (typeof hierPath === 'function' ? hierPath(unit)[0]?.id : null) || unit;
       const ids = Object.keys(orgsCache || {}).filter(x => ((typeof hierPath === 'function' ? hierPath(x)[0]?.id : null) || x) === root);
-      if (ids.length) { const r = await sb.from('invitations').select('email,role').in('institution_id', ids).is('accepted_at', null); pending = (r.data || []).map(x => String(x.email || '').toLowerCase()).filter(Boolean); }
+      if (ids.length) {
+        const r = await sb.from('invitations').select('email,role,accepted_at,declined_at,cancelled_at,expires_at').in('institution_id', ids).is('accepted_at', null);
+        // only live invitations (TC-16: they expire after 14 days; cancelled / declined ones don't count)
+        pending = (r.data || []).filter(x => !x.declined_at && !x.cancelled_at && (!x.expires_at || Date.parse(x.expires_at) > Date.now())).map(x => String(x.email || '').toLowerCase()).filter(Boolean);
+      }
     } catch (e) { pending = []; }
     const known = new Set(teachers.map(t => String(t.email || '').toLowerCase()));
     pending = [...new Set(pending)].filter(e => !known.has(e)).sort();
@@ -1015,7 +1062,7 @@
           <div class="modal-field"><label class="modal-label" for="gc-g-sub">Substitute (optional)</label><select id="gc-g-sub" class="modal-input" data-newfor="gc-g-sub-new">${tOpts(g?.substitute?.id || '', g?.pending_substitute?.email || '', 'No substitute')}</select>
             <input id="gc-g-sub-new" type="email" class="modal-input gc-newmail" placeholder="${esc(tr('teacher@school.edu'))}" hidden></div>
         </div>
-        <div class="gc-hint gc-hint-block">Someone who is not registered yet gets an invitation as teacher of this unit and stays as "Pending" until they sign up.</div>
+        <div class="gc-hint gc-hint-block">Someone who is not registered yet is invited as teacher of this unit and stays as "Pending" until they sign up. No email is sent: share the invitation link from Dashboard → Invitations.</div>
         <div class="modal-field"><label class="modal-label" for="gc-g-tz">Time zone</label><select id="gc-g-tz" class="modal-input">${tzs.map(z => `<option value="${esc(z)}"${z === tz ? ' selected' : ''} data-no-i18n>${esc(tzLabel(z))}</option>`).join('')}</select></div>
         ${teachers.length || pending.length ? '' : '<div class="gc-hint">No teachers registered yet: choose "Invite someone by email…".</div>'}${pendingHint}
         <div class="modal-actions"><button type="button" class="btn-modal-cancel" data-gc="close">Cancel</button><button type="submit" class="btn-modal-save">${g ? 'Save' : 'Create group'}</button></div>
@@ -1087,7 +1134,10 @@
       if (error) { errToast(error); return; }
       showToast('Added to the group ✓', 'ok');
     } else if (kind === 's-remove') {
-      if (!twoClick('sr' + e, el, tr('Click again: removes them from this unit'))) return;
+      const st = (GR.students || []).find(x => x.id === e || x.enrollment_id === e);
+      if (!(await danger({ title: tr('Remove this student from the unit?'), body: st ? (st.name || st.email || '') : '',
+        items: [tr('They leave all the groups of this unit'), tr('Their attendance and insights in this unit are deleted'), tr('You can load them again later, but that history does not come back')],
+        confirmText: tr('Remove student') }, 'sr' + e, el, tr('Click again: removes them from this unit')))) return;
       busy(el, true); const { error } = await rpc('remove_student', { p_enrollment: e }); busy(el, false);
       if (error) { errToast(error); return; }
       showToast('Student removed', 'ok');
@@ -1096,7 +1146,10 @@
   }
   async function deleteGroup(id, btn) {
     if (blocked()) return;
-    if (!twoClick('gd' + id, btn, tr('Click again: deletes the group and its classes'))) return;
+    const g = GR.groups.find(x => x.id === id);
+    if (!(await danger({ title: tr('Delete this group?'), body: tr('This cannot be undone. To confirm, type the name of the group.'),
+      items: [`${tr('All its classes (past and future), with their attendance, class documents and insights')}`, g ? `${tr('Students in the group:')} ${g.students || 0} ${tr('(they stay loaded in the unit)')}` : '', tr('The teacher and substitute stop seeing those classes')],
+      typeWord: g ? g.name : '', confirmText: tr('Delete group') }, 'gd' + id, btn, tr('Click again: deletes the group and its classes')))) return;
     busy(btn, true); const { error } = await rpc('delete_group', { p_group: id }); busy(btn, false);
     if (error) { errToast(error); return; }
     delete GR.open[id]; showToast('Group deleted', 'ok'); loadGroups();
@@ -1337,9 +1390,12 @@
       case 'ins-open': if (window.TCInsightsPanel) window.TCInsightsPanel.openMine(id); break;
       case 'ins-all': showPanel('insights'); break;
       case 'ins-view': { const s = findRow(id); closeGc(); if (window.TCInsightsPanel) window.TCInsightsPanel.openSession(id, { unit: s?.role === 'admin' }); break; }
+      case 'plan-attach': attachPlan(id, $('gc-plan-sel')?.value || '', el); break;
+      case 'plan-detach': attachPlan(id, null, el); break;
       case 'ins-gen': {
         const s = findRow(id); if (!s || !window.TCInsightsPanel) break;
-        window.TCInsightsPanel.generate(id, { title: sTitle(s), group: s.group_name || '' }, el).then(ok => { if (ok) { closeGc(); window.TCInsightsPanel.openSession(id, { unit: s.role === 'admin' }); } });
+        // P-08: demo insights follow the class: its attached plan (if any), else its title / group
+        sessionPlan(id).then(plan => window.TCInsightsPanel.generate(id, { title: sTitle(s), group: s.group_name || '', plan: plan?.content || '' }, el)).then(ok => { if (ok) { closeGc(); window.TCInsightsPanel.openSession(id, { unit: s.role === 'admin' }); } });
         break;
       }
       case 'ics': { const s = findRow(id); if (s) download(`teroclass-${ymd(new Date(s.starts_at))}.ics`, sessionIcs(s), 'text/calendar;charset=utf-8'); break; }
@@ -1416,7 +1472,13 @@
     if (nav && window.MutationObserver) new MutationObserver(kick).observe(nav, { attributes: true, attributeFilter: ['style'] });
     setInterval(() => { if (!document.hidden) refreshConsentBadge(); }, 60000); }
 
-  window.GC = { onEnter, afterEnter, render, onLang, refreshConsentBadge, enterStudentMode, leaveStudentMode, isStudentMode, backFromLive, modal, close: closeGc,
+  // open the detail of a calendar class from elsewhere (live-class home): same path as a ?session= deep link
+  function openSessionFromOutside(id) {
+    if (!UUID_RE.test(String(id || ''))) return;
+    pendingSession = id; CAL._deepTried = false;
+    if (isActive('calendar') && CAL.loaded) handleDeepLink(); else showPanel('calendar');
+  }
+  window.GC = { onEnter, afterEnter, render, onLang, refreshConsentBadge, enterStudentMode, leaveStudentMode, isStudentMode, backFromLive, modal, close: closeGc, openSession: openSessionFromOutside,
     vaLoadStudentPick, vaLoadStudents, vaStartStudent, _test: { csvToRows, parseCsv, joinState, startsIn, opensAt, isStaffRow, sessionIcs, googleUrl, CAL, GR, ST } };
   window.handleStudentLink = handleStudentLink;
 
@@ -1456,6 +1518,11 @@
     'PH:Search by name, email or class': 'Buscar por nombre, email o clase', 'Search by name, email or class': 'Buscar por nombre, email o clase',
     'Export CSV': 'Exportar CSV', 'People': 'Personas', 'Justifications': 'Justificaciones', 'Name': 'Nombre', 'Email': 'Email', 'Date': 'Fecha',
     'Under 18 · guardian ✓': 'Menor de 18 · tutor/a ✓', 'Under 18: the guardian gave consent': 'Menor de 18: el tutor/a dio su consentimiento',
+    'Under 18 · waiting for the guardian': 'Menor de 18 · esperando al tutor/a', 'Under 18: not recorded until the guardian confirms from their link': 'Menor de 18: no se graba hasta que el tutor/a confirme desde su link',
+    'Admin': 'Admin', 'Comments': 'Comentarios', 'Answers without a comment:': 'Respuestas sin comentario:', 'No comments yet.': 'Todavía no hay comentarios.', 'Latest comment': 'Último comentario',
+    'One consent per person: recording (audio only), AI analysis and storage. Each person is asked once; a "no" is asked again at their next class, and the comment is optional. Saying no is a valid choice: those people join their classes normally, without being recorded. Only this institution sees the people it loaded and the comments addressed to it.':
+      'Un solo consentimiento por persona: grabación (solo audio), análisis con IA y almacenamiento. A cada persona se le pregunta una vez; si dice que no, se le vuelve a preguntar en su próxima clase, y el comentario es opcional. Decir que no es una opción válida: esas personas participan normalmente de sus clases, sin ser grabadas. Solo esta institución ve a las personas que cargó y los comentarios dirigidos a ella.',
+    'new comment (recording consent)': 'comentario nuevo (consentimiento de grabación)', 'new comments (recording consent)': 'comentarios nuevos (consentimiento de grabación)',
     'not signed in yet': 'todavía no entró', 'No one matches these filters.': 'Nadie coincide con estos filtros.',
     'No people loaded in this unit yet.': 'Todavía no hay personas cargadas en esta unidad.', 'No justifications yet.': 'Todavía no hay justificaciones.',
     'Class:': 'Clase:', 'Unit': 'Unidad', 'Under 18': 'Menor de 18', 'Latest justification': 'Última justificación', 'Yes': 'Sí',
@@ -1497,6 +1564,10 @@
     'Add to calendar': 'Agregar al calendario', 'Google Calendar': 'Google Calendar', '.ics (Outlook, Apple)': '.ics (Outlook, Apple)',
     'Could not load the students.': 'No se pudieron cargar los estudiantes.', 'No students yet.': 'Todavía no hay estudiantes.', 'Invited': 'Invitado/a',
     'Invite': 'Invitar', 'Email the students': 'Mandar email a los estudiantes', 'Copy invitation link': 'Copiar link de invitación', 'Edit': 'Editar',
+    'Class plan': 'Plan de la clase', 'Saved class': 'Clase guardada', 'No plan attached yet: the live room will show this plan to you (never to students).': 'Todavía no hay un plan adjunto: el aula en vivo te va a mostrar este plan a vos (nunca a los estudiantes).',
+    'Choose a saved class': 'Elegí una clase guardada', '— Choose a saved class —': '— Elegí una clase guardada —', 'Attach plan': 'Adjuntar plan', 'Remove plan': 'Quitar plan',
+    'Create and save a class in Classes to attach it here.': 'Creá y guardá una clase en Clases para adjuntarla acá.', 'Choose a saved class first.': 'Primero elegí una clase guardada.',
+    'Plan attached ✓ The live room will show it.': 'Plan adjunto ✓ El aula en vivo lo va a mostrar.', 'Plan removed': 'Plan quitado',
     'Edit this class': 'Editar esta clase', 'Restore this class': 'Reactivar esta clase', 'Cancel this class': 'Cancelar esta clase',
     'Edit the whole series': 'Editar toda la serie', 'Cancel the whole series': 'Cancelar toda la serie', 'Close': 'Cerrar',
     'Only this date changes.': 'Solo cambia esta fecha.', 'Title (optional)': 'Título (opcional)', 'Date': 'Fecha', 'Start time': 'Hora de inicio',
@@ -1588,7 +1659,14 @@
     'Invited people who have not registered yet can be chosen now: they are assigned by themselves when they sign up.': 'Podés elegir a personas invitadas que todavía no se registraron: quedan asignadas solas cuando se registran.',
     'Registered': 'Registrados', 'Invited (not registered yet)': 'Invitados (todavía sin registrarse)', 'Invite someone by email…': 'Invitar a alguien por email…',
     'teacher@school.edu': 'docente@escuela.edu.uy', 'PH:teacher@school.edu': 'docente@escuela.edu.uy',
-    'Someone who is not registered yet gets an invitation as teacher of this unit and stays as "Pending" until they sign up.': 'Si la persona todavía no está registrada, le llega una invitación como docente de esta unidad y queda "Pendiente" hasta que se registre.',
+    'Someone who is not registered yet is invited as teacher of this unit and stays as "Pending" until they sign up. No email is sent: share the invitation link from Dashboard → Invitations.': 'Si la persona todavía no está registrada, queda invitada como docente de esta unidad y figura "Pendiente" hasta que se registre. No se manda ningún email: compartí el link de invitación desde Panel → Invitaciones.',
+    'Cancel the whole series?': '¿Cancelar toda la serie?', 'Every future class of this series is cancelled (students see it as cancelled in their calendars). Past classes are kept.': 'Se cancelan todas las clases futuras de la serie (los estudiantes las ven canceladas en sus calendarios). Las clases pasadas se conservan.',
+    'Future classes in view:': 'Clases futuras a la vista:', 'Classes edited one by one are cancelled too': 'También se cancelan las clases editadas una por una', 'Cancel the series': 'Cancelar la serie',
+    'Remove this student from the unit?': '¿Quitar a este estudiante de la unidad?', 'They leave all the groups of this unit': 'Sale de todos los grupos de esta unidad',
+    'Their attendance and insights in this unit are deleted': 'Se borran su asistencia y sus insights en esta unidad', 'You can load them again later, but that history does not come back': 'Lo podés volver a cargar después, pero ese historial no vuelve',
+    'Remove student': 'Quitar estudiante', 'Delete this group?': '¿Borrar este grupo?', 'This cannot be undone. To confirm, type the name of the group.': 'No se puede deshacer. Para confirmar, escribí el nombre del grupo.',
+    'All its classes (past and future), with their attendance, class documents and insights': 'Todas sus clases (pasadas y futuras), con su asistencia, documentos e insights',
+    'Students in the group:': 'Estudiantes en el grupo:', '(they stay loaded in the unit)': '(siguen cargados en la unidad)', 'The teacher and substitute stop seeing those classes': 'El docente y el suplente dejan de ver esas clases', 'Delete group': 'Borrar grupo',
     'No teachers registered yet: choose "Invite someone by email…".': 'Todavía no hay docentes registrados: elegí "Invitar a alguien por email…".',
     'Group saved ✓ The invited person is assigned when they register.': 'Grupo guardado ✓ La persona invitada queda asignada cuando se registre.',
     // CSV import with schedules

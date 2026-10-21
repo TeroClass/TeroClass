@@ -117,8 +117,7 @@ function seed({ history = false } = {}) {
     await studentLogin(S.page, t.ana);
     await S.page.waitForFunction(() => { const b = document.querySelector('.gs-enter .gc-join'); return b && !b.disabled; });
     await S.page.click('.gs-enter .gc-join');
-    await S.page.waitForSelector('#panel-live.active #lc-name');
-    await S.page.fill('#lc-name', 'Ana Pérez');
+    await S.page.waitForSelector('#panel-live.active #lc-joinas');
     await S.page.check('#lc-consent'); // first class room: the single recording consent (asked once)
     await S.page.click('#lc-join');
     await S.page.waitForSelector('#lc-room');
