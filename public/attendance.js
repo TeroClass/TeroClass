@@ -178,8 +178,9 @@
       const started = Date.parse(s.starts_at) - 10 * MIN <= now; const docOk = s.has_doc || edit;
       return `<li class="gcs-item${s.status === 'cancelled' ? ' cancelled' : ''}">
         <span class="gcs-when" data-no-i18n>${esc(fDay(s.starts_at))} · ${esc(fTime(s.starts_at))}</span>
-        <span class="gcs-main"><b data-no-i18n>${esc(s.title)}</b><span>${s.status === 'cancelled' ? '<span class="gc-chip cancelled">Cancelled</span> ' : ''}${s.has_doc ? `<span class="gc-chip ok">📄 ${esc(tr('Document'))}</span>` : `<span class="gc-chip">${esc(tr('No document yet'))}</span>`} ${s.doc_locked ? `<span class="gc-chip warn">🔒 ${esc(tr('Locked'))}</span>` : ''}</span></span>
+        <span class="gcs-main"><b data-no-i18n>${esc(s.title)}</b><span>${s.status === 'cancelled' ? '<span class="gc-chip cancelled">Cancelled</span> ' : ''}${s.has_doc ? `<span class="gc-chip ok">📄 ${esc(tr('Document'))}</span>` : `<span class="gc-chip">${esc(tr('No document yet'))}</span>`} ${s.doc_locked ? `<span class="gc-chip warn">🔒 ${esc(tr('Locked'))}</span>` : ''}${s.has_board ? ` <span class="gc-chip ok">🖍️ ${esc(tr('Board'))}</span>` : ''}</span></span>
         <span class="gcs-act"><button type="button" class="tree-btn" data-att="gs-doc" data-id="${esc(s.id)}"${docOk ? '' : ' disabled'}>📄 <span>${esc(tr(edit ? 'Open document' : 'Read document'))}</span></button>
+          ${window.TCClassBoard && (s.has_board || edit) ? `<button type="button" class="tree-btn" data-att="gs-board" data-id="${esc(s.id)}">🖍️ <span>${esc(tr(edit ? 'Open board' : 'See board'))}</span></button>` : ''}
           ${started && s.status !== 'cancelled' ? `<button type="button" class="tree-btn" data-att="gs-att" data-id="${esc(s.id)}">✅ <span>${esc(tr('Attendance'))}</span></button>` : ''}</span>
       </li>`;
     };
@@ -251,6 +252,7 @@
       case 'rep-back': if (typeof REP.back === 'function') REP.back(); break;
       case 'gs-report': openReport(GS.group, { back: () => openGroupSessions(GS.group) }); break;
       case 'gs-doc': if (window.TCClassDoc) window.TCClassDoc.open(el.dataset.id); break;
+      case 'gs-board': if (window.TCClassBoard) window.TCClassBoard.open(el.dataset.id); break;
       case 'gs-att': openSessionAttendance(el.dataset.id); break;
       case 'gs-back': renderGroupSessions(); break;
     }

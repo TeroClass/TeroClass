@@ -4,7 +4,8 @@
 // Checked: no CSP violation while signing in, the self-hosted Inter font, supabase-js, the live room with the LiveKit
 // SDK (/vendor), the class-document editor (dynamic import), pdf.js + its worker, mammoth, a Realtime websocket to
 // *.supabase.co and LiveKit to *.livekit.cloud (allowed), an inline event handler-free framing check, and that
-// third-party origins (the old CDNs) are blocked.
+// third-party origins (the old CDNs) are blocked. The class whiteboard (Excalidraw + React, /vendor/whiteboard, lazy chunks,
+// its fonts from /vendor/whiteboard/fonts via EXCALIDRAW_ASSET_PATH) opens, draws, saves and exports PNG / SVG under the CSP.
 // Usage: NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-csp.cjs
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -114,6 +115,34 @@ function fileFor(p) {
     if (r.editor !== true) throw new Error('editor: ' + r.editor);
     if (!/Hola CSP/.test(r.pdf)) throw new Error('pdf.js: ' + r.pdf);
     if (r.mammoth !== true) throw new Error('mammoth: ' + r.mammoth);
+  });
+
+  await step('Class whiteboard under the CSP: Excalidraw + React from /vendor/whiteboard, its fonts self-hosted, drawing saved, PNG / SVG export', async () => {
+    const db = M.db; const me = db.profiles.find(p => p.email === 'csp@t.com');
+    const g = { id: M.uid(), institution_id: me.institution_id, name: 'CSP group', teacher_id: me.id, substitute_id: null, timezone: 'America/Montevideo', created_at: new Date().toISOString() };
+    db.class_groups.push(g);
+    const s = { id: M.uid(), institution_id: me.institution_id, group_id: g.id, series_id: null, teacher_id: me.id, title: 'CSP board', starts_at: new Date(Date.now() - 5 * 60000).toISOString(), ends_at: new Date(Date.now() + 55 * 60000).toISOString(), timezone: 'America/Montevideo', status: 'scheduled', seq: 0, modified: false };
+    db.class_sessions.push(s);
+    const txt = { id: 'csp-t1', type: 'text', version: 2, versionNonce: 11, isDeleted: false, x: 60, y: 60, width: 200, height: 25, angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid', strokeWidth: 2, strokeStyle: 'solid',
+      roughness: 1, opacity: 100, groupIds: [], frameId: null, roundness: null, seed: 3, boundElements: null, updated: 1, link: null, locked: false, index: 'a0', text: 'Hola pizarra', originalText: 'Hola pizarra', fontSize: 20, fontFamily: 5,
+      textAlign: 'left', verticalAlign: 'top', containerId: null, autoResize: true, lineHeight: 1.25 };
+    db.class_boards.push({ session_id: s.id, rev: 1, generation: 1, locked: false, bytes: 600, channel_key: 'c'.repeat(64), updated_at: new Date().toISOString() });
+    db.class_board_elements.push({ session_id: s.id, element_id: txt.id, version: 2, nonce: 11, deleted: false, rev: 1, data: txt, bytes: 600 });
+    await page.evaluate(id => TCClassBoard.open(id), s.id);
+    await page.waitForSelector('#cb-overlay .excalidraw canvas.interactive', { timeout: 30000 });
+    await page.waitForFunction(() => TCClassBoard._test.view?.api?.getSceneElements().length === 1, null, { timeout: 15000 });
+    await page.click('#cb-overlay label:has([data-testid="toolbar-rectangle"])');
+    const box = await page.locator('#cb-overlay canvas.interactive').boundingBox();
+    await page.mouse.move(box.x + 400, box.y + 250); await page.mouse.down(); await page.mouse.move(box.x + 600, box.y + 380, { steps: 6 }); await page.mouse.up();
+    for (let i = 0; i < 50 && !db.class_board_elements.some(e => e.session_id === s.id && e.data.type === 'rectangle'); i++) await page.waitForTimeout(100);
+    if (!db.class_board_elements.some(e => e.session_id === s.id && e.data.type === 'rectangle')) throw new Error('the drawing was not saved');
+    const svg = await page.evaluate(async () => { const v = TCClassBoard._test.view; const out = await TCClassBoard.loadLib().then(M => M.exportToSvg({ elements: v.api.getSceneElements(), appState: { exportBackground: true, viewBackgroundColor: '#fff' }, files: null }));
+      const png = await TCClassBoard.loadLib().then(M => M.exportToBlob({ elements: v.api.getSceneElements(), appState: { exportBackground: true, viewBackgroundColor: '#fff' }, files: null, mimeType: 'image/png' }));
+      return { svg: out.outerHTML.length, font: /@font-face/.test(out.outerHTML), png: png.size }; });
+    if (!svg.font || svg.png < 1000) throw new Error('export: ' + JSON.stringify(svg));
+    const wb = [...seen.served].filter(p => p.startsWith('/vendor/whiteboard/'));
+    if (!wb.includes('/vendor/whiteboard/whiteboard.js') || !wb.includes('/vendor/whiteboard/excalidraw.css') || !wb.some(p => p.startsWith('/vendor/whiteboard/chunks/')) || !wb.some(p => p.startsWith('/vendor/whiteboard/fonts/'))) throw new Error('whiteboard files: ' + wb.join(', '));
+    await page.evaluate(() => TCClassBoard.close());
   });
 
   await step('TC-11 nothing violated the CSP; third-party script origins are blocked', async () => {

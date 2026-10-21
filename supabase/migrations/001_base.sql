@@ -3283,6 +3283,15 @@ begin
                 or exists (select 1 from public.session_invitees si where si.session_id = s.id and si.enrollment_id = any(v_enr)))
            and s.ends_at <= now() and s.ends_at > now() - interval '90 days'
          order by s.starts_at desc limit 8) x), '[]'::json),
+    -- pizarras de sus clases ya terminadas (últimos 90 días; quedan como registro)
+    'boards', coalesce((select json_agg(x order by x.starts_at desc) from (
+        select s.id, coalesce(nullif(s.title, ''), g.name, '') as title, s.starts_at, s.ends_at, g.name as group_name, b.updated_at
+          from public.class_boards b join public.class_sessions s on s.id = b.session_id left join public.class_groups g on g.id = s.group_id
+         where b.rev > 0
+           and (s.group_id = any(v_groups)
+                or exists (select 1 from public.session_invitees si where si.session_id = s.id and si.enrollment_id = any(v_enr)))
+           and s.ends_at <= now() and s.ends_at > now() - interval '90 days'
+         order by s.starts_at desc limit 8) x), '[]'::json),
     -- su asistencia (solo la propia: "Asististe a 9 de 10 clases"); un estudiante genérico de "Ver como" no tiene
     'attendance', public.tc_attendance_summary(v_enr));
 end $$;
@@ -4082,8 +4091,10 @@ begin
     'can_edit', public.teaches_group(p_group),
     'sessions', coalesce((select json_agg(json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name), 'starts_at', s.starts_at,
           'ends_at', s.ends_at, 'timezone', s.timezone, 'status', s.status, 'has_doc', d.session_id is not null,
-          'doc_locked', coalesce(d.locked, false), 'doc_updated_at', d.updated_at) order by s.starts_at desc, s.id)
+          'doc_locked', coalesce(d.locked, false), 'doc_updated_at', d.updated_at,
+          'has_board', bd.session_id is not null and bd.rev > 0, 'board_locked', coalesce(bd.locked, false)) order by s.starts_at desc, s.id)
         from public.class_sessions s left join public.class_docs d on d.session_id = s.id
+        left join public.class_boards bd on bd.session_id = s.id
        where s.group_id = p_group
          and s.starts_at > now() - make_interval(days => least(greatest(coalesce(p_past_days, 60), 0), 400))
          and s.starts_at < now() + make_interval(days => least(greatest(coalesce(p_future_days, 30), 0), 400))), '[]'::json));
@@ -4097,6 +4108,369 @@ begin
     execute 'create policy tc_classdoc_listen on realtime.messages for select to authenticated using (public.tc_classdoc_rt_ok((select realtime.topic()), false))';
     execute 'drop policy if exists tc_classdoc_send on realtime.messages';
     execute 'create policy tc_classdoc_send on realtime.messages for insert to authenticated with check (public.tc_classdoc_rt_ok((select realtime.topic()), true))';
+  end if;
+end $$;
+
+-- ========== PIZARRA DE LA CLASE (una por clase del calendario; 2026-10) ==========
+-- Una pizarra colaborativa de dibujo (Excalidraw) por clase: docente, suplente y estudiantes de la clase dibujan a la vez;
+-- queda como registro después de la clase. Mismas reglas de acceso que el documento de la clase (tc_classdoc_role):
+--   · docente / suplente de la clase (o quien creó la clase suelta): dibujan, bloquean / desbloquean, restauran versiones;
+--   · estudiantes de la clase (miembros del grupo o invitados): dibujan, salvo que el docente la bloquee (entonces solo miran);
+--   · admins de la unidad (y de sus superiores) y súper admin: SOLO LECTURA. Nadie más.
+-- CÓMO SE GUARDA (sin acceso directo a las tablas; todo por las funciones de abajo, que verifican el acceso):
+--   · class_board_elements: un elemento de Excalidraw por fila (JSON validado acá: tipo permitido, id, version, versionNonce,
+--     tamaño). Cada navegador manda SOLO lo que cambió (classboard_push, con espera de ~300 ms). Concurrencia: gana el
+--     elemento con mayor "version"; con la misma version gana el menor "versionNonce" (la misma regla que usa Excalidraw al
+--     reconciliar). Cada cambio aceptado toma el número siguiente de class_boards.rev, así classboard_pull devuelve solo lo nuevo.
+--   · Borrar un elemento lo deja como "borrado" (isDeleted, sin el trazo / texto) para que los demás también lo borren.
+--   · Tope: 2 MB por pizarra (suma de los elementos); un cambio que lo supere se rechaza con un mensaje claro (borrar libera).
+--   · IMÁGENES: no se permiten por ahora (ni imágenes, ni páginas incrustadas): se rechazan acá y la app no ofrece la herramienta.
+--   · class_board_versions: versiones (cada 10 min mientras se dibuja, al terminar la clase, manuales, antes de restaurar);
+--     máximo 20 por pizarra. Restaurar (solo docente) sube "generation" y los navegadores recargan la pizarra entera.
+--   · class_board_presence: quién tiene la pizarra abierta (nombre y color los pone la base, nunca el navegador).
+-- TIEMPO REAL: canal PRIVADO "classboard:<id de la clase>" (políticas sobre realtime.messages al final de esta sección).
+--   Escuchar: cualquiera con acceso. Mandar: docente, y estudiantes solo si la pizarra no está bloqueada. Por el canal viajan
+--   los trazos para verlos al instante y los punteros, pero NADA se guarda desde el canal: cada navegador guarda lo suyo con
+--   classboard_push, que valida todo. El canal público de respaldo (nombre impredecible) solo lleva avisos "hay cambios" y
+--   punteros, nunca dibujos. Sin Realtime, la app consulta cada 2 segundos.
+create table if not exists public.class_boards (
+  session_id uuid primary key references public.class_sessions(id) on delete cascade,
+  rev bigint not null default 0,                      -- último cambio aceptado (cada elemento guarda el rev en que cambió)
+  generation integer not null default 1,              -- sube al restaurar una versión
+  locked boolean not null default false,              -- bloqueada por el docente: los estudiantes solo miran
+  locked_at timestamptz,
+  channel_key text not null default public.tc_new_token(),
+  bytes integer not null default 0,                   -- suma de los elementos (tope 2 MB)
+  updated_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create table if not exists public.class_board_elements (
+  session_id uuid not null references public.class_boards(session_id) on delete cascade,
+  element_id text not null check (element_id ~ '^[A-Za-z0-9_-]{1,64}$'),
+  version integer not null,
+  nonce bigint not null default 0,
+  deleted boolean not null default false,
+  rev bigint not null,
+  data jsonb not null,
+  bytes integer not null default 0,
+  primary key (session_id, element_id)
+);
+create index if not exists class_board_elements_rev_idx on public.class_board_elements (session_id, rev);
+create table if not exists public.class_board_versions (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.class_boards(session_id) on delete cascade,
+  elements jsonb not null default '[]'::jsonb,        -- los elementos visibles en ese momento
+  label text not null check (label in ('auto','class_end','manual','before_restore')),
+  bytes integer not null default 0,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists class_board_versions_sess_idx on public.class_board_versions (session_id, created_at desc);
+create table if not exists public.class_board_presence (
+  session_id uuid not null references public.class_sessions(id) on delete cascade,
+  client_id text not null check (length(client_id) between 1 and 40),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null default '',
+  color text not null default '#7c5cbf',
+  role text not null default 'student',
+  state jsonb not null default '{}'::jsonb,          -- solo la posición del puntero (máx. 512 bytes)
+  seen_at timestamptz not null default now(),
+  primary key (session_id, client_id)
+);
+alter table public.class_boards         enable row level security;
+alter table public.class_board_elements enable row level security;
+alter table public.class_board_versions enable row level security;
+alter table public.class_board_presence enable row level security;
+revoke all on public.class_boards, public.class_board_elements, public.class_board_versions, public.class_board_presence from anon, authenticated;
+drop trigger if exists class_boards_hide_owner on public.class_boards;
+create trigger class_boards_hide_owner before insert or update of updated_by on public.class_boards
+  for each row execute function public.hide_superadmin_refs('updated_by');
+drop trigger if exists class_board_versions_hide_owner on public.class_board_versions;
+create trigger class_board_versions_hide_owner before insert on public.class_board_versions
+  for each row execute function public.hide_superadmin_refs('created_by');
+
+-- ── ayudas internas ──
+-- Mi papel en la pizarra: el mismo que en el documento de la clase ('teacher' / 'student' / 'admin' / null)
+create or replace function public.tc_classboard_role(p_session uuid) returns text
+language sql stable security definer set search_path = public, pg_temp as
+$$ select public.tc_classdoc_role(p_session) $$;
+-- Guarda una versión con los elementos visibles (máximo 20 y 40 MB por pizarra; "fin de clase" se conserva)
+create or replace function public.tc_classboard_add_version(p_session uuid, p_label text) returns uuid
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_els jsonb; v_id uuid;
+begin
+  if not exists (select 1 from public.class_boards where session_id = p_session) then return null; end if;
+  select coalesce(jsonb_agg(e.data order by e.rev, e.element_id), '[]'::jsonb) into v_els
+    from public.class_board_elements e where e.session_id = p_session and not e.deleted;
+  if jsonb_array_length(v_els) = 0 then return null; end if;
+  insert into public.class_board_versions (session_id, elements, label, bytes, created_by)
+  values (p_session, v_els, p_label, octet_length(v_els::text), case when p_label in ('manual','before_restore') then auth.uid() end)
+  returning id into v_id;
+  delete from public.class_board_versions where id in (
+    select id from (select id, row_number() over (order by (label = 'class_end') desc, created_at desc, id) rn,
+                           sum(bytes) over (order by (label = 'class_end') desc, created_at desc, id) acc
+                      from public.class_board_versions where session_id = p_session) x
+     where x.rn > 20 or (x.acc > 41943040 and x.rn > 1));
+  return v_id;
+end $$;
+-- Crea la fila de la pizarra (si falta) y la bloquea hasta el fin de la transacción: los cambios se numeran en orden
+create or replace function public.tc_classboard_lock_row(p_session uuid) returns public.class_boards
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare b public.class_boards%rowtype;
+begin
+  insert into public.class_boards (session_id) values (p_session) on conflict (session_id) do nothing;
+  select * into b from public.class_boards where session_id = p_session for update;
+  return b;
+end $$;
+-- Valida y limpia UN elemento de Excalidraw (o da error). Tipos permitidos: formas, flechas, líneas, trazo libre, texto, marcos.
+-- Imágenes y páginas incrustadas: no. Se quitan customData y los enlaces que no sean http(s) / mailto; un elemento borrado
+-- se guarda sin su trazo ni su texto (alcanza con saber que está borrado).
+create or replace function public.tc_classboard_clean(p_el jsonb) returns jsonb
+language plpgsql immutable set search_path = public, pg_temp as
+$$
+declare v jsonb := p_el; v_type text;
+begin
+  if jsonb_typeof(v) is distinct from 'object' then raise exception 'Cambio inválido'; end if;
+  if coalesce(v->>'id', '') !~ '^[A-Za-z0-9_-]{1,64}$' then raise exception 'Cambio inválido'; end if;
+  if jsonb_typeof(v->'version') is distinct from 'number' or (v->>'version') !~ '^[0-9]{1,9}$' or (v->>'version')::int < 1 then raise exception 'Cambio inválido'; end if;
+  if jsonb_typeof(v->'versionNonce') is distinct from 'number' or (v->>'versionNonce') !~ '^-?[0-9]{1,15}$' then raise exception 'Cambio inválido'; end if;
+  if v ? 'isDeleted' and jsonb_typeof(v->'isDeleted') is distinct from 'boolean' then raise exception 'Cambio inválido'; end if;
+  v_type := coalesce(v->>'type', '');
+  if v_type in ('image','embeddable','iframe') then raise exception 'Las imágenes no están disponibles en la pizarra'; end if;
+  if v_type not in ('rectangle','diamond','ellipse','arrow','line','freedraw','text','frame') then raise exception 'Elemento no permitido en la pizarra'; end if;
+  if octet_length(v::text) > 262144 then raise exception 'Cambio demasiado grande'; end if;
+  v := v - 'customData' - 'fileId';
+  if v ? 'link' and jsonb_typeof(v->'link') = 'string' and (v->>'link') !~* '^(https?://|mailto:)[^[:space:]<>"]+$' then v := jsonb_set(v, '{link}', 'null'::jsonb); end if;
+  if v ? 'link' and jsonb_typeof(v->'link') not in ('string','null') then v := jsonb_set(v, '{link}', 'null'::jsonb); end if;
+  if coalesce((v->>'isDeleted')::boolean, false) then v := v - 'points' - 'pressures' - 'text' - 'originalText' - 'link'; end if;
+  return v;
+end $$;
+-- Política de Realtime para "classboard:<uuid>": escuchar = cualquiera con acceso; mandar = docente, o estudiante si no está bloqueada
+create or replace function public.tc_classboard_rt_ok(p_topic text, p_send boolean) returns boolean
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_role text; v_sid uuid;
+begin
+  if p_topic is null or p_topic !~ '^classboard:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then return false; end if;
+  v_sid := substr(p_topic, 12)::uuid;
+  v_role := public.tc_classboard_role(v_sid);
+  if not coalesce(p_send, false) then return v_role is not null; end if;
+  return v_role = 'teacher'
+      or (v_role = 'student' and not coalesce((select locked from public.class_boards where session_id = v_sid), false));
+end $$;
+revoke all on function public.tc_classboard_role(uuid) from public, anon, authenticated;
+revoke all on function public.tc_classboard_add_version(uuid, text) from public, anon, authenticated;
+revoke all on function public.tc_classboard_lock_row(uuid) from public, anon, authenticated;
+revoke all on function public.tc_classboard_clean(jsonb) from public, anon, authenticated;
+revoke all on function public.tc_classboard_rt_ok(text, boolean) from public, anon;
+grant execute on function public.tc_classboard_rt_ok(text, boolean) to authenticated;
+
+-- ── funciones de la app ──
+-- Abrir: la clase, mi papel, si puedo dibujar, todos los elementos (también los borrados: hacen falta para reconciliar),
+-- el número de cambio actual y el canal de tiempo real.
+create or replace function public.classboard_open(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_role text := public.tc_classboard_role(p_session); s public.class_sessions%rowtype; g public.class_groups%rowtype;
+        b public.class_boards%rowtype;
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  select * into s from public.class_sessions where id = p_session;
+  select * into g from public.class_groups where id = s.group_id;
+  select * into b from public.class_boards where session_id = p_session;
+  return json_build_object(
+    'session', json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name, ''), 'starts_at', s.starts_at,
+       'ends_at', s.ends_at, 'timezone', s.timezone, 'status', s.status, 'group_id', s.group_id, 'group_name', g.name),
+    'role', v_role,
+    'can_edit', v_role = 'teacher' or (v_role = 'student' and not coalesce(b.locked, false)),
+    'can_lock', v_role = 'teacher',
+    'locked', coalesce(b.locked, false),
+    'generation', coalesce(b.generation, 1),
+    'rev', coalesce(b.rev, 0),
+    'bytes', coalesce(b.bytes, 0),
+    'max_bytes', 2097152,
+    'elements', coalesce((select json_agg(e.data order by e.rev, e.element_id) from public.class_board_elements e where e.session_id = p_session), '[]'::json),
+    'channel', json_build_object('topic', 'classboard:' || p_session::text, 'key', b.channel_key),
+    'me', case when v_role in ('teacher','student') then json_build_object('name', public.tc_classdoc_name(p_session, auth.uid(), v_role),
+            'color', public.tc_classdoc_color(p_session, auth.uid())) end,
+    'versions', (select count(*) from public.class_board_versions v where v.session_id = p_session),
+    'updated_at', b.updated_at);
+end $$;
+
+-- Guardar lo que cambió (un arreglo de elementos de Excalidraw). Docente siempre; estudiantes si no está bloqueada; admins nunca.
+create or replace function public.classboard_push(p_session uuid, p_generation integer, p_elements jsonb, p_client text default '')
+returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_role text := public.tc_classboard_role(p_session); b public.class_boards%rowtype; s public.class_sessions%rowtype;
+        v_last timestamptz; v_rev bigint; v_el jsonb; v_raw jsonb; v_n integer := 0; v_cnt integer; v_total bigint;
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  if v_role not in ('teacher','student') then raise exception 'Solo lectura: no podés dibujar en esta pizarra'; end if;
+  if jsonb_typeof(p_elements) is distinct from 'array' or jsonb_array_length(p_elements) = 0 then raise exception 'Cambio inválido'; end if;
+  if jsonb_array_length(p_elements) > 2000 or octet_length(p_elements::text) > 1048576 then raise exception 'Cambio demasiado grande'; end if;
+  b := public.tc_classboard_lock_row(p_session);
+  if v_role = 'student' and b.locked then raise exception 'El docente bloqueó la pizarra'; end if;
+  if p_generation is distinct from b.generation then raise exception 'Pizarra desactualizada: volvé a abrirla'; end if;
+  if not public.tc_rate_take('classboard:' || auth.uid()::text, octet_length(p_elements::text), 8388608, 60) then
+    raise exception 'Demasiados cambios seguidos: esperá un momento';
+  end if;
+  select * into s from public.class_sessions where id = p_session;
+  -- versiones automáticas: "fin de clase" (antes del primer cambio posterior al final) y cada 10 minutos
+  if now() > s.ends_at and not exists (select 1 from public.class_board_versions where session_id = p_session and label = 'class_end') then
+    perform public.tc_classboard_add_version(p_session, 'class_end');
+  end if;
+  select max(created_at) into v_last from public.class_board_versions where session_id = p_session;
+  if v_last is null or v_last < now() - interval '10 minutes' then perform public.tc_classboard_add_version(p_session, 'auto'); end if;
+  v_rev := b.rev + 1;
+  for v_raw in select x from jsonb_array_elements(p_elements) x loop
+    v_el := public.tc_classboard_clean(v_raw);
+    -- gana la version más alta; con la misma version, el versionNonce más bajo (como reconcileElements de Excalidraw)
+    insert into public.class_board_elements as e (session_id, element_id, version, nonce, deleted, rev, data, bytes)
+    values (p_session, v_el->>'id', (v_el->>'version')::int, (v_el->>'versionNonce')::bigint, coalesce((v_el->>'isDeleted')::boolean, false),
+            v_rev, v_el, octet_length(v_el::text))
+    on conflict (session_id, element_id) do update
+      set version = excluded.version, nonce = excluded.nonce, deleted = excluded.deleted, rev = excluded.rev, data = excluded.data, bytes = excluded.bytes
+      where excluded.version > e.version or (excluded.version = e.version and excluded.nonce < e.nonce);
+    get diagnostics v_cnt = row_count; v_n := v_n + v_cnt;
+  end loop;
+  if v_n = 0 then return json_build_object('rev', b.rev, 'applied', 0, 'generation', b.generation); end if;
+  select coalesce(sum(bytes), 0) into v_total from public.class_board_elements where session_id = p_session;
+  -- tope por pizarra: 2 MB (un cambio que achica la pizarra siempre se acepta)
+  if v_total > 2097152 and v_total > b.bytes then
+    raise exception 'La pizarra llegó a su tamaño máximo (2 MB): borrá dibujos que ya no uses para seguir dibujando';
+  end if;
+  update public.class_boards set rev = v_rev, bytes = v_total, updated_at = now(), updated_by = auth.uid() where session_id = p_session;
+  return json_build_object('rev', v_rev, 'applied', v_n, 'generation', b.generation);
+end $$;
+
+-- Leer lo nuevo desde p_since (+ quién está conectado). Si cambió la generación (versión restaurada): reset = true con todo.
+-- Docente / estudiantes anuncian su presencia (p_presence = {pointer}).
+create or replace function public.classboard_pull(p_session uuid, p_since bigint default 0, p_generation integer default null,
+                                                  p_client text default '', p_presence jsonb default null)
+returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_role text := public.tc_classboard_role(p_session); b public.class_boards%rowtype; v_reset boolean; v_client text := left(coalesce(p_client, ''), 40);
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  if p_presence is not null and v_role in ('teacher','student') and v_client <> '' then
+    insert into public.class_board_presence (session_id, client_id, user_id, name, color, role, state, seen_at)
+    values (p_session, v_client, auth.uid(), public.tc_classdoc_name(p_session, auth.uid(), v_role), public.tc_classdoc_color(p_session, auth.uid()),
+            v_role, case when jsonb_typeof(p_presence) = 'object' and octet_length(p_presence::text) <= 512 then p_presence else '{}'::jsonb end, now())
+    on conflict (session_id, client_id) do update
+      set state = excluded.state, seen_at = now(), name = excluded.name, role = excluded.role
+      where class_board_presence.user_id = auth.uid();
+    delete from public.class_board_presence where session_id = p_session and seen_at < now() - interval '2 minutes';
+  end if;
+  select * into b from public.class_boards where session_id = p_session;
+  v_reset := b.session_id is not null and p_generation is distinct from b.generation;
+  return json_build_object(
+    'generation', coalesce(b.generation, 1), 'locked', coalesce(b.locked, false),
+    'can_edit', v_role = 'teacher' or (v_role = 'student' and not coalesce(b.locked, false)),
+    'reset', coalesce(v_reset, false), 'rev', coalesce(b.rev, 0), 'bytes', coalesce(b.bytes, 0),
+    'elements', coalesce((select json_agg(e.data order by e.rev, e.element_id) from public.class_board_elements e
+                           where e.session_id = p_session and (v_reset or e.rev > coalesce(p_since, 0))), '[]'::json),
+    'presence', coalesce((select json_agg(json_build_object('client', pr.client_id, 'name', pr.name, 'color', pr.color, 'role', pr.role, 'state', pr.state)
+                                          order by pr.name, pr.client_id)
+                            from public.class_board_presence pr
+                           where pr.session_id = p_session and pr.client_id <> v_client and pr.seen_at > now() - interval '45 seconds'), '[]'::json));
+end $$;
+
+-- Bloquear (los estudiantes solo miran) o desbloquear: solo docente / suplente
+create or replace function public.classboard_set_lock(p_session uuid, p_locked boolean) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare b public.class_boards%rowtype;
+begin
+  if public.tc_classboard_role(p_session) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  b := public.tc_classboard_lock_row(p_session);
+  update public.class_boards set locked = coalesce(p_locked, false), locked_at = case when coalesce(p_locked, false) then now() end,
+         updated_at = now(), updated_by = auth.uid()
+   where session_id = p_session;
+  return json_build_object('locked', coalesce(p_locked, false));
+end $$;
+
+-- Historial: versiones (cualquiera con acceso las ve) · una versión completa · guardar una ahora / fin de clase (docente)
+create or replace function public.classboard_versions(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if public.tc_classboard_role(p_session) is null then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(json_build_object('id', v.id, 'label', v.label, 'created_at', v.created_at, 'bytes', v.bytes,
+                     'count', jsonb_array_length(v.elements),
+                     'by', case when v.created_by is not null then public.tc_person_name(v.created_by) end) order by v.created_at desc, v.id)
+                     from public.class_board_versions v where v.session_id = p_session), '[]'::json);
+end $$;
+create or replace function public.classboard_version(p_version uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v public.class_board_versions%rowtype;
+begin
+  select * into v from public.class_board_versions where id = p_version;
+  if v.id is null or public.tc_classboard_role(v.session_id) is null then raise exception 'No autorizado'; end if;
+  return json_build_object('id', v.id, 'session_id', v.session_id, 'label', v.label, 'created_at', v.created_at, 'elements', v.elements);
+end $$;
+create or replace function public.classboard_add_version(p_session uuid, p_label text default 'manual') returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_id uuid;
+begin
+  if public.tc_classboard_role(p_session) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  if coalesce(p_label, '') not in ('manual','class_end') then raise exception 'Versión inválida'; end if;
+  if not exists (select 1 from public.class_boards where session_id = p_session) then return json_build_object('id', null, 'created', false); end if;
+  perform public.tc_classboard_lock_row(p_session);
+  if p_label = 'class_end' and exists (select 1 from public.class_board_versions where session_id = p_session and label = 'class_end') then
+    return json_build_object('id', null, 'created', false);
+  end if;
+  v_id := public.tc_classboard_add_version(p_session, p_label);
+  return json_build_object('id', v_id, 'created', v_id is not null);
+end $$;
+-- Restaurar una versión (solo docente / suplente): guarda la actual como "antes de restaurar", reemplaza todos los elementos
+-- y sube generation (los navegadores abiertos recargan; los cambios de una generación vieja se rechazan).
+create or replace function public.classboard_restore(p_version uuid) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v public.class_board_versions%rowtype; b public.class_boards%rowtype;
+begin
+  select * into v from public.class_board_versions where id = p_version;
+  if v.id is null or public.tc_classboard_role(v.session_id) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  b := public.tc_classboard_lock_row(v.session_id);
+  perform public.tc_classboard_add_version(v.session_id, 'before_restore');
+  delete from public.class_board_elements where session_id = v.session_id;
+  insert into public.class_board_elements (session_id, element_id, version, nonce, deleted, rev, data, bytes)
+  select v.session_id, x->>'id', (x->>'version')::int, (x->>'versionNonce')::bigint, false, b.rev + 1, x, octet_length(x::text)
+    from jsonb_array_elements(v.elements) x
+  on conflict (session_id, element_id) do nothing;
+  update public.class_boards set generation = generation + 1, rev = b.rev + 1, updated_at = now(), updated_by = auth.uid(),
+         bytes = (select coalesce(sum(bytes), 0) from public.class_board_elements where session_id = v.session_id)
+   where session_id = v.session_id returning * into b;
+  return json_build_object('generation', b.generation, 'restored', v.id, 'rev', b.rev);
+end $$;
+
+do $$
+declare f text;
+begin
+  foreach f in array array[
+    'classboard_open(uuid)', 'classboard_push(uuid, integer, jsonb, text)', 'classboard_pull(uuid, bigint, integer, text, jsonb)',
+    'classboard_set_lock(uuid, boolean)', 'classboard_versions(uuid)', 'classboard_version(uuid)',
+    'classboard_add_version(uuid, text)', 'classboard_restore(uuid)'] loop
+    execute format('revoke all on function public.%s from public, anon', f);
+    execute format('grant execute on function public.%s to authenticated', f);
+  end loop;
+end $$;
+
+-- Tiempo real: políticas del canal privado "classboard:<id>" (solo si el proyecto tiene Realtime)
+do $$
+begin
+  if to_regclass('realtime.messages') is not null and to_regproc('realtime.topic') is not null then
+    execute 'drop policy if exists tc_classboard_listen on realtime.messages';
+    execute 'create policy tc_classboard_listen on realtime.messages for select to authenticated using (public.tc_classboard_rt_ok((select realtime.topic()), false))';
+    execute 'drop policy if exists tc_classboard_send on realtime.messages';
+    execute 'create policy tc_classboard_send on realtime.messages for insert to authenticated with check (public.tc_classboard_rt_ok((select realtime.topic()), true))';
   end if;
 end $$;
 

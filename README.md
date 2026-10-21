@@ -12,6 +12,9 @@ AI-powered didactic planning platform for teachers.
 - Class document + attendance: `public/class-doc.js` / `.css`, `public/attendance.js`, and the vendored editor
   `public/vendor/classdoc-editor.js` (Yjs 13.6.32 + TipTap 2.27.2, one pinned ES module loaded on demand; no build step —
   it is rebuilt only when upgrading, with `scripts/vendor/build-classdoc.sh`).
+- Class whiteboard ("Pizarra"): `public/class-board.js` / `.css` and the vendored Excalidraw `public/vendor/whiteboard/`
+  (React 18.3.1 + ReactDOM 18.3.1 + @excalidraw/excalidraw 0.18.1, MIT; one pinned ES module + lazy chunks + fonts, loaded only
+  when a board is opened; rebuilt only when upgrading, with `scripts/vendor/build-whiteboard.sh`).
 
 ## Environment variables (Vercel → Settings → Environment Variables)
 
@@ -36,8 +39,10 @@ AI-powered didactic planning platform for teachers.
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again with the pre-launch
-fix sprint (2026-10, see *Pre-launch fix sprint*): run it again** — tested from git 203e2e1 with data, then twice; earlier: (it upgrades the
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for the class whiteboard
+(2026-10-21, see *Class whiteboard*): run it again** — tested from git 3c0ef7b with data, then twice; `002_live_class.sql` did not
+change and still applies after it. Before that it changed with the pre-launch
+fix sprint (2026-10, see *Pre-launch fix sprint*) — tested from git 203e2e1 with data, then twice; earlier: (it upgrades the
 previous version in place and keeps all data; tested from git 9993462 — and c198c60, d063eb0 — with data, then twice).
 `002_live_class.sql` is still **not** needed; it changed too (its per-call `consents` table is now an audit log written only by
 the server from `user_consents`) and it still applies after the new `001` (it now requires it).
@@ -310,6 +315,65 @@ already loaded; a restore discards edits that someone was typing at that very mo
 suggestion mode are not supported; there is no offline editing (unsent changes are retried while the page is open); the
 teacher-only private note for the teacher guide was not built.
 
+## Class whiteboard (Pizarra)
+
+One shared drawing board per calendar class (Excalidraw): everyone in the class draws at the same time, the teacher can lock
+it, and it stays as a record afterwards.
+- **Who:** the same people as the class document — the class's teacher and substitute (or whoever created a one-off class)
+  and its students (group members and invited emails) draw live; institution admins of that unit (and above) and the super
+  admin: **read-only** (Groups → group card → *Classes & documents* → *See board*, or the class detail). Nobody else (checked
+  in the database on every read and write). View as is read-only.
+- **Lock:** the teacher locks it (students only look; Excalidraw's view mode) and unlocks it. Also enforced by the database
+  and by the Realtime policy (a locked student can't join the channel as a sender).
+- **Where:** *Pizarra* tab in the live room's side panel (+ *Pantalla completa*: the board covers the video stage, the room
+  controls stay), *Abrir pizarra* in the class detail of the Calendar, the student dashboard (*Pizarra* on the next class,
+  🖍️ on each class, *Pizarras de tus clases* = boards of their past classes, 90 days), the admin's group card.
+- **Tools:** Excalidraw's shapes, arrows, lines, free drawing (pencil), text, eraser, frames and the laser pointer; Spanish
+  UI (Excalidraw's own `es-ES` texts). **Images and embedded web pages are disabled for now** (tool hidden, a pasted /
+  dropped image is removed with a message, and the database refuses them) — they would need file storage; the library
+  panel and "Mermaid → diagram" are hidden too.
+- **History:** a version every 10 minutes while people draw, one at the end of the class (ending the class in the live
+  room, or before the first change after the class ended), the ones the teacher saves, one before every restore; max 20 per
+  board. Everyone with access can preview them; **only the teacher restores** (every open board reloads on it).
+- **Export:** PNG and SVG (Excalidraw's exporters; also its own *Export image* dialog in the board menu).
+- **Phones and tablets:** Excalidraw's touch UI (bottom bar, pinch zoom); finger drawing works.
+
+**How it syncs.** Each browser sends **only the elements it changed** to `classboard_push` (~300 ms after the last change,
+at least every 1.2 s while drawing). The database validates every element (allowed type, id, `version`, `versionNonce`,
+max 256 KB, no `customData`, links only http(s) / mailto) and keeps, per element, the highest `version` (same version: the
+lowest `versionNonce` — Excalidraw's own reconcile rule), numbering every accepted change (`rev`) so `classboard_pull`
+returns only what is new. **Cap: 2 MB per board** ("La pizarra llegó a su tamaño máximo (2 MB): borrá dibujos que ya no
+uses…"; deleting frees space; a warning shows from 80 %). On the *private* Realtime channel `classboard:<class id>` the
+changed elements also travel so the others see a stroke while it is drawn, plus the pointers (names and colours come from
+the database through `classboard_pull`, never from other browsers). **Nothing is stored from the channel**: a browser only
+draws what it receives (after the same type / size checks) and reconciles it with `reconcileElements`; anything that no
+pull confirms within a few seconds is replaced by the stored version or removed. The public fallback channel (unguessable
+name from `classboard_open`) only carries "changes, pull" pokes and pointers; without Realtime the board reads every 2 s and
+says "Live sync unavailable". Tables (no direct access): `class_boards`, `class_board_elements`, `class_board_versions`,
+`class_board_presence`.
+
+**Library and CSP.** Excalidraw needs React: `public/vendor/whiteboard/whiteboard.js` (1.30 MB, **423 KB gzip**, plus
+`excalidraw.css` 145 KB / 23 KB gzip) is loaded with `import()` only when a board opens; its lazy chunks (Spanish/English
+texts, PNG/SVG export helpers) and fonts are in the same folder (2.1 MB in total; the CJK font Xiaolai, 13 MB, is left out:
+Chinese/Japanese text uses the system font). `window.EXCALIDRAW_ASSET_PATH` points at `/vendor/whiteboard/` and the build
+also replaces Excalidraw's CDN fallback for fonts, so nothing is requested from another origin; font *subsetting* for SVG
+export (WebAssembly) is replaced by embedding the whole (already small) font file, so the CSP did not change (no
+`wasm-unsafe-eval`). `tests/e2e-csp.cjs` opens a board, draws and exports under the real headers.
+
+**Supabase dashboard steps (Ignacio):**
+1. Run the new `001_base.sql`. It creates two more policies on `realtime.messages`: check Database → Policies → schema
+   `realtime` → `messages`: `tc_classboard_listen` and `tc_classboard_send` (next to `tc_classdoc_listen` / `tc_classdoc_send`).
+2. Nothing else: Realtime is already used by the class document. Keeping "Allow public access" **off** (recommended) is fine.
+
+**Limitations (class whiteboard).** No images or embedded pages yet; one board per calendar class — **quick rooms started
+outside the calendar have no board** (they are not in the database: their access is a signed link checked only by the
+server; schedule a one-off class to get one); pointers move live only with Realtime (every 2 s without it); a restore
+discards strokes that someone was drawing at that very moment; two people moving the same shape at the same instant: the
+last saved version wins; Excalidraw's own Spanish texts are from Spain (and a few of its hints are still in English); the
+shared shape library isn't available; no offline drawing (unsent changes are retried while the page is open); a student who
+was already connected when the board was locked can't send drawings (the app stops, the database refuses them and the
+others' screens drop anything not stored), but the Realtime policy itself is checked when joining the channel.
+
 ## Attendance (Asistencia)
 
 - **Automatic (today):** when a student enters the room of a calendar class (*Enter class* → lobby → *Join*) the app calls
@@ -432,6 +496,8 @@ Findings TC-xx (technical audit) and P-xx (product audit). Summary of the behavi
 - [ ] Supabase Auth: Site URL + Redirect URLs (prod, preview, `/org/*`, `/?reset=1`), **Confirm email ON**, own SMTP
       (e.g. Resend with @teroclass.com), minimum password length 8, Bot and Abuse Protection → Turnstile with the secret
       key — TC-05 / TC-18. Realtime: turn off "Allow public access".
+- [ ] Class whiteboard (2026-10-21): run the new `001_base.sql` and check that Database → Policies → `realtime.messages` lists
+      `tc_classboard_listen` and `tc_classboard_send` (see *Class whiteboard*). No new environment variable.
 - [ ] **Azure budget alerts** (TC-01): Azure portal → Cost Management → Budgets → *Add*: monthly budget for the
       resource group of the OpenAI resource, alerts at 50 %, 80 % and 100 % to your email; and in Azure AI Foundry →
       Deployments → `gpt-4o` → set a **tokens-per-minute (TPM) limit** that fits your plan. The app limits are a second
@@ -444,7 +510,7 @@ Findings TC-xx (technical audit) and P-xx (product audit). Summary of the behavi
 
 ## Tests
 
-`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Metrics), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile), `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room), `tests/e2e-insights.cjs` (class insights per role, demo generation, reflection, publish a message, student privacy, admin subtree, View as, mobile, Métricas), `tests/e2e-classdoc.cjs` (two browsers editing the same class document through a simulated Realtime broadcast, lock, paste a class without answers, admin read-only, live room tab, polling fallback, history/restore, export, mobile) `tests/e2e-attendance.cjs` (join → present for the teacher, corrections, admin group report + CSV, student summary, mobile) and `tests/e2e-consent.cjs` (one checkbox asked once, decline + required justification → admin Consentimientos + badge + CSV, profile revoke / turn on, minor + guardian, auto-recording + pause, View as, Métricas, mobile; `SHOTS=<dir>` saves `cons-*.png`) run the app in a headless browser
+`tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Metrics), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile), `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room), `tests/e2e-insights.cjs` (class insights per role, demo generation, reflection, publish a message, student privacy, admin subtree, View as, mobile, Métricas), `tests/e2e-classdoc.cjs` (two browsers editing the same class document through a simulated Realtime broadcast, lock, paste a class without answers, admin read-only, live room tab, polling fallback, history/restore, export, mobile), `tests/e2e-classboard.cjs` (class whiteboard: two browsers drawing on the same board through the simulated Realtime channel, lock, broadcasts never stored, admin read-only, live room tab + full screen, polling fallback, history/restore, PNG/SVG export, images refused, phone with touch drawing; `SHOTS=<dir>` saves `wb-*.png`) `tests/e2e-attendance.cjs` (join → present for the teacher, corrections, admin group report + CSV, student summary, mobile) and `tests/e2e-consent.cjs` (one checkbox asked once, decline + required justification → admin Consentimientos + badge + CSV, profile revoke / turn on, minor + guardian, auto-recording + pause, View as, Métricas, mobile; `SHOTS=<dir>` saves `cons-*.png`) run the app in a headless browser
 against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/<file>`).
 Pre-launch fixes: `tests/e2e-launch-fixes.cjs`, `tests/e2e-sprint-fixes.cjs` (`SHOTS=<dir>` saves `fix-*.png`) and
 `tests/e2e-csp.cjs` (the app under the real `vercel.json` headers / CSP); `tests/api-launch.test.mjs` and
@@ -453,7 +519,8 @@ Pre-launch fixes: `tests/e2e-launch-fixes.cjs`, `tests/e2e-sprint-fixes.cjs` (`S
 `tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage, insights, students & calendar privacy, and the upgrade path from the previous `001`) on a local
 Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql`, `class_insights.sql`,
 `classdoc_attendance.sql` (class document access matrix, lock, versions/restore, Realtime policies; attendance privacy, late
-rule, overrides, report), `consent.sql` (recording consent: privacy, grant / revoke / version, minors, justifications visibility,
+rule, overrides, report), `classboard.sql` (class whiteboard: access matrix, element validation, last-writer-wins, lock, 2 MB
+cap, versions/restore, Realtime policies; also after an upgrade from git 3c0ef7b with data), `consent.sql` (recording consent: privacy, grant / revoke / version, minors, justifications visibility,
 admin overview, Métricas, notification payload), the upgrades from git fabb1c7, c198c60, d063eb0 and 9993462 with data, and
 `002_live_class.sql` + its RLS suite after the current `001`).
 CSV parser unit tests: `node --no-warnings --test tests/unit-*.test.mjs`.

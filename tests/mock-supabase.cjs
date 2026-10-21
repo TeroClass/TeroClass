@@ -34,11 +34,20 @@ const HTML = RAW_HTML
   .replace('<script src="/groups-calendar.js"></script>', () => `<script>${asset('groups-calendar.js')}</script>`)
   .replace('<link rel="stylesheet" href="/class-doc.css">', () => `<style>${asset('class-doc.css')}</style>`)
   .replace('<script src="/attendance.js"></script>', () => `<script>${asset('attendance.js')}</script>`)
-  .replace('<script src="/class-doc.js"></script>', () => `<script>${asset('class-doc.js')}</script>`);
+  .replace('<script src="/class-doc.js"></script>', () => `<script>${asset('class-doc.js')}</script>`)
+  .replace('<link rel="stylesheet" href="/class-board.css">', () => `<style>${asset('class-board.css')}</style>`)
+  .replace('<script src="/class-board.js"></script>', () => `<script>${asset('class-board.js')}</script>`);
 // The class-document editor is an ES module loaded on demand (import('/vendor/classdoc-editor.js')): tests that open a
 // document serve it with serveVendor(route) (production: public/vendor/, see vercel.json).
 const VENDOR_EDITOR = fs.readFileSync(path.join(ROOT, 'public/vendor/classdoc-editor.js'), 'utf8');
 const serveVendor = route => route.fulfill({ contentType: 'application/javascript; charset=utf-8', body: VENDOR_EDITOR });
+// The whiteboard (Excalidraw + React) is a folder of files loaded on demand (/vendor/whiteboard/…): served from public/ as is.
+const WB_TYPES = { '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2' };
+const serveWhiteboard = route => {
+  const p = new URL(route.request().url()).pathname; const f = path.join(ROOT, 'public', path.normalize(p).replace(/^(\.\.[\/\\])+/, ''));
+  if (!p.startsWith('/vendor/whiteboard/') || !f.startsWith(path.join(ROOT, 'public/vendor/whiteboard')) || !fs.existsSync(f)) return route.fulfill({ status: 404, body: 'not found' });
+  return route.fulfill({ status: 200, contentType: WB_TYPES[path.extname(f)] || 'application/octet-stream', body: fs.readFileSync(f) });
+};
 const SB_JS = fs.readFileSync(process.env.SB_JS || '/tmp/package/dist/umd/supabase.js', 'utf8');
 const SB = 'https://ppvqkjchhejjulrdqkdr.supabase.co';
 // Test-only platform owner (placeholder). The real system never promotes by email: the mock simply
@@ -49,6 +58,7 @@ const db = { users: {}, profiles: [], institutions: [], plannings: [], invitatio
   class_groups: [], student_enrollments: [], group_members: [], session_series: [], class_sessions: [], session_invitees: [], calendar_tokens: [],
   teacher_insights: [], student_insights: [],
   class_docs: [], class_doc_updates: [], class_doc_versions: [], class_doc_presence: [], session_attendance: [],
+  class_boards: [], class_board_elements: [], class_board_versions: [], class_board_presence: [],
   user_consents: [], consent_declines: [] };
 const calls = { rpc: [], inserts: {}, otp: [] };
 // billing state (same rules as the SQL functions, simplified): accounts[rootId] = {seats, monthly_tokens, extra}; usage[rootId] = used this month
@@ -330,11 +340,14 @@ async function handleSupabase(route) {
     if (fn === 'my_data_export') { if (!me) return NOAUTH(); return json(200, { exported_at: new Date().toISOString(), profile: { email: meP.email, name: meP.name, role: meP.role }, plannings: db.plannings.filter(x => x.owner_id === me.id).map(x => ({ title: x.title, data: x.data })) }); }
     { const r = consent.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classInsights.handle(fn, body, me); if (r) return json(r.status, r.data); }
-    { const r = classDoc.handle(fn, body, me); if (r) return json(r.status, r.data); }
+    { const r = classBoard.handle(fn, body, me); if (r) return json(r.status, r.data); }
+    { const r = classDoc.handle(fn, body, me);
+      if (r && fn === 'group_sessions' && r.status === 200) r.data.sessions.forEach(x => Object.assign(x, classBoard.flags(x.id))); // + the class whiteboard
+      if (r) return json(r.status, r.data); }
     { const r = students.handle(fn, body, me);
       if (r && fn === 'student_view' && r.status === 200) { // + attendance summary and the documents of past classes (own enrollments only)
         const eids = body.p_enrollment ? [body.p_enrollment] : (!body.p_group && me ? db.student_enrollments.filter(e => e.user_id === me.id).map(e => e.id) : []);
-        Object.assign(r.data, classDoc.studentExtras(eids));
+        Object.assign(r.data, classDoc.studentExtras(eids), { boards: classBoard.studentBoards(eids) });
       }
       if (r) return json(r.status, r.data); }
     if (fn === 'get_document_content') {
@@ -378,7 +391,9 @@ function inviteMember(inst, email, role, by) {
 const classInsights = require('./mock-insights.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
 const classDoc = require('./mock-classdoc.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
 const consent = require('./mock-consent.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
-const realtime = require('./mock-realtime.cjs')({ tokUser, canRealtime: classDoc.canRealtime, publicTopicOk: classDoc.publicTopicOk });
+const classBoard = require('./mock-classboard.cjs')({ db, uid, classDoc });
+const realtime = require('./mock-realtime.cjs')({ tokUser, canRealtime: (me, t, send) => classDoc.canRealtime(me, t, send) || classBoard.canRealtime(me, t, send),
+  publicTopicOk: t => classDoc.publicTopicOk(t) || classBoard.publicTopicOk(t) });
 const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0),
   insightSummaries: (eids, me) => classInsights.summaries(eids, 5, me) });
-module.exports = { consent, students, classInsights, classDoc, realtime, serveVendor, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+module.exports = { consent, students, classInsights, classDoc, classBoard, realtime, serveVendor, serveWhiteboard, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

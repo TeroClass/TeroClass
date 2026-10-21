@@ -946,6 +946,7 @@ Cierre y ticket de salida (5 min)
             <button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="chat" id="lc-tab-chat">Chat</button>
             <button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="people" id="lc-tab-people">People</button>
             ${S.sessionId && window.TCClassDoc ? '<button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="doc" id="lc-tab-doc">Document</button>' : ''}
+            ${S.sessionId && window.TCClassBoard ? '<button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="board" id="lc-tab-board">Board</button>' : ''}
             <button type="button" class="lc-side-close" data-lc="side-close" aria-label="${esc(tr('Close panel'))}">✕</button>
           </div>
           <div class="lc-side-body" id="lc-side-plan" role="tabpanel" aria-labelledby="lc-tab-plan">${planPanelHtml()}</div>
@@ -959,6 +960,7 @@ Cierre y ticket de salida (5 min)
           </div>
           <div class="lc-side-body" id="lc-side-people" role="tabpanel" aria-labelledby="lc-tab-people"><ul class="lc-people" id="lc-people-list"></ul></div>
           ${S.sessionId && window.TCClassDoc ? '<div class="lc-side-body lc-doc-body" id="lc-side-doc" role="tabpanel" aria-labelledby="lc-tab-doc" hidden></div>' : ''}
+          ${S.sessionId && window.TCClassBoard ? '<div class="lc-side-body lc-board-body" id="lc-side-board" role="tabpanel" aria-labelledby="lc-tab-board" hidden></div>' : ''}
         </aside>
       </div>
       <div class="lc-controls" role="toolbar" aria-label="${esc(tr('Class controls'))}">
@@ -973,6 +975,7 @@ Cierre y ticket de salida (5 min)
           ${ctl('chat', 'side', '💬', 'Chat', 'data-side="chat"')}
           ${ctl('people', 'side', '👥', 'People', 'data-side="people"')}
           ${S.sessionId && window.TCClassDoc ? ctl('doc', 'side', '📄', 'Document', 'data-side="doc"') : ''}
+          ${S.sessionId && window.TCClassBoard ? ctl('board', 'side', '🖍️', 'Board', 'data-side="board"') : ''}
         </div>
         <div class="lc-ctl-group">
           ${teacher ? ctl('pause', 'rec-pause', '⏸', 'Pause recording') : ''}
@@ -1093,8 +1096,10 @@ Cierre y ticket de salida (5 min)
     const room = document.getElementById('lc-room'); if (!room) return;
     room.classList.toggle('side-open', !!R.side);
     room.classList.toggle('doc-open', R.side === 'doc');
+    room.classList.toggle('board-open', R.side === 'board');
+    room.classList.toggle('board-full', R.side === 'board' && !!R.boardFull);
     // side panel tabs
-    ['plan', 'chat', 'people', 'doc'].forEach(k => {
+    ['plan', 'chat', 'people', 'doc', 'board'].forEach(k => {
       const tab = document.getElementById('lc-tab-' + k); const body = document.getElementById('lc-side-' + k); const c = document.getElementById('lc-ctl-' + k);
       if (tab) { tab.setAttribute('aria-selected', String(R.side === k)); tab.classList.toggle('active', R.side === k); tab.tabIndex = R.side === k ? 0 : -1; }
       if (body) body.hidden = R.side !== k;
@@ -1225,6 +1230,15 @@ Cierre y ticket de salida (5 min)
       const host = document.getElementById('lc-side-doc');
       if (host) { R.doc = 'loading'; window.TCClassDoc.mount(host, S.sessionId).then(v => { if (S.room === R) R.doc = v; else if (v) v.destroy(); }); }
     }
+    // the class whiteboard (public/class-board.js), same: mounted the first time its tab opens; "Full screen" covers the stage
+    if (R.side === 'board' && !R.board && S.sessionId && window.TCClassBoard) {
+      const host = document.getElementById('lc-side-board');
+      if (host) {
+        R.board = 'loading';
+        window.TCClassBoard.mount(host, S.sessionId, { onExpand: full => { if (S.room === R) { R.boardFull = !!full; updateRoomUi(); } } })
+          .then(v => { if (S.room === R) R.board = v; else if (v) v.destroy(); });
+      }
+    }
   }
   function secToggle(i) {
     const R = S.room; R.running = R.running === i ? -1 : i; updateRoomUi();
@@ -1251,6 +1265,7 @@ Cierre y ticket de salida (5 min)
   function teardownRoom() {
     const R = S.room; if (!R) return;
     if (R.doc && R.doc !== 'loading') { try { R.doc.close(); } catch (e) { /* ignore */ } }
+    if (R.board && R.board !== 'loading') { try { R.board.close(); } catch (e) { /* ignore */ } }
     if (window.TCAttendance && R.attendance) window.TCAttendance.roomLeave();
     clearViewTimers();
     stopStream(R.stream); stopStream(R.screen);
@@ -1273,6 +1288,8 @@ Cierre y ticket de salida (5 min)
     teardownRoom();
     // the class document keeps a "class end" version (teacher / substitute; nothing is created if nobody wrote)
     if (sess && typeof sb !== 'undefined') sb.rpc('classdoc_add_version', { p_session: sess.id, p_label: 'class_end' }).then(() => {}, () => {});
+    // … and so does the class whiteboard (nothing is created if nobody drew)
+    if (sess && typeof sb !== 'undefined') sb.rpc('classboard_add_version', { p_session: sess.id, p_label: 'class_end' }).then(() => {}, () => {});
     // P-07 / P-08: sample insights only for the explicit demo; a calendar class gets its (demo-flagged) stored insights;
     // a quick room outside the calendar (or a student) gets none — nothing invented is shown as if it were real
     if (!S.demo && !sess) {

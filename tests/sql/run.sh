@@ -25,6 +25,9 @@
 # document caps, ad-hoc rooms, plan of a class, data export, search_path) run with the other suites and after an upgrade
 # from git 203e2e1 (before the fixes) with data: data kept, institutions closed ONCE (re-opening survives a re-run),
 # pending invitations get an expiry, minors' consents are kept and labelled "declared by the student"; then launch_fixes.sql.
+# Class whiteboard (classboard.sql: access matrix, element validation / images refused, last-writer-wins per element, lock,
+# 2 MB cap, versions / restore, Realtime policies, group card + student dashboard) runs with the other suites and after an
+# upgrade from git 3c0ef7b (before the whiteboard) with data (+ the current 001 twice; the data must survive; then 002 applies).
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -34,7 +37,7 @@ trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null' EXIT
 $PSQL -d $DB -f tests/sql/supabase-stub.sql >/dev/null 2>&1
 for i in 1 2; do $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; done
 fail=0
-for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance consent launch_fixes; do
+for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance consent launch_fixes classboard; do
   out=$($PSQL -d $DB -f tests/sql/$t.sql 2>&1)
   echo "$out" | grep -E '\*\*FAIL\*\*' || true
   sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
@@ -210,5 +213,31 @@ if git cat-file -e 203e2e1:supabase/migrations/001_base.sql 2>/dev/null; then
       else echo "upgrade: **FAIL** could not re-run the current 001 / 002 after 203e2e1"; fail=1; fi
     else echo "upgrade: **FAIL** could not upgrade from 203e2e1"; fail=1; fi
   else echo "upgrade: **FAIL** could not load 203e2e1 + data"; fail=1; fi
+fi
+# Upgrade from 3c0ef7b (before the class whiteboard) with data, then the current 001 twice and 002
+if git cat-file -e 3c0ef7b:supabase/migrations/001_base.sql 2>/dev/null; then
+  UP7=${DB}_up7
+  $PSQL -d postgres -c "create database $UP7" >/dev/null
+  trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null; for x in _up _up2 _live _up3 _up4 _up5 _up6 _up7; do $PSQL -d postgres -c "drop database if exists ${DB}$x" >/dev/null; done' EXIT
+  $PSQL -d $UP7 -f tests/sql/supabase-stub.sql >/dev/null 2>&1
+  DATA="select (select count(*) from public.class_groups)||'/'||(select count(*) from public.student_enrollments)||'/'||(select count(*) from public.class_sessions)||'/'||(select count(*) from public.profiles)||'/'||(select count(*) from public.class_docs)||'/'||(select count(*) from public.class_doc_versions)||'/'||(select count(*) from public.session_attendance)||'/'||(select count(*) from public.user_consents)||'/'||(select count(*) from public.teacher_insights)"
+  if git show 3c0ef7b:supabase/migrations/001_base.sql | $PSQL -d $UP7 >/dev/null 2>&1 \
+     && git show 3c0ef7b:tests/sql/students.sql | $PSQL -d $UP7 >/dev/null 2>&1 && git show 3c0ef7b:tests/sql/class_insights.sql | $PSQL -d $UP7 >/dev/null 2>&1 \
+     && git show 3c0ef7b:tests/sql/classdoc_attendance.sql | $PSQL -d $UP7 >/dev/null 2>&1 && git show 3c0ef7b:tests/sql/consent.sql | $PSQL -d $UP7 >/dev/null 2>&1; then
+    before=$($PSQL -At -d $UP7 -c "$DATA")
+    if $PSQL -d $UP7 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP7 -f supabase/migrations/001_base.sql >/dev/null 2>&1 \
+       && $PSQL -d $UP7 -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
+      after=$($PSQL -At -d $UP7 -c "$DATA")
+      pol=$($PSQL -At -d $UP7 -c "select count(*) from pg_policies where schemaname = 'realtime' and policyname in ('tc_classdoc_listen','tc_classdoc_send','tc_classboard_listen','tc_classboard_send')")
+      if [[ "$before" == "$after" && "$before" != *"/0/0/0/0/0" && "$pol" == "4" ]]; then echo "upgrade (3c0ef7b + data → current 001 ×2 → 002): data kept ($after), Realtime policies: $pol"; else echo "upgrade: **FAIL** 3c0ef7b before=$before after=$after policies=$pol"; fail=1; fi
+      for t in classboard; do
+        out=$($PSQL -d $UP7 -f tests/sql/$t.sql 2>&1)
+        echo "$out" | grep -E '\*\*FAIL\*\*' || true
+        sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
+        echo "upgrade (3c0ef7b → current ×2) + $t: passed | failed = $sum"
+        [[ "$sum" =~ \|\ +0$ ]] || fail=1
+      done
+    else echo "upgrade: **FAIL** could not upgrade from 3c0ef7b"; fail=1; fi
+  else echo "upgrade: **FAIL** could not load 3c0ef7b + data"; fail=1; fi
 fi
 exit $fail

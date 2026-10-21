@@ -1,0 +1,61 @@
+/* TeroClass · Class whiteboard (public/class-board.js). The header, notices and sheets reuse the class-document styles
+   (public/class-doc.css: .cd-head, .cd-status, .cd-sheet…); this file only adds the board itself. Same tokens as index.html. */
+
+/* ── full-screen overlay: wider than the document (a board needs room) ── */
+.cb-overlay .cd-overlay-box{max-width:1600px}
+.cb-shell{background:var(--white)}
+.cb-shell .cd-head{padding:10px 14px 8px}
+.cb-shell .cd-title{font-size:16px}
+.cb-shell .cd-notice{margin:8px 14px 0}
+
+/* ── the canvas: Excalidraw fills it (it needs an explicit size) ── */
+.cb-canvas{flex:1;min-height:0;position:relative;touch-action:none}
+.cb-shell .cd-notice:not([hidden]) + .cb-canvas{margin-top:8px;border-top:1px solid var(--border)}
+.cb-canvas > .excalidraw{position:absolute;inset:0}
+.cb-canvas .excalidraw{--color-primary:var(--brand-primary,#7c5cbf);--color-primary-darker:#5b3fa0;--color-primary-darkest:#4b3285;--color-primary-light:#ece4ff;
+  --ui-font:var(--brand-font,'Inter'),system-ui,sans-serif;font-family:var(--ui-font)}
+/* not offered on the board: the shared library (it would need its own storage) and embedded web pages */
+.cb-canvas .default-sidebar-trigger,.cb-canvas .sidebar-trigger,.cb-canvas [data-testid="toolbar-embeddable"],
+.cb-canvas .dropdown-menu-item[data-testid="toolbar-embeddable"],.cb-canvas [data-testid="toolbar-magicframe"],
+.cb-canvas .App-toolbar__extra-tools-dropdown [style*="font-weight: 600"]{display:none!important}
+.cb-shell.readonly .cb-canvas{cursor:grab}
+.cb-preview{max-height:340px;overflow:auto;display:flex;justify-content:center;padding:8px}
+.cb-preview svg{max-width:100%;height:auto;max-height:320px}
+
+/* ── compact (live-class side panel) ── */
+.cb-shell.compact .cd-head{padding:6px 8px;gap:6px}
+.cb-shell.compact .cd-title{font-size:13.5px}
+.cb-shell.compact .cd-meta,.cb-shell.compact .cd-people-n{display:none}
+.cb-shell.compact .cd-status.poll{max-width:none}
+.cb-shell.compact .cd-actions .tree-btn{padding:5px 8px;font-size:11.5px}
+.cb-shell.compact .cd-actions .tree-btn span{display:none}
+.cb-shell.compact .cd-notice{margin:6px 8px 0;font-size:12px}
+.lc-side-body.lc-board-body{padding:0}
+.lc-room.board-open .lc-side{width:min(560px,48vw)}
+/* "Full screen" inside the room: the board takes the whole stage (video tiles hidden, controls stay) */
+.lc-room.board-full .lc-stage{display:none}
+.lc-room.board-full.board-open .lc-side{width:auto;flex:1;max-width:none;border-left:none}
+.lc-room.board-full .lc-side-tabs{background:var(--white)}
+
+/* ── phones and tablets ── */
+@media (max-width:900px){
+  .lc-room.board-open .lc-side{width:min(100%,620px)}
+  .lc-room.board-full.board-open .lc-side{position:absolute;inset:0;width:100%}
+}
+@media (max-width:720px){
+  .cb-shell .cd-head{padding:8px 10px 6px}
+  .cb-shell .cd-title{font-size:15px}
+  .cb-shell .cd-head-main{flex-basis:100%}
+  .cb-shell .cd-kicker{display:none}
+  .cb-shell .cd-people-n{display:none}
+  .cb-shell .cd-actions .tree-btn span{display:none}
+  .cb-shell .cd-actions .cd-close span,.cb-shell .cd-actions .cd-lock span{display:inline}
+  .cb-shell .cd-notice{margin:6px 10px 0}
+}
+
+/* ── student dashboard: boards of past classes (inside the "Class documents" card) ── */
+.gs-sub-h{font-size:13px;font-weight:700;margin:14px 0 2px;display:flex;align-items:center;gap:6px}
+/* the agenda row got one more icon (🖍️): on a phone its buttons may wrap instead of overflowing */
+@media (max-width:720px){
+  .gs-item-act{flex-wrap:wrap;flex-shrink:1;min-width:0;max-width:100%}
+}

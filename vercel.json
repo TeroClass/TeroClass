@@ -54,6 +54,14 @@
       "destination": "/public/class-doc.css"
     },
     {
+      "source": "/class-board.js",
+      "destination": "/public/class-board.js"
+    },
+    {
+      "source": "/class-board.css",
+      "destination": "/public/class-board.css"
+    },
+    {
       "source": "/attendance.js",
       "destination": "/public/attendance.js"
     },
@@ -162,7 +170,7 @@
       ]
     },
     {
-      "source": "/vendor/(supabase-js-|mammoth-|livekit-client-|pdfjs-|fonts/)(.*)",
+      "source": "/vendor/(supabase-js-|mammoth-|livekit-client-|pdfjs-|fonts/|whiteboard/chunks/)(.*)",
       "headers": [
         {
           "key": "Cache-Control",

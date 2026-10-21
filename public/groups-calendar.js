@@ -293,7 +293,7 @@
         <div class="gs-next-when"><div class="gs-next-day">${dayHtml(next.starts_at)}</div><div class="gs-next-time">${rangeHtml(next)}</div>${j.k === 'open' && j.live ? '<span class="gc-chip live">● Live now</span>' : ''}</div>
         <div class="gs-next-info"><div class="gs-next-title" data-no-i18n>${esc(sTitle(next))}</div>
           <div class="gc-meta">${next.group_name ? `<span data-no-i18n>${esc(next.group_name)}</span>` : ''}${next.teacher_name ? ` <span class="gs-dot">·</span> <span>Teacher:</span> <span data-no-i18n>${esc(next.teacher_name)}</span>` : ''}</div></div>
-        <div class="gs-next-act">${joinButtonHtml(next, { big: true })}<button type="button" class="tree-btn gs-doc-btn" data-gc="doc" data-id="${esc(next.id)}">📄 <span>Class document</span></button>${j.k === 'soon' ? `<div class="gc-hint"><span>${esc(startsIn(j.ms))}</span> · <span>The button turns on 10 minutes before the class.</span></div>` : ''}</div>
+        <div class="gs-next-act">${joinButtonHtml(next, { big: true })}<button type="button" class="tree-btn gs-doc-btn" data-gc="doc" data-id="${esc(next.id)}">📄 <span>Class document</span></button>${window.TCClassBoard ? `<button type="button" class="tree-btn gs-doc-btn" data-gc="board" data-id="${esc(next.id)}">🖍️ <span>Board</span></button>` : ''}${j.k === 'soon' ? `<div class="gc-hint"><span>${esc(startsIn(j.ms))}</span> · <span>The button turns on 10 minutes before the class.</span></div>` : ''}</div>
       </div>`;
     } else enter = '<div class="gs-none">No upcoming classes. When your teacher schedules one, it will appear here.</div>';
     // 📅 Calendar (agenda)
@@ -305,12 +305,14 @@
       return `<div class="gs-item${s.status === 'cancelled' ? ' cancelled' : ''}" data-sid="${esc(s.id)}">
         <div class="gs-item-time">${rangeHtml(s)}</div>
         <div class="gs-item-main"><div class="gs-item-title" data-no-i18n>${esc(sTitle(s))}</div><div class="gc-meta">${s.group_name ? `<span data-no-i18n>${esc(s.group_name)}</span>` : ''}${s.teacher_name ? ` <span class="gs-dot">·</span> <span data-no-i18n>${esc(s.teacher_name)}</span>` : ''}</div></div>
-        <div class="gs-item-act">${s.status === 'cancelled' ? '<span class="gc-chip cancelled">Cancelled</span>' : `${j.k === 'open' ? joinButtonHtml(s, { compact: true }) : ''}<button type="button" class="gc-icon-btn" data-gc="doc" data-id="${esc(s.id)}" title="${esc(tr('Class document'))}" aria-label="${esc(tr('Class document'))}">📄</button><a class="gc-icon-btn" href="${esc(googleUrl(s))}" target="_blank" rel="noopener" title="${esc(tr('Add to Google Calendar'))}" aria-label="${esc(tr('Add to Google Calendar'))}">📅 <span>Google</span></a><button type="button" class="gc-icon-btn" data-gc="ics" data-id="${esc(s.id)}" title="${esc(tr('Download .ics (Outlook, Apple)'))}" aria-label="${esc(tr('Download .ics (Outlook, Apple)'))}">⬇ <span>Download</span></button>`}</div>
+        <div class="gs-item-act">${s.status === 'cancelled' ? '<span class="gc-chip cancelled">Cancelled</span>' : `${j.k === 'open' ? joinButtonHtml(s, { compact: true }) : ''}<button type="button" class="gc-icon-btn" data-gc="doc" data-id="${esc(s.id)}" title="${esc(tr('Class document'))}" aria-label="${esc(tr('Class document'))}">📄</button>${window.TCClassBoard ? `<button type="button" class="gc-icon-btn" data-gc="board" data-id="${esc(s.id)}" title="${esc(tr('Class board'))}" aria-label="${esc(tr('Class board'))}">🖍️</button>` : ''}<a class="gc-icon-btn" href="${esc(googleUrl(s))}" target="_blank" rel="noopener" title="${esc(tr('Add to Google Calendar'))}" aria-label="${esc(tr('Add to Google Calendar'))}">📅 <span>Google</span></a><button type="button" class="gc-icon-btn" data-gc="ics" data-id="${esc(s.id)}" title="${esc(tr('Download .ics (Outlook, Apple)'))}" aria-label="${esc(tr('Download .ics (Outlook, Apple)'))}">⬇ <span>Download</span></button>`}</div>
       </div>`;
     }).join('')}</div>`).join('') + (up.length > shown.length ? `<div class="gc-hint"><span>And more:</span> <b>${up.length - shown.length}</b></div>` : '')
       : '<div class="gs-none">No classes scheduled yet.</div>';
     const docs = Array.isArray(d.docs) && d.docs.length ? `<ul class="gs-docs">${d.docs.map(x => `<li class="gs-doc"><span class="gs-doc-main"><b data-no-i18n>${esc(x.title || x.group_name || '')}</b><span class="gc-meta" data-no-i18n>${esc(fDay(x.starts_at))}${x.group_name && x.group_name !== x.title ? ' · ' + esc(x.group_name) : ''}</span></span>
         <button type="button" class="tree-btn" data-gc="doc" data-id="${esc(x.id)}">📄 <span>Open</span></button></li>`).join('')}</ul>` : '<div class="gs-none">No class documents yet.</div>';
+    const boards = Array.isArray(d.boards) && d.boards.length && window.TCClassBoard ? `<h3 class="gs-sub-h"><span aria-hidden="true">🖍️</span> <span>Class boards</span></h3><ul class="gs-docs">${d.boards.map(x => `<li class="gs-doc"><span class="gs-doc-main"><b data-no-i18n>${esc(x.title || x.group_name || '')}</b><span class="gc-meta" data-no-i18n>${esc(fDay(x.starts_at))}${x.group_name && x.group_name !== x.title ? ' · ' + esc(x.group_name) : ''}</span></span>
+        <button type="button" class="tree-btn" data-gc="board" data-id="${esc(x.id)}">🖍️ <span>Open</span></button></li>`).join('')}</ul>` : '';
     const feed = va ? '<div class="gc-hint">The calendar subscription is personal (not available in View as).</div>'
       : `<div class="gs-feed"><span>Add all my classes to my calendar:</span> <button type="button" class="tree-btn" data-gc="subscribe">🔗 Subscribe (Google, Outlook, Apple)</button></div>`;
     // 💡 My insights: the newest ones (own only; demo data until recording is active) → the full list in Insights
@@ -345,7 +347,7 @@
         <div class="gs-col">
           <section class="gs-card gs-ins" aria-labelledby="gs-ins-h"><h2 id="gs-ins-h"><span aria-hidden="true">💡</span> <span>My insights</span></h2>${ins}</section>
           <section class="gs-card gs-docs-card" aria-labelledby="gs-docs-h"><h2 id="gs-docs-h"><span aria-hidden="true">📄</span> <span>Class documents</span></h2>
-            <p class="gc-sub">The shared document of each class stays here as a record.</p>${docs}</section>
+            <p class="gc-sub">The shared document of each class stays here as a record.</p>${docs}${boards}</section>
         </div>
       </div>
     </div>`;
@@ -504,6 +506,8 @@
       ${staff && s.role !== 'admin' ? planSectionHtml(s, canEdit) : ''}
       <div class="gc-sec-title">Class document</div>
       <div class="gc-btn-row"><button type="button" class="tree-btn primary" data-gc="doc" data-id="${esc(s.id)}">📄 <span>Open class document</span></button><span class="gc-hint">Everyone in the class can write in it at the same time; it stays as a record.</span></div>
+      ${window.TCClassBoard ? `<div class="gc-sec-title">Class board</div>
+      <div class="gc-btn-row"><button type="button" class="tree-btn primary" data-gc="board" data-id="${esc(s.id)}">🖍️ <span>Open board</span></button><span class="gc-hint">${esc(tr(s.role === 'admin' ? 'Read-only: you can see what the class drew.' : 'Everyone in the class can draw on it at the same time; it stays as a record.'))}</span></div>` : ''}
       <div class="gc-sec-title">Add to calendar</div>
       <div class="gc-btn-row"><a class="tree-btn" href="${esc(googleUrl(s))}" target="_blank" rel="noopener">Google Calendar</a><button type="button" class="tree-btn" data-gc="ics" data-id="${esc(s.id)}">⬇ <span>.ics (Outlook, Apple)</span></button></div>
       ${staff ? `<div class="gc-sec-title">Attendance</div>${attStarted ? '<div id="gc-att" class="gc-att"><div class="in-loading">Loading…</div></div>' : '<div class="gc-hint">Attendance is recorded when students enter the room.</div>'}
@@ -1402,6 +1406,7 @@
       case 'st-reload': ST.data = null; ST.error = null; renderStudent(); break;
       case 'join': join(id); break;
       case 'doc': if (window.TCClassDoc) window.TCClassDoc.open(id); else showToast('Error', 'err'); break;
+      case 'board': if (window.TCClassBoard) window.TCClassBoard.open(id); else showToast('Error', 'err'); break;
       case 'g-sessions': if (window.TCAttendance) window.TCAttendance.openGroupSessions(id); break;
       case 'g-att': if (window.TCAttendance) window.TCAttendance.openReport(id); break;
       case 'att-report': if (window.TCAttendance) window.TCAttendance.openReport(el.dataset.g, { back: () => openSessionDetail(id) }); break;
