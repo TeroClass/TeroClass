@@ -1,7 +1,195 @@
 {
   "version": 2,
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" },
-    { "source": "/(.*)", "destination": "/public/index.html" }
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/$1"
+    },
+    {
+      "source": "/live-class.js",
+      "destination": "/public/live-class.js"
+    },
+    {
+      "source": "/live-class.css",
+      "destination": "/public/live-class.css"
+    },
+    {
+      "source": "/insights-view.js",
+      "destination": "/public/insights-view.js"
+    },
+    {
+      "source": "/insights-view.css",
+      "destination": "/public/insights-view.css"
+    },
+    {
+      "source": "/insights-panel.js",
+      "destination": "/public/insights-panel.js"
+    },
+    {
+      "source": "/(favicon-32\\.png|favicon-512\\.png|apple-touch-icon\\.png|favicon\\.ico)",
+      "destination": "/public/$1"
+    },
+    {
+      "source": "/cal/([0-9a-f]+)\\.ics",
+      "destination": "/api/calendar/feed?token=$1"
+    },
+    {
+      "source": "/csv-import.js",
+      "destination": "/public/csv-import.js"
+    },
+    {
+      "source": "/groups-calendar.js",
+      "destination": "/public/groups-calendar.js"
+    },
+    {
+      "source": "/groups-calendar.css",
+      "destination": "/public/groups-calendar.css"
+    },
+    {
+      "source": "/class-doc.js",
+      "destination": "/public/class-doc.js"
+    },
+    {
+      "source": "/class-doc.css",
+      "destination": "/public/class-doc.css"
+    },
+    {
+      "source": "/class-board.js",
+      "destination": "/public/class-board.js"
+    },
+    {
+      "source": "/class-board.css",
+      "destination": "/public/class-board.css"
+    },
+    {
+      "source": "/attendance.js",
+      "destination": "/public/attendance.js"
+    },
+    {
+      "source": "/vendor/(.*)",
+      "destination": "/public/vendor/$1"
+    },
+    {
+      "source": "/plans.js",
+      "destination": "/public/plans.js"
+    },
+    {
+      "source": "/plans.css",
+      "destination": "/public/plans.css"
+    },
+    {
+      "source": "/plans-admin.js",
+      "destination": "/public/plans-admin.js"
+    },
+    {
+      "source": "/(planes|plans)",
+      "destination": "/public/planes.html"
+    },
+    {
+      "source": "/(privacidad|privacy)",
+      "destination": "/public/privacidad.html"
+    },
+    {
+      "source": "/(terminos|terms)",
+      "destination": "/public/terminos.html"
+    },
+    {
+      "source": "/legal.css",
+      "destination": "/public/legal.css"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/public/index.html"
+    }
+  ],
+  "functions": {
+    "api/generate.js": {
+      "maxDuration": 60
+    },
+    "api/calendar/feed.js": {
+      "maxDuration": 20
+    },
+    "api/billing/status.js": {
+      "maxDuration": 20
+    },
+    "api/livekit/webhook.js": {
+      "maxDuration": 20
+    },
+    "api/account/delete.js": {
+      "maxDuration": 20
+    },
+    "api/health.js": {
+      "maxDuration": 10
+    },
+    "api/config.js": {
+      "maxDuration": 10
+    },
+    "api/client-error.js": {
+      "maxDuration": 10
+    },
+    "api/class/[action].js": {
+      "maxDuration": 20
+    },
+    "api/notify/[kind].js": {
+      "maxDuration": 30
+    }
+  },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.supabase.co; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.livekit.cloud wss://*.livekit.cloud https://challenges.cloudflare.com; media-src 'self' blob: mediastream:; worker-src 'self' blob:; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(self), microphone=(self), display-capture=(self), fullscreen=(self), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()"
+        },
+        {
+          "key": "Strict-Transport-Security",
+          "value": "max-age=63072000; includeSubDomains"
+        }
+      ]
+    },
+    {
+      "source": "/vendor/(.*)\\.mjs",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "text/javascript; charset=utf-8"
+        }
+      ]
+    },
+    {
+      "source": "/vendor/(supabase-js-|mammoth-|livekit-client-|pdfjs-|fonts/|whiteboard/chunks/)(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store"
+        }
+      ]
+    }
   ]
 }

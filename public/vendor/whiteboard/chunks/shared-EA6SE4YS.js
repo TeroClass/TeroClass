@@ -1,0 +1,2 @@
+/* TeroClass vendored whiteboard: React 18.3.1 + ReactDOM 18.3.1 + @excalidraw/excalidraw 0.18.1 (MIT). Built by scripts/vendor/build-whiteboard.sh. Do not edit. */
+import"./chunk-IY7QNYWE.js";var a=async t=>{let s=new Uint8Array(t),n="";for(let o=0;o<s.length;o+=32768)n+=String.fromCharCode.apply(null,s.subarray(o,o+32768));return`data:font/woff2;base64,${btoa(n)}`},e={Subset:"SUBSET"},r=async t=>a(t),c=async t=>t;export{e as Commands,r as subsetToBase64,c as subsetToBinary,a as toBase64};
