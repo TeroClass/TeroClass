@@ -5,8 +5,8 @@ import assert from 'node:assert/strict';
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const classFn = (await import('../api/class/[action].js')).default;
-const notifyFn = (await import('../api/notify/[kind].js')).default;
+const classFn = (await import('../api/class.js')).default;
+const notifyFn = (await import('../api/notify.js')).default;
 function res() { const r = { statusCode: 0, body: null, headers: {} }; r.status = c => { r.statusCode = c; return r; }; r.json = b => { r.body = b; return r; }; r.setHeader = (k, v) => { r.headers[k] = v; }; return r; }
 
 test('at most 12 serverless functions (Vercel Hobby limit)', () => {
@@ -23,4 +23,15 @@ test('dispatchers route known actions and 404 the rest', async () => {
   r = res(); await classFn({ method: 'GET', query: { action: '__proto__' }, headers: {} }, r); assert.equal(r.statusCode, 404);
   r = res(); await notifyFn({ method: 'GET', query: { kind: 'session' }, headers: {} }, r); assert.notEqual(r.statusCode, 404);
   r = res(); await notifyFn({ method: 'POST', query: { kind: 'x' }, headers: {} }, r); assert.equal(r.statusCode, 404);
+});
+
+test('vercel.json: /api/class/* and /api/notify/* are rewritten to the dispatchers; no destination points into /public', async () => {
+  const { readFileSync } = await import('node:fs');
+  const v = JSON.parse(readFileSync('vercel.json', 'utf8'));
+  const find = p => v.rewrites.find(r => new RegExp('^' + r.source + '$').test(p));
+  assert.equal(find('/api/class/token').destination, '/api/class?action=$1');
+  assert.equal(find('/api/notify/lead').destination, '/api/notify?kind=$1');
+  assert.ok(v.rewrites.every(r => !r.destination.startsWith('/public/')), 'Vercel serves public/ at the root');
+  assert.equal(find('/org/tec').destination, '/index.html');
+  assert.equal(find('/planes').destination, '/planes.html');
 });

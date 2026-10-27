@@ -2,7 +2,7 @@
 
 AI-powered didactic planning platform for teachers.
 
-> **Vercel Hobby: máximo 12 funciones por deploy.** Los endpoints `/api/class/*` y `/api/notify/*` se sirven con una sola función cada uno (`api/class/[action].js`, `api/notify/[kind].js`); los handlers viven en `api/_lib/` (las carpetas con `_` no se despliegan como funciones). Antes de agregar un archivo nuevo en `api/`, contá las funciones (hoy: 10).
+> **Vercel Hobby: máximo 12 funciones por deploy.** Los endpoints `/api/class/*` y `/api/notify/*` se sirven con una sola función cada uno (`api/class.js`, `api/notify.js`, con rewrites en `vercel.json`; en Vercel las rutas dinámicas `[x].js` no funcionaron) y los destinos de `vercel.json` no llevan `/public` (Vercel sirve `public/` en la raíz); los handlers viven en `api/_lib/` (las carpetas con `_` no se despliegan como funciones). Antes de agregar un archivo nuevo en `api/`, contá las funciones (hoy: 10).
 
 ## Tech Stack
 
