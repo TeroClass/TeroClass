@@ -2,32 +2,40 @@
   "version": 2,
   "rewrites": [
     {
+      "source": "/api/class/(config|ticket|token)",
+      "destination": "/api/class?action=$1"
+    },
+    {
+      "source": "/api/notify/(consent|invite|lead|session)",
+      "destination": "/api/notify?kind=$1"
+    },
+    {
       "source": "/api/(.*)",
       "destination": "/api/$1"
     },
     {
       "source": "/live-class.js",
-      "destination": "/public/live-class.js"
+      "destination": "/live-class.js"
     },
     {
       "source": "/live-class.css",
-      "destination": "/public/live-class.css"
+      "destination": "/live-class.css"
     },
     {
       "source": "/insights-view.js",
-      "destination": "/public/insights-view.js"
+      "destination": "/insights-view.js"
     },
     {
       "source": "/insights-view.css",
-      "destination": "/public/insights-view.css"
+      "destination": "/insights-view.css"
     },
     {
       "source": "/insights-panel.js",
-      "destination": "/public/insights-panel.js"
+      "destination": "/insights-panel.js"
     },
     {
       "source": "/(favicon-32\\.png|favicon-512\\.png|apple-touch-icon\\.png|favicon\\.ico)",
-      "destination": "/public/$1"
+      "destination": "/$1"
     },
     {
       "source": "/cal/([0-9a-f]+)\\.ics",
@@ -35,71 +43,71 @@
     },
     {
       "source": "/csv-import.js",
-      "destination": "/public/csv-import.js"
+      "destination": "/csv-import.js"
     },
     {
       "source": "/groups-calendar.js",
-      "destination": "/public/groups-calendar.js"
+      "destination": "/groups-calendar.js"
     },
     {
       "source": "/groups-calendar.css",
-      "destination": "/public/groups-calendar.css"
+      "destination": "/groups-calendar.css"
     },
     {
       "source": "/class-doc.js",
-      "destination": "/public/class-doc.js"
+      "destination": "/class-doc.js"
     },
     {
       "source": "/class-doc.css",
-      "destination": "/public/class-doc.css"
+      "destination": "/class-doc.css"
     },
     {
       "source": "/class-board.js",
-      "destination": "/public/class-board.js"
+      "destination": "/class-board.js"
     },
     {
       "source": "/class-board.css",
-      "destination": "/public/class-board.css"
+      "destination": "/class-board.css"
     },
     {
       "source": "/attendance.js",
-      "destination": "/public/attendance.js"
+      "destination": "/attendance.js"
     },
     {
       "source": "/vendor/(.*)",
-      "destination": "/public/vendor/$1"
+      "destination": "/vendor/$1"
     },
     {
       "source": "/plans.js",
-      "destination": "/public/plans.js"
+      "destination": "/plans.js"
     },
     {
       "source": "/plans.css",
-      "destination": "/public/plans.css"
+      "destination": "/plans.css"
     },
     {
       "source": "/plans-admin.js",
-      "destination": "/public/plans-admin.js"
+      "destination": "/plans-admin.js"
     },
     {
       "source": "/(planes|plans)",
-      "destination": "/public/planes.html"
+      "destination": "/planes.html"
     },
     {
       "source": "/(privacidad|privacy)",
-      "destination": "/public/privacidad.html"
+      "destination": "/privacidad.html"
     },
     {
       "source": "/(terminos|terms)",
-      "destination": "/public/terminos.html"
+      "destination": "/terminos.html"
     },
     {
       "source": "/legal.css",
-      "destination": "/public/legal.css"
+      "destination": "/legal.css"
     },
     {
       "source": "/(.*)",
-      "destination": "/public/index.html"
+      "destination": "/index.html"
     }
   ],
   "functions": {
@@ -127,10 +135,10 @@
     "api/client-error.js": {
       "maxDuration": 10
     },
-    "api/class/[action].js": {
+    "api/class.js": {
       "maxDuration": 20
     },
-    "api/notify/[kind].js": {
+    "api/notify.js": {
       "maxDuration": 30
     }
   },

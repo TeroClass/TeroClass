@@ -31,7 +31,7 @@ function fileFor(p) {
     const m = re(r.source).exec(p); if (!m) continue;
     if (r.destination.startsWith('/api/')) return null;
     const dest = r.destination.replace(/\$(\d)/g, (_, i) => m[+i] || '');
-    return path.join(ROOT, dest);
+    return path.join(ROOT, 'public', dest);
   }
   return path.join(ROOT, 'public', p);
 }
