@@ -2,7 +2,7 @@
   "version": 2,
   "rewrites": [
     {
-      "source": "/api/class/(config|ticket|token)",
+      "source": "/api/class/(config|ticket|token|rec|process)",
       "destination": "/api/class?action=$1"
     },
     {
@@ -129,7 +129,7 @@
       "maxDuration": 20
     },
     "api/livekit/webhook.js": {
-      "maxDuration": 20
+      "maxDuration": 30
     },
     "api/account/delete.js": {
       "maxDuration": 20
@@ -144,12 +144,18 @@
       "maxDuration": 10
     },
     "api/class.js": {
-      "maxDuration": 20
+      "maxDuration": 60
     },
     "api/notify.js": {
       "maxDuration": 30
     }
   },
+  "crons": [
+    {
+      "path": "/api/class/process",
+      "schedule": "17 7 * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/(.*)",

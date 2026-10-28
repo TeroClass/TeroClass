@@ -67,13 +67,15 @@ const db = { users: {}, profiles: [], institutions: [], plannings: [], invitatio
   group_notebooks: [], group_notebook_sections: [], group_notebook_updates: [], group_notebook_versions: [], group_notebook_presence: [], group_notebook_notes: [],
   user_consents: [], consent_declines: [] };
 const calls = { rpc: [], inserts: {}, otp: [] };
+// recording pipeline (001_base.sql "RECORDING PIPELINE"): what rec_session_status / rec_processing_sessions answer (tests set it)
+const recording = { status: {}, processing: [] };
 // billing state (same rules as the SQL functions, simplified): accounts[rootId] = {seats, monthly_tokens, extra}; usage[rootId] = used this month
 const BILL_DEFAULTS = () => ({ settings: { pack_tokens: 2000000, pack_price: 11.99, currency: 'USD', personal_monthly_tokens: 200000, default_seats: 10, default_monthly_tokens: 2000000, ai_price_input: 2.5, ai_price_output: 10 }, accounts: {}, usage: {}, requests: [], log: [] });
 const bill = BILL_DEFAULTS();
 let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
 const insights = { fixture: null }; // tests may set insights.fixture = (body) => json
-function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; if (typeof realtime !== 'undefined') realtime.reset(); calls.rpc = []; calls.inserts = {}; calls.otp = []; calls.recover = []; calls.passwords = []; calls.captcha = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; if (typeof plans !== 'undefined') plans.reset(); }
+function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; if (typeof realtime !== 'undefined') realtime.reset(); calls.rpc = []; calls.inserts = {}; calls.otp = []; calls.recover = []; calls.passwords = []; calls.captcha = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; recording.status = {}; recording.processing = []; if (typeof plans !== 'undefined') plans.reset(); }
 // Default insights: deterministic sample data shaped like public.platform_insights (smaller numbers for a unit)
 function insightsData(body) {
   const days = Math.min(Math.max(Number(body.p_days) || 30, 1), 366); const unit = body.p_unit ? instById(body.p_unit) : null;
@@ -362,6 +364,8 @@ async function handleSupabase(route) {
         Object.assign(r.data, classDoc.studentExtras(eids), { boards: classBoard.studentBoards(eids) });
       }
       if (r) return json(r.status, r.data); }
+    if (fn === 'rec_session_status') { if (!me) return NOAUTH(); return json(200, recording.status[body.p_session] || { state: 'none', recordings: 0, transcribed: 0, has_insights: false, failed: false }); }
+    if (fn === 'rec_processing_sessions') { if (!me) return NOAUTH(); return json(200, recording.processing); }
     if (fn === 'get_document_content') {
       const d = db.institution_documents.find(x => x.id === body.p_id); return d ? json(200, d.content) : json(400, { message: 'not found' });
     }
@@ -410,4 +414,4 @@ const realtime = require('./mock-realtime.cjs')({ tokUser, canRealtime: (me, t, 
   publicTopicOk: t => classDoc.publicTopicOk(t) || classBoard.publicTopicOk(t) || notebook.publicTopicOk(t) });
 const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0),
   insightSummaries: (eids, me) => classInsights.summaries(eids, 5, me) });
-module.exports = { plans, tokUser, consent, students, classInsights, classDoc, classBoard, notebook, realtime, serveVendor, serveWhiteboard, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+module.exports = { recording, plans, tokUser, consent, students, classInsights, classDoc, classBoard, notebook, realtime, serveVendor, serveWhiteboard, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

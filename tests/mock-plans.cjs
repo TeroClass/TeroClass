@@ -9,7 +9,7 @@ const ACTIVE = ['pilot', 'active', 'founder', 'enterprise'];
 
 module.exports = function ({ db, uid, instById, rootOf, account, bill }) {
   const fresh = () => ({ trialOn: false, plans: JSON.parse(JSON.stringify(SEED)), trial: {}, leads: [], individual: {}, comparisons: [],
-    modelDefault: { main: 'default', student: 'default', summary: 'default', verify: 'default' }, mini: { input: 0.4, output: 1.6 }, gens: [] });
+    modelDefault: { main: 'default', student: 'default', summary: 'default', verify: 'default', insights: 'default' }, mini: { input: 0.4, output: 1.6 }, gens: [] });
   const state = fresh();
   const reset = () => Object.assign(state, fresh());
   const prof = me => me && db.profiles.find(p => p.id === me.id);

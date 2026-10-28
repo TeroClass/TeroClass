@@ -7136,6 +7136,618 @@ begin
 end $$;
 -- ══ END GROUP NOTEBOOK ══
 
+-- ══ BEGIN RECORDING PIPELINE ══
+-- ========== GRABACIÓN → TRANSCRIPCIÓN → INSIGHTS REALES (2026-10-28) ==========
+-- El pipeline real de la clase en vivo, APAGADO hasta que el dueño cargue las variables en Vercel (README → "Grabación
+-- real"): RECORDING_ENABLED=true + LiveKit + Azure Storage + Azure Speech + CRON_SECRET (+ SUPABASE_SERVICE_ROLE_KEY).
+--   1. GRABACIÓN: el webhook de LiveKit (track_published) vuelve a mirar ACÁ el consentimiento de la persona
+--      (user_consents vigente; nunca lo que dice el navegador ni la metadata) y, solo si vale, pide a LiveKit un
+--      "Track Egress" de su MICRÓFONO (solo audio) directo a Azure Blob Storage (Brazil South). Una fila de recordings por
+--      tramo grabado (la pausa del docente corta el tramo; al reanudar empieza otro). Solo clases del calendario
+--      ("sess-<id de la clase>"): las salas rápidas no se graban (no tienen dónde guardar insights).
+--   2. TRANSCRIPCIÓN: Azure Speech (batch) por archivo, con marcas de tiempo por palabra; los segmentos quedan en
+--      transcript_segments con el tiempo desde el inicio de la llamada (start_ms / end_ms).
+--   3. ANÁLISIS: Azure OpenAI escribe el informe del docente (guía TEC) y los insights de cada estudiante que consintió,
+--      con la MISMA forma que los de demo (public/insights-view.js); el tiempo de habla y las palabras por minuto se
+--      calculan en el servidor a partir de las marcas de tiempo. Se guardan en teacher_insights / student_insights con
+--      is_demo = false (reemplazan los de demo de esa clase; la reflexión y los mensajes del docente se conservan).
+--   4. BORRADO: el audio se borra a los 30 días (tarea diaria + regla de ciclo de vida del Storage como respaldo);
+--      transcripciones e insights quedan.
+-- Las tablas de la llamada son las de 002_live_class.sql (mismas definiciones): se crean acá si 002 todavía no corrió,
+-- así alcanza con volver a correr este archivo. 002 agrega las políticas de lectura directa y la auditoría "consents".
+-- PERMISOS: todo lo que ESCRIBE es solo para la clave del servidor (service_role); el navegador solo puede preguntar el
+-- estado de una clase que ve (rec_session_status / rec_processing_sessions, mismas reglas que los insights).
+create table if not exists public.live_sessions (
+  id uuid primary key default gen_random_uuid(),
+  teacher_id uuid not null references auth.users(id) on delete cascade,
+  institution_id uuid references public.institutions(id) on delete set null,
+  planning_id uuid references public.plannings(id) on delete set null,
+  title text not null default '' check (length(title) <= 200),
+  subject text default '' check (length(subject) <= 120),
+  class_language text default '' check (length(class_language) <= 40),
+  livekit_room text not null unique check (livekit_room ~ '^[A-Za-z0-9_-]{3,64}$'),
+  status text not null default 'scheduled'
+    check (status in ('scheduled','live','processing','ready','ended','cancelled')),
+  recording_enabled boolean not null default true,
+  scheduled_at timestamptz,
+  started_at timestamptz,
+  ended_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists live_sessions_teacher_idx on public.live_sessions (teacher_id);
+create index if not exists live_sessions_inst_idx on public.live_sessions (institution_id);
+alter table public.live_sessions add column if not exists class_session_id uuid references public.class_sessions(id) on delete set null;
+create index if not exists live_sessions_class_idx on public.live_sessions (class_session_id);
+
+create table if not exists public.session_participants (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.live_sessions(id) on delete cascade,
+  user_id uuid references auth.users(id) on delete set null,
+  guardian_user_id uuid references auth.users(id) on delete set null,
+  display_name text not null default '' check (length(display_name) <= 80),
+  role text not null default 'student' check (role in ('teacher','student','observer')),
+  is_minor boolean not null default false,
+  livekit_identity text not null check (length(livekit_identity) between 1 and 128),
+  recorded boolean not null default false,
+  joined_at timestamptz,
+  left_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (session_id, livekit_identity)
+);
+create index if not exists session_participants_session_idx on public.session_participants (session_id);
+create index if not exists session_participants_user_idx on public.session_participants (user_id);
+create index if not exists session_participants_guardian_idx on public.session_participants (guardian_user_id);
+
+create table if not exists public.recordings (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.live_sessions(id) on delete cascade,
+  participant_id uuid not null references public.session_participants(id) on delete cascade,
+  storage_path text not null check (length(storage_path) <= 500),
+  duration_s integer check (duration_s is null or duration_s >= 0),
+  speech_s integer check (speech_s is null or speech_s >= 0),
+  status text not null default 'recording' check (status in ('recording','uploaded','transcribed','failed','deleted')),
+  retention_until timestamptz not null default (now() + interval '30 days'),
+  deleted_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists recordings_session_idx on public.recordings (session_id);
+create index if not exists recordings_retention_idx on public.recordings (retention_until) where deleted_at is null;
+
+create table if not exists public.transcript_segments (
+  id bigserial primary key,
+  session_id uuid not null references public.live_sessions(id) on delete cascade,
+  participant_id uuid not null references public.session_participants(id) on delete cascade,
+  start_ms integer not null check (start_ms >= 0),
+  end_ms integer not null,
+  text text not null default '',
+  confidence real check (confidence is null or (confidence >= 0 and confidence <= 1)),
+  created_at timestamptz not null default now(),
+  check (end_ms >= start_ms)
+);
+create index if not exists transcript_segments_session_idx on public.transcript_segments (session_id, start_ms);
+-- Sin políticas acá: nadie las lee directo hasta que corra 002 (que agrega las de lectura); las escribe solo el servidor.
+alter table public.live_sessions        enable row level security;
+alter table public.session_participants enable row level security;
+alter table public.recordings           enable row level security;
+alter table public.transcript_segments  enable row level security;
+
+-- ── columnas del pipeline ──
+-- rec_state: 'paused' mientras el docente pausa (el servidor detiene los egress y no empieza nuevos)
+alter table public.live_sessions add column if not exists rec_state text not null default 'on';
+alter table public.live_sessions drop constraint if exists live_sessions_rec_state_ok;
+alter table public.live_sessions add constraint live_sessions_rec_state_ok check (rec_state in ('on','paused'));
+alter table public.live_sessions add column if not exists processing_started_at timestamptz;
+alter table public.live_sessions add column if not exists processing_error text;
+alter table public.live_sessions add column if not exists insights_tokens integer not null default 0;
+alter table public.live_sessions add column if not exists analysis_claimed_at timestamptz;
+alter table public.live_sessions add column if not exists analysis_attempts integer not null default 0;
+-- un tramo grabado = un egress de LiveKit; ended_at se completa al pedir que pare (pausa / fin) o cuando LiveKit avisa
+alter table public.recordings add column if not exists egress_id text;
+alter table public.recordings add column if not exists track_sid text;
+alter table public.recordings add column if not exists started_at timestamptz;
+alter table public.recordings add column if not exists ended_at timestamptz;
+alter table public.recordings add column if not exists speech_status text;
+alter table public.recordings add column if not exists speech_job text;
+alter table public.recordings add column if not exists speech_attempts integer not null default 0;
+alter table public.recordings add column if not exists error text;
+alter table public.recordings drop constraint if exists recordings_speech_ok;
+alter table public.recordings add constraint recordings_speech_ok check (
+  (speech_status is null or speech_status in ('submitted','succeeded','failed'))
+  and (speech_job is null or length(speech_job) <= 500) and (error is null or length(error) <= 500)
+  and (egress_id is null or length(egress_id) <= 100) and (track_sid is null or length(track_sid) <= 100));
+create unique index if not exists recordings_egress_uq on public.recordings (egress_id) where egress_id is not null;
+-- una sola grabación en curso por pista (los reintentos del webhook no duplican)
+create unique index if not exists recordings_track_active_uq on public.recordings (session_id, track_sid)
+  where ended_at is null and track_sid is not null;
+alter table public.transcript_segments add column if not exists recording_id uuid references public.recordings(id) on delete set null;
+alter table public.transcript_segments add column if not exists words integer;
+create index if not exists transcript_segments_rec_idx on public.transcript_segments (recording_id);
+-- modelo de IA para los insights reales ('default' | 'mini'), como los otros tipos de pedido
+update public.platform_settings set ai_model_default = ai_model_default || '{"insights":"default"}'::jsonb
+ where id and not (ai_model_default ? 'insights');
+
+-- Para el borrado diario (service role): audio vencido que todavía no se borró (misma función que 002).
+create or replace function public.recordings_due_for_deletion() returns setof public.recordings
+language sql stable security definer set search_path = public, pg_temp as
+$$ select * from public.recordings where deleted_at is null and retention_until <= now() $$;
+
+-- ── ayudas internas ──
+-- "sess-<uuid sin guiones>" → id de la clase del calendario (otras salas: null)
+create or replace function public.tc_rec_class_of_room(p_room text) returns uuid
+language sql immutable set search_path = public, pg_temp as
+$$ select case when coalesce(p_room, '') ~ '^sess-[0-9a-f]{32}$' then substr(p_room, 6)::uuid end $$;
+-- Papel de UNA persona en una clase del calendario: 'teacher' (docente / suplente / quien creó la suelta), 'student'
+-- (miembro del grupo o invitado) o null
+create or replace function public.tc_rec_role(p_session uuid, p_user uuid) returns text
+language sql stable security definer set search_path = public, pg_temp as
+$$ select case
+     when p_user is null then null
+     when exists (select 1 from public.class_sessions s left join public.class_groups g on g.id = s.group_id
+                   where s.id = p_session and ((s.group_id is not null and p_user in (g.teacher_id, g.substitute_id))
+                                               or (s.group_id is null and s.teacher_id = p_user))) then 'teacher'
+     when exists (select 1 from public.tc_session_students(p_session) st
+                    join public.student_enrollments e on e.id = st.enrollment_id where e.user_id = p_user) then 'student'
+   end $$;
+-- ¿Esta persona tiene HOY un consentimiento válido? (misma regla que my_consent().recorded)
+create or replace function public.tc_rec_consent_ok(p_user uuid) returns boolean
+language sql stable security definer set search_path = public, pg_temp as
+$$ select exists (select 1 from public.user_consents c
+                   where c.user_id = p_user and c.revoked_at is null and c.version = public.tc_consent_version()
+                     and (not c.is_minor or c.guardian_consent)) $$;
+-- La llamada (live_sessions) de una sala de una clase del calendario; la crea si falta. null = no se graba.
+create or replace function public.tc_rec_ensure_live(p_room text) returns uuid
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_cs uuid := public.tc_rec_class_of_room(p_room); s public.class_sessions%rowtype; g public.class_groups%rowtype; v_id uuid;
+begin
+  if v_cs is null then return null; end if;
+  select id into v_id from public.live_sessions where livekit_room = p_room;
+  if v_id is not null then return v_id; end if;
+  select * into s from public.class_sessions where id = v_cs and status <> 'cancelled';
+  if s.id is null then return null; end if;
+  select * into g from public.class_groups where id = s.group_id;
+  if coalesce(g.teacher_id, s.teacher_id) is null then return null; end if;
+  insert into public.live_sessions (teacher_id, institution_id, planning_id, title, livekit_room, status, class_session_id, scheduled_at)
+  values (coalesce(g.teacher_id, s.teacher_id), s.institution_id, s.planning_id, left(coalesce(nullif(s.title, ''), g.name, ''), 200),
+          p_room, 'scheduled', s.id, s.starts_at)
+  on conflict (livekit_room) do nothing;
+  select id into v_id from public.live_sessions where livekit_room = p_room;
+  return v_id;
+end $$;
+revoke all on function public.tc_rec_class_of_room(text) from public, anon, authenticated;
+revoke all on function public.tc_rec_role(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.tc_rec_consent_ok(uuid) from public, anon, authenticated;
+revoke all on function public.tc_rec_ensure_live(text) from public, anon, authenticated;
+
+-- ── funciones del SERVIDOR (solo service_role) ──
+-- room_started: la llamada queda "en vivo" (grabando por defecto)
+create or replace function public.rec_room_started(p_room text) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_id uuid := public.tc_rec_ensure_live(p_room);
+begin
+  if v_id is null then return json_build_object('ok', false, 'reason', 'not_calendar'); end if;
+  update public.live_sessions set rec_state = case when status = 'live' then rec_state else 'on' end,
+         status = 'live', started_at = coalesce(started_at, now()), ended_at = null
+   where id = v_id;
+  return json_build_object('ok', true, 'live_session_id', v_id);
+end $$;
+
+-- track_published (micrófono): vuelve a mirar el papel y el consentimiento EN LA BASE y reserva la grabación de esa pista.
+-- → {record:true, recording_id, storage_path, live_session_id, participant_id} o {record:false, reason}
+--   reason: not_calendar | not_member | no_consent | paused | already | invalid
+create or replace function public.rec_track_published(p_room text, p_user uuid, p_track text, p_name text default null) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_id uuid; v_cs uuid := public.tc_rec_class_of_room(p_room); v_role text; v_ok boolean; v_minor boolean; v_part uuid;
+        v_rec uuid := gen_random_uuid(); v_path text; v_state text; v_n int;
+begin
+  if p_user is null or coalesce(p_track, '') !~ '^[A-Za-z0-9_-]{3,100}$' then return json_build_object('record', false, 'reason', 'invalid'); end if;
+  v_id := public.tc_rec_ensure_live(p_room);
+  if v_id is null then return json_build_object('record', false, 'reason', 'not_calendar'); end if;
+  v_role := public.tc_rec_role(v_cs, p_user);
+  if v_role is null then return json_build_object('record', false, 'reason', 'not_member', 'live_session_id', v_id); end if;
+  v_ok := public.tc_rec_consent_ok(p_user);
+  select coalesce(bool_or(c.is_minor), false) into v_minor from public.user_consents c where c.user_id = p_user and c.revoked_at is null;
+  update public.live_sessions set status = 'live', started_at = coalesce(started_at, now()), ended_at = null
+   where id = v_id and status <> 'live';
+  insert into public.session_participants as sp (session_id, user_id, display_name, role, livekit_identity, recorded, is_minor, joined_at)
+  values (v_id, p_user, left(coalesce(nullif(public.tc_clean_note(p_name, 80), ''), public.tc_person_name(p_user), ''), 80),
+          v_role, p_user::text, v_ok, v_minor, now())
+  on conflict (session_id, livekit_identity) do update
+    set recorded = excluded.recorded, is_minor = excluded.is_minor, role = excluded.role,
+        joined_at = coalesce(sp.joined_at, excluded.joined_at), left_at = null
+  returning id into v_part;
+  if not v_ok then return json_build_object('record', false, 'reason', 'no_consent', 'live_session_id', v_id, 'participant_id', v_part); end if;
+  select rec_state into v_state from public.live_sessions where id = v_id;
+  if v_state <> 'on' then return json_build_object('record', false, 'reason', 'paused', 'live_session_id', v_id, 'participant_id', v_part); end if;
+  v_path := v_id::text || '/' || v_part::text || '/' || v_rec::text || '.ogg';
+  insert into public.recordings (id, session_id, participant_id, storage_path, track_sid, status, retention_until)
+  values (v_rec, v_id, v_part, v_path, p_track, 'recording', now() + interval '30 days')
+  on conflict (session_id, track_sid) where ended_at is null and track_sid is not null do nothing;
+  get diagnostics v_n = row_count;
+  if v_n = 0 then return json_build_object('record', false, 'reason', 'already', 'live_session_id', v_id, 'participant_id', v_part); end if;
+  return json_build_object('record', true, 'recording_id', v_rec, 'storage_path', v_path, 'live_session_id', v_id, 'participant_id', v_part);
+end $$;
+
+-- LiveKit aceptó el egress: se anota su id. stop = true si mientras tanto se pausó / terminó (hay que pararlo ya).
+create or replace function public.rec_egress_started(p_recording uuid, p_egress text) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare r public.recordings%rowtype;
+begin
+  update public.recordings set egress_id = left(p_egress, 100), started_at = coalesce(started_at, now())
+   where id = p_recording and egress_id is null returning * into r;
+  if r.id is null then return json_build_object('ok', false); end if;
+  return json_build_object('ok', true, 'stop', r.ended_at is not null);
+end $$;
+-- LiveKit no aceptó el egress: se libera la reserva (el próximo track_published lo vuelve a intentar)
+create or replace function public.rec_egress_failed(p_recording uuid) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$ begin delete from public.recordings where id = p_recording and egress_id is null; return found; end $$;
+
+-- egress_ended (o lo que dice LiveKit al reconciliar): el archivo quedó en el Storage (o falló). Idempotente.
+create or replace function public.rec_egress_ended(p_egress text, p_ok boolean, p_started timestamptz default null,
+  p_ended timestamptz default null, p_duration_s integer default null, p_error text default null) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare r public.recordings%rowtype; l public.live_sessions%rowtype;
+begin
+  update public.recordings
+     set status = case when coalesce(p_ok, false) and coalesce(p_duration_s, 1) > 0 then 'uploaded' else 'failed' end,
+         started_at = coalesce(p_started, started_at), ended_at = coalesce(p_ended, ended_at, now()),
+         duration_s = greatest(coalesce(p_duration_s, duration_s, 0), 0),
+         retention_until = now() + interval '30 days',
+         error = case when coalesce(p_ok, false) then error else left(coalesce(nullif(p_error, ''), 'egress failed'), 500) end
+   where egress_id = p_egress and status = 'recording' returning * into r;
+  if r.id is null then
+    return json_build_object('changed', false, 'found', exists (select 1 from public.recordings where egress_id = p_egress));
+  end if;
+  select * into l from public.live_sessions where id = r.session_id;
+  return json_build_object('changed', true, 'found', true, 'live_session_id', l.id, 'live_status', l.status, 'room', l.livekit_room,
+                           'status', r.status, 'participant_id', r.participant_id,
+                           'identity', (select livekit_identity from public.session_participants where id = r.participant_id),
+                           'participant_active', (select count(*) from public.recordings x
+                                                   where x.participant_id = r.participant_id and x.status = 'recording' and x.ended_at is null)::int);
+end $$;
+
+-- Pausa / reanudación del docente (api/class?action=rec: el servidor ya verificó que es docente / suplente de la clase).
+-- 'paused' → devuelve los egress que hay que detener (y quién), 'on' → nada que detener (el servidor vuelve a empezar).
+create or replace function public.rec_set_state(p_room text, p_state text) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_id uuid; v_stop json;
+begin
+  if p_state not in ('on','paused') then raise exception 'Estado inválido'; end if;
+  v_id := public.tc_rec_ensure_live(p_room);
+  if v_id is null then return json_build_object('ok', false, 'reason', 'not_calendar'); end if;
+  update public.live_sessions set rec_state = p_state where id = v_id;
+  if p_state = 'paused' then
+    with u as (update public.recordings set ended_at = now()
+                where session_id = v_id and status = 'recording' and ended_at is null
+                returning egress_id, participant_id)
+    select coalesce(json_agg(json_build_object('egress_id', u.egress_id, 'identity', sp.livekit_identity)), '[]'::json) into v_stop
+      from u join public.session_participants sp on sp.id = u.participant_id where u.egress_id is not null;
+  end if;
+  return json_build_object('ok', true, 'live_session_id', v_id, 'state', p_state, 'stop', coalesce(v_stop, '[]'::json));
+end $$;
+
+-- room_finished: la llamada pasa a "procesando" (si se grabó algo) o "terminada". Idempotente.
+create or replace function public.rec_room_finished(p_room text) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare l public.live_sessions%rowtype;
+begin
+  select * into l from public.live_sessions where livekit_room = p_room;
+  if l.id is null then return json_build_object('ok', false, 'reason', 'unknown'); end if;
+  update public.recordings set ended_at = coalesce(ended_at, now()) where session_id = l.id and status = 'recording';
+  update public.live_sessions
+     set status = case when exists (select 1 from public.recordings r where r.session_id = l.id and r.status <> 'failed')
+                       then 'processing' else 'ended' end,
+         ended_at = now(), rec_state = 'on', processing_started_at = now(), processing_error = null
+   where id = l.id and status in ('live','scheduled')
+  returning * into l;
+  if l.id is null then select * into l from public.live_sessions where livekit_room = p_room; end if;
+  return json_build_object('ok', true, 'live_session_id', l.id, 'status', l.status, 'class_session_id', l.class_session_id);
+end $$;
+
+-- Trabajo pendiente para api/class?action=process: llamadas "procesando" (o una en particular, o la última de una clase del
+-- calendario) con sus grabaciones y el idioma de la clase (para la transcripción).
+drop function if exists public.rec_work(uuid, integer);
+create or replace function public.rec_work(p_live uuid default null, p_limit integer default 5, p_class uuid default null) returns json
+language sql stable security definer set search_path = public, pg_temp as
+$$ select coalesce(json_agg(x order by x.processing_started_at nulls first), '[]'::json) from (
+     select l.id, l.livekit_room as room, l.class_session_id, l.status, l.started_at, l.ended_at, l.processing_started_at,
+            l.analysis_claimed_at, l.analysis_attempts, l.insights_tokens, l.class_language,
+            (select pl.data->'params'->>'language' from public.class_sessions cs join public.plannings pl on pl.id = cs.planning_id
+              where cs.id = l.class_session_id) as plan_language,
+            coalesce((select json_agg(json_build_object('id', r.id, 'participant_id', r.participant_id, 'status', r.status,
+                        'speech_status', r.speech_status, 'speech_job', r.speech_job, 'speech_attempts', r.speech_attempts,
+                        'storage_path', r.storage_path, 'egress_id', r.egress_id, 'started_at', r.started_at,
+                        'ended_at', r.ended_at, 'duration_s', r.duration_s, 'created_at', r.created_at) order by r.created_at)
+                        from public.recordings r where r.session_id = l.id), '[]'::json) as recordings
+       from public.live_sessions l
+      where (p_live is null and p_class is null and l.status = 'processing') or l.id = p_live
+         or (p_class is not null and l.id = (select l2.id from public.live_sessions l2 where l2.class_session_id = p_class
+                                             order by l2.created_at desc limit 1))
+      order by l.processing_started_at nulls first
+      limit least(greatest(coalesce(p_limit, 5), 1), 50)) x $$;
+
+-- Azure Speech: trabajo creado / fallido (p_retry: se vuelve a intentar hasta 3 veces)
+create or replace function public.rec_speech_submitted(p_recording uuid, p_job text) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$ begin
+  update public.recordings set speech_status = 'submitted', speech_job = left(p_job, 500), speech_attempts = speech_attempts + 1
+   where id = p_recording and status = 'uploaded' and speech_status is null;
+  return found;
+end $$;
+create or replace function public.rec_speech_failed(p_recording uuid, p_error text, p_retry boolean default true) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare r public.recordings%rowtype;
+begin
+  update public.recordings
+     set speech_status = case when coalesce(p_retry, true) and speech_attempts < 3 then null else 'failed' end,
+         speech_job = null,
+         status = case when coalesce(p_retry, true) and speech_attempts < 3 then status else 'failed' end,
+         error = left(coalesce(p_error, 'transcription failed'), 500)
+   where id = p_recording and status = 'uploaded' returning * into r;
+  return json_build_object('ok', r.id is not null, 'status', r.status, 'speech_status', r.speech_status);
+end $$;
+
+-- Segmentos de la transcripción de UNA grabación (ms desde el inicio de la llamada). Reemplaza los anteriores: idempotente.
+-- p_segments: [{start_ms, end_ms, text, confidence?, words?}, …]
+create or replace function public.rec_store_transcript(p_recording uuid, p_segments jsonb) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare r public.recordings%rowtype; v_n int;
+begin
+  select * into r from public.recordings where id = p_recording for update;
+  if r.id is null or r.status not in ('uploaded','transcribed') then raise exception 'Grabación inválida'; end if;
+  if p_segments is null or jsonb_typeof(p_segments) <> 'array' or jsonb_array_length(p_segments) > 20000
+     or octet_length(p_segments::text) > 8388608
+     or exists (select 1 from jsonb_array_elements(p_segments) x
+                 where jsonb_typeof(x) <> 'object' or jsonb_typeof(x->'start_ms') <> 'number' or jsonb_typeof(x->'end_ms') <> 'number'
+                    or (x->>'start_ms')::numeric < 0 or (x->>'end_ms')::numeric < (x->>'start_ms')::numeric
+                    or (x->>'end_ms')::numeric > 86400000 or length(coalesce(x->>'text', '')) > 4000) then
+    raise exception 'Transcripción inválida';
+  end if;
+  delete from public.transcript_segments where recording_id = r.id;
+  insert into public.transcript_segments (session_id, participant_id, recording_id, start_ms, end_ms, text, confidence, words)
+  select r.session_id, r.participant_id, r.id, round((x->>'start_ms')::numeric)::int, round((x->>'end_ms')::numeric)::int,
+         coalesce(x->>'text', ''),
+         case when jsonb_typeof(x->'confidence') = 'number' then least(greatest((x->>'confidence')::real, 0), 1) end,
+         case when jsonb_typeof(x->'words') = 'number' then greatest(round((x->>'words')::numeric)::int, 0) end
+    from jsonb_array_elements(p_segments) x;
+  get diagnostics v_n = row_count;
+  update public.recordings
+     set status = 'transcribed', speech_status = 'succeeded',
+         speech_s = (select coalesce(round(sum(end_ms - start_ms) / 1000.0), 0)::int from public.transcript_segments where recording_id = r.id)
+   where id = r.id;
+  return json_build_object('ok', true, 'segments', v_n);
+end $$;
+
+-- Todo lo que necesita el análisis de una llamada: la clase, el plan / notas del cuaderno de esa clase, participantes
+-- (con la inscripción de cada estudiante), la transcripción, qué insights reales ya existen y el progreso anterior.
+create or replace function public.rec_session_context(p_live uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare l public.live_sessions%rowtype; s public.class_sessions%rowtype; g public.class_groups%rowtype; pl public.plannings%rowtype;
+begin
+  select * into l from public.live_sessions where id = p_live;
+  if l.id is null then raise exception 'Llamada inexistente'; end if;
+  select * into s from public.class_sessions where id = l.class_session_id;
+  select * into g from public.class_groups where id = s.group_id;
+  select * into pl from public.plannings where id = coalesce(s.planning_id, l.planning_id);
+  return json_build_object(
+    'live', json_build_object('id', l.id, 'status', l.status, 'started_at', l.started_at, 'ended_at', l.ended_at,
+                              'insights_tokens', l.insights_tokens, 'analysis_attempts', l.analysis_attempts, 'class_language', l.class_language),
+    'session', case when s.id is null then null else json_build_object('id', s.id, 'title', coalesce(nullif(s.title, ''), g.name, ''),
+                 'group_name', g.name, 'teacher_id', coalesce(g.teacher_id, s.teacher_id),
+                 'teacher_name', public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)), 'starts_at', s.starts_at, 'ends_at', s.ends_at,
+                 'timezone', s.timezone, 'duration_min', round(extract(epoch from (s.ends_at - s.starts_at)) / 60)::int,
+                 'students_total', (select count(*) from public.tc_session_students(s.id))::int) end,
+    'plan', case when pl.id is null then null else json_build_object('title', pl.title, 'content', left(coalesce(pl.data->>'content', ''), 40000),
+                 'params', coalesce(pl.data->'params', '{}'::jsonb)) end,
+    'notebook', (select left(string_agg(coalesce(nullif(n.title, ''), sec.title) || E'\n' || n.body, E'\n\n' order by n.created_at), 30000)
+                   from public.group_notebook_sections sec join public.group_notebook_notes n on n.section_id = sec.id
+                  where s.id is not null and sec.session_id = s.id),
+    'model', (select ps.ai_model_default->>'insights' from public.platform_settings ps where ps.id),
+    'participants', coalesce((select json_agg(json_build_object('participant_id', sp.id, 'role', sp.role, 'user_id', sp.user_id,
+                      'recorded', sp.recorded and exists (select 1 from public.recordings r where r.participant_id = sp.id and r.status <> 'failed'),
+                      'minor', sp.is_minor, 'enrollment_id', x.enrollment_id,
+                      'name', coalesce(nullif(btrim(x.name), ''), nullif(btrim(sp.display_name), ''), public.tc_person_name(sp.user_id), ''))
+                      order by sp.role desc, sp.created_at)
+                    from public.session_participants sp
+                    left join lateral (select st.enrollment_id, st.name from public.tc_session_students(s.id) st
+                                         join public.student_enrollments e on e.id = st.enrollment_id
+                                        where sp.role = 'student' and e.user_id = sp.user_id limit 1) x on true
+                   where sp.session_id = l.id), '[]'::json),
+    'segments', coalesce((select json_agg(json_build_object('participant_id', t.participant_id, 'start_ms', t.start_ms, 'end_ms', t.end_ms,
+                    'text', t.text, 'words', t.words) order by t.start_ms, t.id)
+                  from (select * from public.transcript_segments where session_id = l.id order by start_ms, id limit 20000) t), '[]'::json),
+    'done', json_build_object(
+      'teacher', exists (select 1 from public.teacher_insights ti where ti.session_id = s.id and not ti.is_demo),
+      'teacher_base', (select jsonb_build_object('kind', ti.data->'kind', 'lang', ti.data->'lang', 'subject', ti.data->'subject',
+                                                 'title', ti.data->'title', 'recap', ti.data->'recap')
+                         from public.teacher_insights ti where ti.session_id = s.id and not ti.is_demo),
+      'students', coalesce((select json_agg(si.enrollment_id) from public.student_insights si where si.session_id = s.id and not si.is_demo), '[]'::json)),
+    'previous', coalesce((select json_object_agg(p.enrollment_id, p.progress) from (
+        select distinct on (si.enrollment_id) si.enrollment_id, si.data->'progress' as progress
+          from public.student_insights si join public.class_sessions cs on cs.id = si.session_id
+         where not si.is_demo and si.session_id <> s.id and cs.starts_at < s.starts_at
+           and si.enrollment_id in (select st.enrollment_id from public.tc_session_students(s.id) st)
+         order by si.enrollment_id, cs.starts_at desc) p where p.progress is not null), '{}'::json));
+end $$;
+
+-- Un solo análisis a la vez por llamada (p_stale_s: un intento colgado se puede retomar)
+create or replace function public.rec_claim_analysis(p_live uuid, p_stale_s integer default 120) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$ begin
+  update public.live_sessions set analysis_claimed_at = now(), analysis_attempts = analysis_attempts + 1
+   where id = p_live and status = 'processing'
+     and (analysis_claimed_at is null or analysis_claimed_at < now() - make_interval(secs => greatest(coalesce(p_stale_s, 120), 10)));
+  return found;
+end $$;
+create or replace function public.rec_release_analysis(p_live uuid) returns void
+language sql volatile security definer set search_path = public, pg_temp as
+$$ update public.live_sessions set analysis_claimed_at = null where id = p_live $$;
+
+-- Guarda el informe REAL del docente (reemplaza el de demo; la reflexión del docente se conserva). Idempotente.
+create or replace function public.rec_store_teacher_insights(p_live uuid, p_data jsonb, p_model text default '') returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_cs uuid; v_n int;
+begin
+  select class_session_id into v_cs from public.live_sessions where id = p_live;
+  if v_cs is null then raise exception 'Llamada sin clase del calendario'; end if;
+  if p_data is null or jsonb_typeof(p_data) <> 'object' or octet_length(p_data::text) > 262144
+     or jsonb_typeof(p_data->'areas') is distinct from 'array' or jsonb_typeof(p_data->'metrics') is distinct from 'array'
+     or jsonb_typeof(p_data->'recap') is distinct from 'object' then
+    raise exception 'Insights inválidos';
+  end if;
+  insert into public.teacher_insights as ti (session_id, data, is_demo, model)
+  values (v_cs, p_data, false, left(coalesce(p_model, ''), 60))
+  on conflict (session_id) do update set data = excluded.data, is_demo = false, model = excluded.model where ti.is_demo;
+  get diagnostics v_n = row_count;
+  return json_build_object('stored', v_n > 0);
+end $$;
+-- Insights REALES de un estudiante (solo de la clase y de un participante de esta llamada). Idempotente.
+create or replace function public.rec_store_student_insights(p_live uuid, p_enrollment uuid, p_participant uuid, p_data jsonb, p_model text default '') returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_cs uuid; v_n int;
+begin
+  select class_session_id into v_cs from public.live_sessions where id = p_live;
+  if v_cs is null then raise exception 'Llamada sin clase del calendario'; end if;
+  if not exists (select 1 from public.tc_session_students(v_cs) st where st.enrollment_id = p_enrollment)
+     or not exists (select 1 from public.session_participants sp join public.student_enrollments e on e.user_id = sp.user_id
+                     where sp.id = p_participant and sp.session_id = p_live and sp.recorded and e.id = p_enrollment) then
+    raise exception 'Estudiante inválido';
+  end if;
+  if p_data is null or jsonb_typeof(p_data) <> 'object' or octet_length(p_data::text) > 131072
+     or jsonb_typeof(p_data->'progress') is distinct from 'object' or jsonb_typeof(p_data->'recap') is distinct from 'object' then
+    raise exception 'Insights inválidos';
+  end if;
+  insert into public.student_insights as si (session_id, enrollment_id, participant_id, data, is_demo, model)
+  values (v_cs, p_enrollment, p_participant, p_data, false, left(coalesce(p_model, ''), 60))
+  on conflict (session_id, enrollment_id) do update
+    set data = excluded.data, is_demo = false, model = excluded.model, participant_id = excluded.participant_id where si.is_demo;
+  get diagnostics v_n = row_count;
+  return json_build_object('stored', v_n > 0);
+end $$;
+
+-- Uso de la IA de un análisis: ai_events (kind 'insights') + saldo del plan (ai_record_usage, a nombre del docente) +
+-- el total de la llamada (tope de tokens por clase). Devuelve los tokens usados en la llamada.
+create or replace function public.rec_record_ai(p_live uuid, p_prompt integer, p_completion integer, p_ok boolean, p_lang text default null) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare l public.live_sessions%rowtype; v_inst uuid; v_total int;
+begin
+  select * into l from public.live_sessions where id = p_live;
+  if l.id is null then raise exception 'Llamada inexistente'; end if;
+  v_inst := coalesce(l.institution_id, (select institution_id from public.profiles where id = l.teacher_id));
+  insert into public.ai_events (user_id, inst_id, root_id, kind, language, ok, finished_at)
+  values (l.teacher_id, v_inst, case when v_inst is not null then public.billing_root(v_inst) end, 'insights',
+          left(nullif(regexp_replace(coalesce(p_lang, ''), '[^A-Za-z-]', '', 'g'), ''), 10), coalesce(p_ok, false), now());
+  perform public.ai_record_usage(l.teacher_id, p_prompt, p_completion, 'insights');
+  v_total := least(greatest(coalesce(p_prompt, 0), 0), 2000000) + least(greatest(coalesce(p_completion, 0), 0), 2000000);
+  update public.live_sessions set insights_tokens = insights_tokens + v_total where id = l.id returning * into l;
+  return json_build_object('session_tokens', l.insights_tokens);
+end $$;
+
+-- Fin del procesamiento: 'ready' (insights listos), 'failed' (con el motivo) o 'ended' (nada que analizar)
+create or replace function public.rec_finish(p_live uuid, p_status text, p_error text default null) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$ begin
+  if p_status not in ('ready','failed','ended') then raise exception 'Estado inválido'; end if;
+  update public.live_sessions set status = case when p_status = 'failed' then 'ended' else p_status end,
+         processing_error = case when p_status = 'failed' then left(coalesce(p_error, 'failed'), 500) end, analysis_claimed_at = null
+   where id = p_live and status = 'processing';
+  return found;
+end $$;
+
+-- Borrado diario: el audio ya se borró del Storage → se marca (la transcripción y los insights quedan)
+create or replace function public.rec_mark_deleted(p_recording uuid) returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$ begin
+  update public.recordings set status = 'deleted', deleted_at = now() where id = p_recording and deleted_at is null;
+  return found;
+end $$;
+
+do $$
+declare f text;
+begin
+  foreach f in array array['recordings_due_for_deletion()', 'rec_room_started(text)', 'rec_track_published(text, uuid, text, text)',
+    'rec_egress_started(uuid, text)', 'rec_egress_failed(uuid)',
+    'rec_egress_ended(text, boolean, timestamptz, timestamptz, integer, text)', 'rec_set_state(text, text)', 'rec_room_finished(text)',
+    'rec_work(uuid, integer, uuid)', 'rec_speech_submitted(uuid, text)', 'rec_speech_failed(uuid, text, boolean)',
+    'rec_store_transcript(uuid, jsonb)', 'rec_session_context(uuid)', 'rec_claim_analysis(uuid, integer)', 'rec_release_analysis(uuid)',
+    'rec_store_teacher_insights(uuid, jsonb, text)', 'rec_store_student_insights(uuid, uuid, uuid, jsonb, text)',
+    'rec_record_ai(uuid, integer, integer, boolean, text)', 'rec_finish(uuid, text, text)', 'rec_mark_deleted(uuid)'] loop
+    execute format('revoke all on function public.%s from public, anon, authenticated', f);
+    execute format('grant execute on function public.%s to service_role', f);
+  end loop;
+end $$;
+
+-- ── funciones de la APP (con la sesión de la persona) ──
+-- Estado de la grabación / procesamiento de una clase. Quién: docente / suplente, admins de su unidad (como los insights)
+-- y los estudiantes de esa clase. state: none | live | processing | ready | ended
+create or replace function public.rec_session_status(p_session uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare l public.live_sessions%rowtype;
+begin
+  if auth.uid() is null or p_session is null
+     or not (public.tc_can_view_insights(p_session) or public.tc_rec_role(p_session, auth.uid()) is not null) then
+    raise exception 'No autorizado';
+  end if;
+  select * into l from public.live_sessions where class_session_id = p_session order by created_at desc limit 1;
+  return json_build_object(
+    'state', case when l.id is null or l.status in ('scheduled','cancelled') then 'none' else l.status end,
+    'recordings', (select count(*) from public.recordings r where l.id is not null and r.session_id = l.id and r.status <> 'failed')::int,
+    'transcribed', (select count(*) from public.recordings r where l.id is not null and r.session_id = l.id and r.status in ('transcribed','deleted'))::int,
+    'has_insights', exists (select 1 from public.teacher_insights ti where ti.session_id = p_session and not ti.is_demo)
+                    or exists (select 1 from public.student_insights si join public.student_enrollments e on e.id = si.enrollment_id
+                                where si.session_id = p_session and not si.is_demo and e.user_id = auth.uid()),
+    'failed', l.processing_error is not null);
+end $$;
+-- Clases que ve quien llama (docente / suplente / admin) que se están procesando ahora (lista de Insights)
+create or replace function public.rec_processing_sessions() returns json
+language sql stable security definer set search_path = public, pg_temp as
+$$ select coalesce(json_agg(json_build_object('id', l.class_session_id, 'status', l.status) order by l.ended_at desc), '[]'::json)
+     from public.live_sessions l
+    where auth.uid() is not null and l.status in ('live','processing') and l.class_session_id is not null
+      and coalesce(l.ended_at, l.started_at, l.created_at) > now() - interval '30 days'
+      and public.tc_can_view_insights(l.class_session_id) $$;
+revoke all on function public.rec_session_status(uuid) from public, anon;
+grant execute on function public.rec_session_status(uuid) to authenticated;
+revoke all on function public.rec_processing_sessions() from public, anon;
+grant execute on function public.rec_processing_sessions() to authenticated;
+
+-- Súper admin: modelo por tipo de pedido, ahora también 'insights' (insights reales de las clases grabadas)
+create or replace function public.update_ai_model_default(p jsonb) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare k text; v jsonb;
+begin
+  if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+  if p is null or jsonb_typeof(p) <> 'object' then raise exception 'Modelo inválido'; end if;
+  select ai_model_default into v from public.platform_settings where id;
+  foreach k in array array['main','student','summary','verify','insights'] loop
+    if p ? k then
+      if p->>k not in ('default','mini') then raise exception 'Modelo inválido'; end if;
+      v := v || jsonb_build_object(k, p->>k);
+    end if;
+  end loop;
+  update public.platform_settings set ai_model_default = v, updated_by = auth.uid(), updated_at = now() where id;
+  return v::json;
+end $$;
+revoke all on function public.update_ai_model_default(jsonb) from public, anon;
+grant execute on function public.update_ai_model_default(jsonb) to authenticated;
+-- ══ END RECORDING PIPELINE ══
+
 -- Que la API de Supabase vea enseguida las funciones nuevas
 notify pgrst, 'reload schema';
 

@@ -273,7 +273,7 @@ Cierre y ticket de salida (5 min)
         const mic = p.getTrackPublication(S.Microphone); const cam = p.getTrackPublication(S.Camera);
         return {
           id: isLocal ? 'local' : p.identity, isLocal, name: p.name || p.identity, role: m.role === 'teacher' ? 'teacher' : 'student',
-          mic: !!mic && !mic.isMuted, cam: !!cam && !cam.isMuted, consent: m.consent || {}, recorded: !!m.recorded,
+          mic: !!mic && !mic.isMuted, cam: !!cam && !cam.isMuted, consent: m.consent || {}, recorded: !!m.recorded, recActive: !!m.rec_active,
           minor: !!m.minor, guardianOk: !!m.guardian_consent, hand: !!(this._hands && this._hands[isLocal ? 'local' : p.identity]),
         };
       };
@@ -324,13 +324,29 @@ Cierre y ticket de salida (5 min)
     async sendChat(text) { await this._send({ type: 'chat', text }); this.emit('chat', { from: 'local', name: this.o.name, text, ts: Date.now(), self: true }); }
     async setHandRaised(up) { (this._hands = this._hands || {}).local = up; await this._send({ type: 'hand', up }); this.emit('hand', { id: 'local', up }); this._sync(); }
     async setRecording(state) {
-      // Auto-recording: the recorder (docs/live-class.md) records from the start of the room every participant whose
-      // metadata says recorded=true; these {type:"rec"} messages only pause / resume it ('off' = class ended).
-      // TODO(live): also POST /api/class/recording {room, state} so the recorder doesn't depend on data messages.
+      // Auto-recording: the server (LiveKit webhook → api/_lib/rec/pipeline.js) records from the start every microphone whose
+      // owner has a valid consent IN THE DATABASE; the {type:"rec"} messages update everyone's indicator ('off' = class ended)
+      // and POST /api/class/rec makes the server really stop / restart the recordings (teacher / substitute only).
       this._rec = state;
       await this._send({ type: 'rec', state });
       this.emit('recording', state);
+      if (state === 'on' || state === 'paused') this._postRec(state);
     }
+    // Recording pipeline on (APP_CONFIG.recording) and a calendar class: tell the server. Never blocks the room.
+    async _postRec(state) {
+      if (!recorderOn() || this.o?.role !== 'teacher' || !/^sess-[0-9a-f]{32}$/.test(String(this.o?.room || ''))) return null;
+      try {
+        const { data: { session } = {} } = await sb.auth.getSession();
+        const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 12000);
+        const r = await fetch('/api/class/rec', { method: 'POST', signal: ctrl.signal,
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (session?.access_token || '') },
+          body: JSON.stringify({ room: this.o.room, state }) }).finally(() => clearTimeout(t));
+        return r.ok ? await r.json().catch(() => ({})) : null;
+      } catch (e) { console.warn('recording state not sent', e); return null; }
+    }
+    // The teacher ends a recorded calendar class: the server stops the recordings, closes the room for everyone and starts
+    // processing (transcription → insights)
+    async endForAll() { return this._postRec('end'); }
     async disconnect() { try { await this.room?.disconnect(); } catch (e) { /* ignore */ } document.querySelectorAll('audio.lc-remote-audio').forEach(el => el.remove()); this.room = null; this._h = {}; }
   }
 
@@ -830,6 +846,10 @@ Cierre y ticket de salida (5 min)
   // ROOM
   // ════════════════════════════════════════════════════════════════════════════════════════
   const recorderOn = () => typeof APP_CONFIG !== 'undefined' && APP_CONFIG.recording === true;
+  // "● Recording" only once a recording really started for that person: with LiveKit the SERVER says so (rec_active in their
+  // metadata, set after the egress started — api/_lib/rec/pipeline.js); the demo simulates it for everyone who consented.
+  const recActive = p => !!p && (S.room && S.room.kind === 'livekit' ? !!p.recActive : !!p.recorded);
+  const recLive = R => recorderOn() && (R.participants || []).some(recActive);
   const roomOwnerKey = () => String(currentUser?.id || 'guest').replace(/-/g, '').slice(0, 12).toLowerCase();
   const randId = () => Math.random().toString(36).slice(2, 10);
   const isNarrow = () => window.matchMedia && window.matchMedia('(max-width: 900px)').matches;
@@ -932,7 +952,7 @@ Cierre y ticket de salida (5 min)
     return `<div class="lc-room${R.side ? ' side-open' : ''}" id="lc-room">
       <div class="lc-room-top">
         <div class="lc-room-title">${S.demo ? demoChip() : ''} <b data-no-i18n>${esc(S.sessionTitle)}</b> <span class="lc-chip" id="lc-provider-chip">${R.kind === 'livekit' ? 'LiveKit' : S.demo ? 'Simulated participants' : 'Preview mode'}</span>${R.role === 'teacher' && !S.sessionId && !S.demo ? ' <button type="button" class="lc-btn lc-sm" data-lc="invite-link" id="lc-invite-link">🔗 <span>Invite students</span></button>' : ''}</div>
-        <div class="lc-rec" id="lc-rec" data-state="${esc(R.rec.state)}" data-recorder="${recorderOn() ? 'on' : 'off'}" role="status"><span class="lc-rec-dot" aria-hidden="true"></span><span class="lc-rec-label" aria-live="polite">${recorderOn() ? 'Recording — only people who gave consent' : 'Recording ready to be turned on — nothing is recorded yet'}</span><span class="lc-rec-time" data-no-i18n id="lc-rec-time"></span><span class="lc-rec-me" id="lc-rec-me"${R.recorded ? ' hidden' : ''}>You: not recorded</span></div>
+        <div class="lc-rec" id="lc-rec" data-state="${esc(R.rec.state)}" data-recorder="${recorderOn() ? 'on' : 'off'}" role="status"><span class="lc-rec-dot" aria-hidden="true"></span><span class="lc-rec-label" aria-live="polite">${recLive(R) ? 'Recording — only people who gave consent' : 'Recording ready to be turned on — nothing is recorded yet'}</span><span class="lc-rec-time" data-no-i18n id="lc-rec-time"></span><span class="lc-rec-me" id="lc-rec-me"${R.recorded ? ' hidden' : ''}>You: not recorded</span></div>
         <div class="lc-talk" id="lc-talk" role="group" aria-label="${esc(tr('Talk time'))}">
           <span class="lc-talk-lb">Teacher</span> <b data-no-i18n id="lc-talk-t">0%</b>
           <div class="lc-talk-bar" aria-hidden="true"><span id="lc-talk-bar-t"></span></div>
@@ -1003,7 +1023,7 @@ Cierre y ticket de salida (5 min)
   }
 
   function consentBadge(p) {
-    if (p.recorded) return `<span class="lc-badge rec" title="${esc(tr('Consented to recording'))}">● <span>${recorderOn() ? 'Recorded' : 'Consented'}</span></span>${p.minor ? ` <span class="lc-badge" title="${esc(tr('Under 18: guardian consent declared by the student or managed by the institution (not verified by TeroClass)'))}">👪 <span>Under 18</span></span>` : ''}`;
+    if (p.recorded) return `<span class="lc-badge rec" title="${esc(tr('Consented to recording'))}">● <span>${recorderOn() && recActive(p) ? 'Recorded' : 'Consented'}</span></span>${p.minor ? ` <span class="lc-badge" title="${esc(tr('Under 18: guardian consent declared by the student or managed by the institution (not verified by TeroClass)'))}">👪 <span>Under 18</span></span>` : ''}`;
     return `<span class="lc-badge off" title="${esc(tr('Attends without recording'))}"><span>Not recorded</span></span>`;
   }
   function tileHtml(p) {
@@ -1136,7 +1156,7 @@ Cierre y ticket de salida (5 min)
       rec.dataset.state = st;
       const lb = rec.querySelector('.lc-rec-label');
       // TC-23: "Recording" only when a recorder is really connected (RECORDING_ENABLED); otherwise say it is ready
-      const k = st === 'on' ? (recorderOn() ? 'Recording — only people who gave consent' : 'Recording ready to be turned on — nothing is recorded yet')
+      const k = st === 'on' ? (recLive(R) ? 'Recording — only people who gave consent' : 'Recording ready to be turned on — nothing is recorded yet')
         : st === 'paused' ? 'Recording paused — resumes automatically' : 'Not recording';
       if (lb.dataset.k !== k) { lb.dataset.k = k; lb.textContent = k; }
       const t = document.getElementById('lc-rec-time');
@@ -1290,6 +1310,10 @@ Cierre y ticket de salida (5 min)
       plan: R.plan.sections.map(s => ({ title: s.generic ? '' : s.title, planned: s.minutes, actual: Math.round(s.elapsed / 60) })),
     };
     const sess = S.sessionId && R.role === 'teacher' && S.sessionRole !== 'student' ? { id: S.sessionId, title: S.sessionTitle, group: S.sessionGroup } : null;
+    // REAL recording (pipeline configured + LiveKit + a calendar class): the server ends the class for everyone and prepares
+    // the real insights; nothing simulated and no demo insights are stored for it
+    const real = !!sess && R.kind === 'livekit' && recorderOn() && !S.demo && typeof R.provider?.endForAll === 'function';
+    if (real) R.provider.endForAll();
     teardownRoom();
     // the class document keeps a "class end" version (teacher / substitute; nothing is created if nobody wrote)
     if (sess && typeof sb !== 'undefined') sb.rpc('classdoc_add_version', { p_session: sess.id, p_label: 'class_end' }).then(() => {}, () => {});
@@ -1299,6 +1323,12 @@ Cierre y ticket de salida (5 min)
     if (sess && window.TCNotebook) window.TCNotebook.classEnd(sess.id);
     // P-07 / P-08: sample insights only for the explicit demo; a calendar class gets its (demo-flagged) stored insights;
     // a quick room outside the calendar (or a student) gets none — nothing invented is shown as if it were real
+    if (real) {
+      S.view = 'home'; render();
+      toast('Class ended. Processing your class… (it may take a few minutes)', 'ok');
+      if (window.TCInsightsPanel) window.TCInsightsPanel.openSession(sess.id, { from: 'live' });
+      return;
+    }
     if (!S.demo && !sess) {
       S.view = 'home'; S.adhocRoom = null; S.ticket = null; render();
       toast(R.role === 'teacher' ? 'Class ended. Insights are prepared for the classes scheduled in the Calendar.' : 'You left the class.', 'ok');
@@ -1922,6 +1952,7 @@ Cierre y ticket de salida (5 min)
     'See how a class looks with a sample plan, invented participants and sample insights. Nothing is saved and nobody else sees it.': 'Mirá cómo se ve una clase con un plan de ejemplo, participantes inventados e insights de ejemplo. No se guarda nada y nadie más lo ve.',
     'Preview mode': 'Modo vista previa', 'Invite students': 'Invitar estudiantes',
     'Recording ready to be turned on — nothing is recorded yet': 'Grabación lista para activarse — todavía no se graba nada',
+    'Class ended. Processing your class… (it may take a few minutes)': 'Clase terminada. Procesando tu clase… (puede tardar unos minutos)',
     'No plan for this room. Choose a saved class when you start it.': 'Esta sala no tiene plan. Elegí una clase guardada al iniciarla.',
     'Class ended. Insights are prepared for the classes scheduled in the Calendar.': 'Clase terminada. Los insights se preparan para las clases programadas en el Calendario.', 'You left the class.': 'Saliste de la clase.',
     'Students can join a quick room with a link once the video classroom is connected. Your scheduled classes are in the Calendar.': 'Los estudiantes van a poder entrar a una sala rápida con un link cuando se conecte el aula de video. Tus clases programadas están en el Calendario.',

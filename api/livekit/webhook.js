@@ -1,8 +1,17 @@
-// Vercel serverless: LiveKit webhook receiver (stub — logs only for now).
+// Vercel serverless: LiveKit webhook receiver.
 // LiveKit signs every webhook: the Authorization header is a JWT signed with the API
 // secret (iss = API key) whose "sha256" claim is the base64 SHA-256 of the raw body.
-// Configure in LiveKit Cloud → Settings → Webhooks → https://<app>/api/livekit/webhook
+// Configure in LiveKit Cloud → Settings → Webhooks → https://teroclass.com/api/livekit/webhook
+// RECORDING (api/_lib/rec/pipeline.js), only while the pipeline is configured (api/_lib/rec/env.js; otherwise it only logs):
+//   room_started → the call is live · track_published (microphone) → consent re-checked IN THE DATABASE → Track Egress (audio
+//   only) straight to Azure Blob · egress_ended → the recording is stored (30-day retention) · room_finished → "processing"
+//   and a first, short processing attempt (transcription jobs). Every step is idempotent: a 503 makes LiveKit retry.
 import { livekitEnv, verifyJwt, sha256Base64 } from '../_lib/livekit.js';
+import { recordingEnv } from '../_lib/rec/env.js';
+import * as pipeline from '../_lib/rec/pipeline.js';
+
+// time the webhook spends on processing after room_finished / egress_ended (the cron and the app do the rest)
+const WEBHOOK_PROCESS_MS = 8000;
 
 const MAX_BODY = 256 * 1024;
 
@@ -56,26 +65,21 @@ export default async function handler(req, res) {
     track: event.track?.sid, id: event.id, createdAt: event.createdAt,
   }));
 
-  switch (event.event) {
-    case 'room_started':
-      // TODO(live): live_sessions.status = 'live', started_at = now() (service role key).
-      break;
-    case 'participant_joined':
-      // TODO(live): session_participants.joined_at; read consent flags from participant.metadata.
-      break;
-    case 'track_published':
-      // TODO(live): if the participant's metadata says recorded=true and the track is audio,
-      // dispatch the recorder worker (Azure Container Apps) to capture this track only.
-      break;
-    case 'participant_left':
-      // TODO(live): session_participants.left_at.
-      break;
-    case 'room_finished':
-      // TODO(live): live_sessions.status = 'processing'; enqueue Azure Speech batch
-      // transcription → GPT-4o insights → student_insights / teacher_insights.
-      break;
-    default:
-      break;
+  const rec = recordingEnv();
+  if (!rec.configured) return res.status(200).json({ ok: true, recording: false });
+  let out = { ok: true };
+  try {
+    switch (event.event) {
+      case 'room_started': out = await pipeline.onRoomStarted(rec, event); break;
+      case 'track_published': out = await pipeline.onTrackPublished(rec, event); break;
+      case 'egress_ended': out = await pipeline.onEgressEnded(rec, event, WEBHOOK_PROCESS_MS); break;
+      case 'room_finished': out = await pipeline.onRoomFinished(rec, event, WEBHOOK_PROCESS_MS); break;
+      default: break; // participant_joined / left, egress_started / updated, track_unpublished: nothing to do
+    }
+  } catch (e) {
+    console.error('livekit webhook: recording step failed', e?.message || e);
+    out = { ok: false, retry: true };
   }
-  return res.status(200).json({ ok: true });
+  if (out && out.retry) return res.status(503).json({ ok: false, retry: true });
+  return res.status(200).json({ ok: true, ...(out && out.record !== undefined ? { record: out.record } : {}) });
 }

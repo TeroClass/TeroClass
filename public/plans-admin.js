@@ -26,7 +26,7 @@
   const ROLE_L = { direccion: 'Leadership', coordinacion: 'Academic coordination', docente: 'Teacher', administracion: 'Administration', otro: 'Other' };
   const PLAN_L = { docente: 'Teacher', institucion: 'Institution', institucion_plus: 'Institution+', unsure: 'Not sure yet' };
   const SRC_L = { popup_gen2: 'Pop-up (2nd class)', popup_gen4: 'Reminder (4th class)', paywall: 'Trial limit', plans_page: 'Plans page', plan_usage: 'Plan & usage', other: 'Other' };
-  const KIND_L = { main: 'Class (guide + continuation)', student: 'Student handout', summary: 'Playbook summary', verify: 'Calculation check' };
+  const KIND_L = { main: 'Class (guide + continuation)', student: 'Student handout', summary: 'Playbook summary', verify: 'Calculation check', insights: 'Class insights (recorded classes)' };
   const OFFER_L = { founder: 'Founding Institutions (30% off year 1, first 10)', pilot_60d: '60-day pilot (USD 150, up to 10 teachers)', pilot_anii: '6-month ANII pilot', trial_email_coupon: 'TERO20 coupon (20% off yearly Teacher)' };
 
   // ── badge on the Platform icon ──
@@ -210,7 +210,7 @@
       <option value="default"${md[k] !== 'mini' ? ' selected' : ''}>${esc(tr('Default model'))}</option><option value="mini"${md[k] === 'mini' ? ' selected' : ''}>${esc(tr('Mini model'))}</option></select></label>`;
     box.innerHTML = `<div class="admin-card-title">AI model <span>Which Azure deployment each kind of request uses</span></div>
       ${mini === false ? `<div class="bl-banner warn" id="pf-mini-missing" role="status"><b>The mini model is not configured:</b> <span>add AZURE_OPENAI_DEPLOYMENT_MINI in Vercel (README → owner checklist). Until then "Mini model" uses the default deployment.</span></div>` : ''}
-      <div class="bl-settings">${['main', 'student', 'summary', 'verify'].map(sel).join('')}</div>
+      <div class="bl-settings">${['main', 'student', 'summary', 'verify', 'insights'].map(sel).join('')}</div>
       <div class="bl-row"><button class="btn-modal-save" data-pa="models-save">Save models</button> <span class="bl-hint">Decide with "Compare models" below first.</span></div>
       <div class="bl-subtitle">Mini model price <span class="bl-tag">to verify</span></div>
       <div class="bl-settings"><label class="bl-field"><span class="modal-label">Input tokens (USD per 1M)</span><input type="number" min="0" step="0.01" id="pf-mini-in" class="settings-input" value="${esc(s.ai_price_input_mini ?? 0.4)}"></label>
@@ -394,7 +394,7 @@
     'Account e-mail': 'Email de la cuenta', 'Plan status': 'Estado del plan', Note: 'Nota', Active: 'Activo', Pilot: 'Piloto', 'Plan cancelled': 'Plan cancelado', 'Remove the plan': 'Quitar el plan',
     'Save Teacher plan': 'Guardar plan Docente', "An active Teacher plan: no trial limit and the plan's classes per month.": 'Un plan Docente activo: sin límite de prueba y con las clases por mes del plan.',
     Account: 'Cuenta', Since: 'Desde', 'No Teacher plans yet.': 'Todavía no hay planes Docente.', 'Teacher plan saved ✓': 'Plan Docente guardado ✓', 'Enter an email.': 'Ingresá un email.',
-    'Class (guide + continuation)': 'Clase (guía + continuación)', 'Student handout': 'Material del alumno', 'Playbook summary': 'Resumen del playbook', 'Calculation check': 'Chequeo de cálculos',
+    'Class (guide + continuation)': 'Clase (guía + continuación)', 'Student handout': 'Material del alumno', 'Playbook summary': 'Resumen del playbook', 'Calculation check': 'Chequeo de cálculos', 'Class insights (recorded classes)': 'Insights de clase (clases grabadas)',
     'Default model': 'Modelo por defecto', 'Mini model': 'Modelo mini', 'AI model': 'Modelo de IA', 'Which Azure deployment each kind of request uses': 'Qué despliegue de Azure usa cada tipo de pedido',
     'The mini model is not configured:': 'El modelo mini no está configurado:',
     'add AZURE_OPENAI_DEPLOYMENT_MINI in Vercel (README → owner checklist). Until then "Mini model" uses the default deployment.': 'agregá AZURE_OPENAI_DEPLOYMENT_MINI en Vercel (README → checklist del dueño). Mientras tanto "Modelo mini" usa el despliegue por defecto.',

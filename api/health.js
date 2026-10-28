@@ -3,6 +3,7 @@
 import { SUPABASE_URL, SUPABASE_KEY, livekitEnv } from './_lib/livekit.js';
 import { serviceKey } from './_lib/billing.js';
 import { resendKey } from './_lib/mail.js';
+import { recordingConfigured } from './_lib/rec/env.js';
 
 async function supabaseUp(ms = 3000) {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), ms);
@@ -25,6 +26,8 @@ export default async function handler(req, res) {
       token_limits: !!serviceKey(),
       email_configured: !!resendKey(),
       live_configured: livekitEnv().configured,
+      // recording → transcription → AI insights: true only with RECORDING_ENABLED=true and EVERY key (api/_lib/rec/env.js)
+      recording_configured: recordingConfigured(),
       captcha_configured: !!String(process.env.TURNSTILE_SITE_KEY || '').trim(),
       error_reporting: !!String(process.env.SENTRY_DSN || '').trim(),
     },

@@ -36,7 +36,12 @@ AI-powered didactic planning platform for teachers.
 | `SALES_NOTIFY_EMAIL` | (optional) Where "Hablar con ventas" requests are e-mailed, e.g. `ventas@teroclass.com` (never hard-coded). Needs `RESEND_API_KEY` too. Without them requests are only in *Platform → Sales requests*, with a red badge on the Platform icon. |
 | `TURNSTILE_SECRET_KEY` | (optional) Cloudflare Turnstile **secret**, only for the sales form **without signing in** on `/planes` (verified by `api/_lib/notify/lead.js`; also needs `TURNSTILE_SITE_KEY` and `SUPABASE_SERVICE_ROLE_KEY`). Without it the form asks people to sign in or create a free account first. (The same secret stays in Supabase for sign-up.) |
 | `TURNSTILE_SITE_KEY` | (optional, public) Cloudflare Turnstile site key (TC-18). With it, sign-up, sign-in, the student magic link and "Forgot your password?" show the check and send its token to Supabase Auth (`captchaToken`). The **secret** (`TURNSTILE_SECRET_KEY`) is NOT set in Vercel: paste it in Supabase → Authentication → Bot and Abuse Protection (Turnstile). Without the site key nothing changes. |
-| `RECORDING_ENABLED` | (optional, `true` only once a real recorder is connected) Makes the room say "● Recording — only people who gave consent". Without it the room says "Recording ready to be turned on — nothing is recorded yet" (TC-23). |
+| `RECORDING_ENABLED` | (optional) `true` turns on the **real recording pipeline** (LiveKit Egress → Azure Blob → Azure Speech → AI insights), but only when ALL of its variables are set too: the three `LIVEKIT_*`, `AZURE_STORAGE_*`, `AZURE_SPEECH_*`, `CRON_SECRET` and `SUPABASE_SERVICE_ROLE_KEY` (`/api/health` → `recording_configured`). Until then the room says "Recording ready to be turned on — nothing is recorded yet" (TC-23), and with it "● Recording" appears only once the server really started recording someone. See *Grabación real*. |
+| `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY`, `AZURE_STORAGE_CONTAINER` | (recording) Azure Storage account in **Brazil South**, its **key1**, and the private container `recordings`. Server only: LiveKit gets the key in the egress request to upload the audio; the browser never sees it. |
+| `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | (recording) Azure AI Speech resource (Standard S0) in **Brazil South**: its KEY 1 and `brazilsouth`. Optional `AZURE_SPEECH_API_VERSION` (default `2024-11-15`). |
+| `CRON_SECRET` | (recording) 32+ random characters (`openssl rand -hex 32`). Vercel sends it to the daily job `/api/class/process` (`vercel.json → crons`: processing + deleting audio older than 30 days). |
+| `INSIGHTS_SESSION_TOKEN_CAP` | (optional) AI tokens allowed per recorded class (default 150000). |
+| `RECORDING_SPANISH_LOCALE` | (optional) `es-UY` (default) or `es-ES`: the transcription language of classes whose plan says "Spanish" (others: `en-US`). |
 | `APP_ENV` | (optional) `production` on the production project. Any other value (e.g. `staging`) shows the thin "Versión de prueba" banner even on teroclass.com; any host other than teroclass.com / www.teroclass.com shows it anyway (P-21). |
 | `ROOM_TICKET_SECRET` | (optional) Secret for the invitation links of quick live rooms (TC-13). Default: derived from `LIVEKIT_API_SECRET`. |
 | `AI_IP_HOURLY_LIMIT` | (optional) AI requests per hour from one IP (default 300; a school shares one IP). |
@@ -46,8 +51,11 @@ AI-powered didactic planning platform for teachers.
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for the group notebook
-(2026-10-28, see *Group notebook*): run it again** — tested from git b0afe36 with data, then twice; `002_live_class.sql` did not
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for the recording pipeline
+(2026-10-28, block `RECORDING PIPELINE`, see *Grabación real*): run it again** — tested from git 08ff5fc with data, then twice,
+then `002_live_class.sql` (unchanged; still optional and still applies after it). Nothing is recorded until the owner sets the
+variables. Before that it changed for the group notebook
+(2026-10-28, see *Group notebook*) — tested from git b0afe36 with data, then twice; `002_live_class.sql` did not
 change and still applies after it. Before that it changed for plans and the free
 trial (2026-10-21, see *Plans, free trial and sales*) — tested from git a4f00d3 with data, then twice; `002_live_class.sql`
 did not change and still applies after it. **The first run marks every existing institution as "Pilot"** (nothing stops working);
@@ -117,7 +125,15 @@ counts the classes with class insights in the period (`students.insight_sessions
 - Language classes show grammar/pronunciation/CEFR; other subjects show concepts and disciplinary language instead (the sample is
   chosen from the class title / group name: "Química", "Math", "History"… → subject sample; "English B1"… → language sample).
 
-**Data (today: demo).** Real insights will come from the recorded call (LiveKit + Azure Speech + AI), not active yet. Until then
+**Real insights (recorded classes).** With the recording pipeline on (*Grabación real*), a calendar class taught in the real
+video classroom gets REAL insights (`is_demo = false`) from its recording: transcript (Azure Speech) → teacher report and the
+insights of every student who consented (Azure OpenAI, same JSON shape and screens as the demo; talk time, words per minute,
+questions, wait time and the longest teacher turn are computed in code from the timestamps). While it is processing, Insights
+shows "Procesando tu clase… (puede tardar unos minutos)" (in the list: "Procesando…" instead of *Generate demo insights*) and
+asks the server to advance every ~20 s (`POST /api/class/process`); real insights replace the demo ones of that class (the
+reflection and messages are kept). Students who did not consent get nothing real (a demo row, if one was generated, stays demo).
+
+**Data (until then: demo).** Without the recording pipeline,
 **demo insights** are stored for real classes and flagged `is_demo` (the screens show "Demo data — real insights activate when
 the live classroom is connected"):
 - when a teacher or substitute **ends a class** opened from the Calendar in the live-class demo (then Insights opens on it);
@@ -139,7 +155,7 @@ so the tables moved to `001`; `002` now only links them to the call — `live_se
 call) and `student_insights.participant_id` (FK to `session_participants`) — drops its old insight policies and requires the new
 `001`. Running `002` after `001` (any number of times) changes nothing else. A database where an old `002` had created insight
 tables tied to `live_sessions` keeps them as `*_live_legacy` (empty ones are dropped).
-**Limitations (class insights).** All insights are sample data until the recorded live class is connected (same content for
+**Limitations (class insights).** Without the recording pipeline all insights are sample data (same content for
 every class of a subject type, varied per student; real numbers, quotes and pronunciation audio need the recording); the
 assistant draft is a template built from the student's feedback, not an AI call; a guardian has no access to a minor's
 insights yet; access follows the group: a teacher replaced in a group stops seeing its past classes' insights and the new one
@@ -723,6 +739,13 @@ admin overview, Métricas, notification payload), the upgrades from git fabb1c7,
 `002_live_class.sql` + its RLS suite after the current `001`).
 CSV parser unit tests: `node --no-warnings --test tests/unit-*.test.mjs`.
 API: `node --no-warnings --test tests/api-*.test.mjs` (billing, live class, recording consent in the token + admin emails, AI metadata, calendar feed + notifications).
+Recording pipeline (2026-10-28): `tests/api-recording.test.mjs` (mocked fetch: webhook → Track Egress only for people whose consent
+the DATABASE confirms, retries idempotent, egress refused / paused meanwhile, pause / resume / end authorization, SAS format, Speech
+job creation + polling + transcript offsets, numbers from the timestamps, analysis JSON validation + rendering with the real view,
+token cap, retention, cron secret, process authorization, `vercel.json` crons / rewrites), `tests/sql/recording.sql` (server-only
+writes, consent re-check, idempotent steps, real insights replace demo ones, reads like the insights, retention; also after an upgrade
+from git 08ff5fc with data + `002`) and `tests/e2e-recording.cjs` ("Procesando tu clase…" with polling, then the real report and
+student insights; still-live state; student view; pipeline off = unchanged demo flow; `SHOTS=<dir>` saves `rec-*.png`).
 
 ## Live class (Aula en vivo)
 
@@ -736,3 +759,44 @@ Calendar (teacher / substitute) stores demo insights for that class (see *Class 
 To connect real video set `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in Vercel.
 See `docs/live-class.md` (activation, costs, privacy checklist). Tests: `tests/e2e-live.cjs`,
 `tests/api-live.test.mjs`, `tests/sql/002_live_class_rls.sql`.
+
+### Grabación real (recording → transcription → AI insights) — OFF until the owner sets it up
+
+**Qué hace** (todo en el servidor; detalle en `docs/live-class.md` → paso 4): en una clase del calendario, cada micrófono de quien
+tiene el consentimiento vigente **en la base** se graba solo en audio con un *Track Egress* de LiveKit, directo a Azure Blob
+Storage (Brazil South). La pausa del docente detiene la grabación en el servidor (`POST /api/class/rec`); "Terminar clase" cierra la
+sala para todos. Después: Azure Speech (batch, con marcas de tiempo por palabra, idioma de la clase: `en-US` por defecto, `es-UY` /
+`es-ES`) → Azure OpenAI (informe TEC del docente + insights de cada estudiante que consintió) → Insights, sin la etiqueta "Demo".
+El audio se borra a los 30 días (tarea diaria); la transcripción y los insights quedan. Las salas rápidas no se graban.
+Código: `api/_lib/rec/*`, `api/_lib/class/rec.js`, `api/_lib/class/process.js`, `api/livekit/webhook.js`; base: bloque
+`RECORDING PIPELINE` de `001_base.sql`. No suma funciones de Vercel (siguen 10 de 12): todo va por `api/class.js` y el webhook.
+
+**Pasos del dueño** (una sola vez):
+1. **Almacenamiento.** <https://portal.azure.com> → Crear un recurso → **Cuenta de almacenamiento**. Región **Brazil South**,
+   Estándar, LRS; en *Avanzado*, acceso anónimo a blobs **desactivado**. Después: *Contenedores → + Contenedor* `recordings`,
+   **Privado**. *Administración del ciclo de vida → Agregar regla*: prefijo `recordings/`, "última modificación hace más de 30 días"
+   → **Eliminar el blob** (respaldo). *Claves de acceso* → copiar el **nombre de la cuenta** y **key1**.
+2. **Transcripción.** Crear un recurso → **Speech** (Azure AI Speech), región **Brazil South**, plan **Standard S0**. *Claves y punto
+   de conexión* → copiar **CLAVE 1** y la región (`brazilsouth`).
+3. **LiveKit.** cloud.livekit.io → Settings → Webhooks → **`https://teroclass.com/api/livekit/webhook`** (con la misma API key).
+   Revisar que el plan tenga minutos de Egress.
+4. **Vercel** → Settings → Environment Variables (Production): `RECORDING_ENABLED=true`, `AZURE_STORAGE_ACCOUNT=<nombre>`,
+   `AZURE_STORAGE_KEY=<key1>`, `AZURE_STORAGE_CONTAINER=recordings`, `AZURE_SPEECH_KEY=<CLAVE 1>`, `AZURE_SPEECH_REGION=brazilsouth`,
+   `CRON_SECRET=<32+ caracteres al azar>`; ya tienen que estar `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`,
+   `SUPABASE_SERVICE_ROLE_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`. **Redeploy.**
+5. **Supabase** → SQL Editor → volver a ejecutar `supabase/migrations/001_base.sql`.
+6. **Comprobar**: `https://teroclass.com/api/health` → `"recording_configured": true`; Vercel → Settings → Cron Jobs muestra
+   `/api/class/process`. Clase de prueba de 5 minutos con dos cuentas que aceptaron → Insights: "Procesando tu clase…" y después el
+   informe real. Para apagar: `RECORDING_ENABLED=false` + Redeploy.
+7. Antes de grabar a alumnos de verdad: el checklist de privacidad de `docs/live-class.md` (abogado, menores, contrato con LiveKit y
+   Microsoft).
+
+**Costo por hora de clase** (estimación, verificar precios): con 26 personas grabadas ≈ Speech US$ 4,7 (≈ US$ 0,18 por hora de
+audio; cada micrófono es un archivo de toda la clase) + IA US$ 0,3–0,6 + Storage < US$ 0,01 → **≈ US$ 2–6 por hora de clase**
+según cuántos se graban, **más** los minutos de video y de Egress de LiveKit de su plan. Tabla completa en `docs/live-class.md`.
+
+**Limitations (recording).** Track Egress records the whole time a microphone is in the room (silences included: Speech bills
+them); a consent revoked during a class stops new recordings (next track / resume), not the one in progress; ad-hoc rooms are
+not recorded; insights are produced once per class (re-entering a finished class records more audio but does not redo the
+analysis); the Vercel Hobby cron runs once a day, so the class advances fastest while someone has its Insights open; the
+per-call audit rows of `002` (`consents`) are not written yet; guardians still have no access to a minor's insights.
