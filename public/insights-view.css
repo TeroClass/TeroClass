@@ -183,3 +183,13 @@
   .lc-pron{grid-template-columns:1fr}
   .lc-vocab{grid-template-columns:1fr}
 }
+
+/* real insights: the recorded class is being processed (insights-panel.js) */
+.ins-processing{display:flex;flex-direction:column;gap:8px;border-color:var(--brand-primary)}
+.ins-processing h2{font-size:15.5px;margin:0;line-height:1.35}
+.ins-processing p{font-size:13px;color:var(--ink-soft);line-height:1.55;margin:0}
+.ins-proc-row{display:flex;align-items:center;gap:10px}
+.ins-spinner{flex:none;width:18px;height:18px;border-radius:50%;border:2.5px solid var(--purple-light,#ede9fe);border-top-color:var(--brand-primary,#7c5cbf);animation:ins-spin 1s linear infinite}
+@keyframes ins-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.ins-spinner{animation:none}}
+.ins-proc-btn{white-space:nowrap}

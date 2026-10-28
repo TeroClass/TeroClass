@@ -6,6 +6,7 @@
 // *.supabase.co and LiveKit to *.livekit.cloud (allowed), an inline event handler-free framing check, and that
 // third-party origins (the old CDNs) are blocked. The class whiteboard (Excalidraw + React, /vendor/whiteboard, lazy chunks,
 // its fonts from /vendor/whiteboard/fonts via EXCALIDRAW_ASSET_PATH) opens, draws, saves and exports PNG / SVG under the CSP.
+// The group notebook (public/group-notebook.js / .css) opens, saves typing and the group board shows its page selector.
 // Usage: NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-csp.cjs
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -142,6 +143,22 @@ function fileFor(p) {
     if (!svg.font || svg.png < 1000) throw new Error('export: ' + JSON.stringify(svg));
     const wb = [...seen.served].filter(p => p.startsWith('/vendor/whiteboard/'));
     if (!wb.includes('/vendor/whiteboard/whiteboard.js') || !wb.includes('/vendor/whiteboard/excalidraw.css') || !wb.some(p => p.startsWith('/vendor/whiteboard/chunks/')) || !wb.some(p => p.startsWith('/vendor/whiteboard/fonts/'))) throw new Error('whiteboard files: ' + wb.join(', '));
+    await page.evaluate(() => TCClassBoard.close());
+  });
+
+  await step('Group notebook (2026-10-28) under the CSP: /group-notebook.js + .css from public/, the editor per section, typing saved, the board page selector', async () => {
+    const db = M.db; const me = db.profiles.find(p => p.email === 'csp@t.com');
+    const s = db.class_sessions.find(x => x.title === 'CSP board');
+    for (const f of ['/group-notebook.js', '/group-notebook.css']) if (!seen.served.has(f)) throw new Error(f + ' not served from public/');
+    await page.evaluate(id => TCNotebook.open({ session: id }), s.id);
+    await page.waitForSelector('#nb-overlay.active .nb-sec .ProseMirror', { timeout: 20000 });
+    await page.click('#nb-overlay .nb-sec .ProseMirror'); await page.keyboard.type('Hola cuaderno', { delay: 5 });
+    for (let i = 0; i < 50 && !db.group_notebook_updates.length; i++) await page.waitForTimeout(100);
+    if (!db.group_notebook_updates.length) throw new Error('the notebook did not save');
+    if (!me) throw new Error('no user');
+    await page.evaluate(() => TCNotebook.close());
+    await page.evaluate(id => TCClassBoard.open(id), s.id);
+    await page.waitForSelector('#cb-overlay .cb-page-sel', { timeout: 30000 });
     await page.evaluate(() => TCClassBoard.close());
   });
 

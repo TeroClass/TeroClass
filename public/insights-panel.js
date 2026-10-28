@@ -11,6 +11,9 @@
  * Data only through security-definer RPCs (001_base.sql): list_insight_sessions, get_session_insights,
  * save_teacher_reflection, save_insight_message, generate_demo_insights, my_insights, my_insight.
  * View as (super admin): read-only, same screens for the viewed teacher / admin / student.
+ * REAL insights (recording pipeline on: APP_CONFIG.recording): a class whose recording is being processed shows "Processing
+ * your class…" (rec_processing_sessions / rec_session_status) and, while it is open, asks the server to advance it
+ * (POST /api/class/process) every ~20 s until its real insights (is_demo = false) are stored, then shows them.
  * Renderers: public/insights-view.js (window.TCInsightsView). Depends on index.html globals: sb, currentUser,
  * currentOrgId, viewAs, vaBlocked, showPanel, showToast, esc, trText, uiLocale, dbErr, I18N_ES.
  */
@@ -31,7 +34,10 @@
     try { const { data, error } = await sb.rpc(fn, args || {}); return { data, error }; } catch (e) { return { data: null, error: e }; }
   }
   const EMPTY_F = () => ({ group: '', teacher: '', from: '', to: '', q: '' });
+  const recOn = () => typeof APP_CONFIG !== 'undefined' && APP_CONFIG.recording === true;
+  const pollMs = () => Math.max(50, Number(window.TC_REC_POLL_MS) || 20000);
   const IP = {
+    proc: new Set(), rec: null, recFailed: false, pollTimer: null,
     scope: null, key: '', view: 'list', seq: 0, list: null, err: null, f: EMPTY_F(), qTimer: null,
     sid: null, detail: null, dseq: 0, tab: 'report', si: 0, sub: 'overview', stq: '', drafts: {}, refl: {},
     mine: null, mid: null, mdetail: null, pendingOpen: null, from: null,
@@ -78,8 +84,10 @@
   }
   async function loadList() {
     const seq = ++IP.seq; const scope = IP.scope;
-    const { data, error } = await rpc('list_insight_sessions', listArgs());
+    const [{ data, error }, proc] = await Promise.all([rpc('list_insight_sessions', listArgs()),
+      recOn() && !inViewAs() ? rpc('rec_processing_sessions') : Promise.resolve({ data: [] })]);
     if (seq !== IP.seq || scope !== IP.scope || IP.view !== 'list') return;
+    IP.proc = new Set((Array.isArray(proc.data) ? proc.data : []).map(x => x && x.id).filter(Boolean));
     IP.err = error || null; IP.list = error ? null : (data || {});
     if (document.getElementById('ins-results')) { paintFilters(); paintResults(); } else paintList();
   }
@@ -140,7 +148,8 @@
       <ul class="ins-pending">${list.map(p => `<li>
         <span class="ins-main"><span class="ins-title" data-no-i18n>${E(p.title || p.group_name || tr('Class'))}</span>
           <span class="ins-meta"><span data-no-i18n>${E(fDay(p.starts_at))} · ${E(fTime(p.starts_at))}</span>${p.group_name ? ` · <span data-no-i18n>${E(p.group_name)}</span>` : ''}${(IP.scope === 'unit' || inViewAs()) && p.teacher_name ? ` · <span data-no-i18n>${E(p.teacher_name)}</span>` : ''} · 🎒 <b data-no-i18n>${Number(p.students) || 0}</b> <span>students</span></span></span>
-        ${ro ? '' : `<button type="button" class="lc-btn lc-sm" data-lc="ins-generate" data-id="${E(p.id)}" data-title="${E(p.title || '')}" data-group="${E(p.group_name || '')}">✨ Generate demo insights</button>`}
+        ${IP.proc.has(p.id) ? `<button type="button" class="lc-btn lc-sm ins-proc-btn" data-lc="ins-open" data-id="${E(p.id)}"><span aria-hidden="true">⏳</span> <span>Processing…</span></button>`
+          : ro ? '' : `<button type="button" class="lc-btn lc-sm" data-lc="ins-generate" data-id="${E(p.id)}" data-title="${E(p.title || '')}" data-group="${E(p.group_name || '')}">✨ Generate demo insights</button>`}
       </li>`).join('')}</ul>
     </section>`;
   }
@@ -171,6 +180,7 @@
   // ════════════════════════════════════════════════════════════════════════════════════════
   async function openSession(id, opts) {
     opts = opts || {};
+    stopPoll(); IP.rec = null; IP.recFailed = false;
     IP.view = 'session'; IP.sid = id; IP.detail = null; IP.tab = opts.tab || 'report'; IP.si = 0; IP.sub = 'overview'; IP.stq = ''; IP.from = opts.from || null;
     const root = rootEl(); if (root) root.innerHTML = '<div class="lc-wrap"><div class="in-loading">Loading…</div></div>';
     const seq = ++IP.dseq;
@@ -178,7 +188,65 @@
     if (seq !== IP.dseq || IP.view !== 'session') return;
     if (error) { IP.view = 'list'; toast(errMsg(error), 'err'); paintList(); loadList(); return; }
     IP.detail = data || {};
+    // a recorded class still being processed: say so and keep it moving (no real report yet)
+    if (recOn() && !inViewAs() && !(IP.detail.teacher && !IP.detail.teacher.is_demo)) {
+      const st = await rpc('rec_session_status', { p_session: id });
+      if (seq !== IP.dseq || IP.view !== 'session') return;
+      if (!st.error && st.data && ['processing', 'live'].includes(st.data.state)) { IP.rec = st.data; paintDetail(); startPoll(id); return; }
+      IP.recFailed = !st.error && !!st.data && st.data.failed && st.data.state === 'ended';
+    }
     paintDetail();
+  }
+
+  // ── real insights: processing state + polling (POST /api/class/process advances the pipeline of THIS class) ──
+  function stopPoll() { clearTimeout(IP.pollTimer); IP.pollTimer = null; }
+  async function triggerProcess(id) {
+    try {
+      const { data: { session } = {} } = await sb.auth.getSession();
+      const r = await fetch('/api/class/process', { method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (session?.access_token || '') },
+        body: JSON.stringify({ session: id }) });
+      if (!r.ok) return null;
+      const j = await r.json().catch(() => null);
+      return j && typeof j.state === 'string' ? j : null;
+    } catch (e) { return null; }
+  }
+  function startPoll(id) {
+    stopPoll();
+    const tick = async () => {
+      IP.pollTimer = null;
+      if (IP.view !== 'session' || IP.sid !== id || !IP.rec) return;
+      if (!isActive()) { IP.pollTimer = setTimeout(tick, pollMs()); return; } // panel hidden: wait, don't work
+      let st = await triggerProcess(id);
+      if (!st) { const r = await rpc('rec_session_status', { p_session: id }); st = r.error ? IP.rec : r.data; }
+      if (IP.view !== 'session' || IP.sid !== id || !IP.rec) return;
+      if (st && ['processing', 'live'].includes(st.state)) {
+        IP.rec = st; paintProcStep();
+        IP.pollTimer = setTimeout(tick, pollMs()); return;
+      }
+      // finished (ready, or ended without insights): load the class again
+      IP.rec = null; IP.recFailed = !!(st && st.failed && !st.has_insights);
+      const seq = ++IP.dseq;
+      const { data, error } = await rpc('get_session_insights', { p_session: id });
+      if (seq !== IP.dseq || IP.view !== 'session' || IP.sid !== id) return;
+      if (!error) { IP.detail = data || {}; IP._m = null; }
+      paintDetail();
+      if (st && st.has_insights) toast(tr('Your class insights are ready ✓'), 'ok');
+    };
+    IP.pollTimer = setTimeout(tick, 0);
+  }
+  function procStepHtml() {
+    const r = IP.rec || {};
+    if (r.state === 'live') return '<span>The class is still live: the insights are prepared when it ends.</span>';
+    return `<span>Recordings transcribed:</span> <b data-no-i18n>${Number(r.transcribed) || 0} / ${Number(r.recordings) || 0}</b>`;
+  }
+  function paintProcStep() { const el = document.getElementById('ins-proc-step'); if (el) el.innerHTML = procStepHtml(); else if (IP.view === 'session') paintDetail(); }
+  function processingHtml() {
+    return `<section class="lc-card ins-processing" id="ins-processing" role="status" aria-live="polite">
+      <div class="ins-proc-row"><span class="ins-spinner" aria-hidden="true"></span><h2>Processing your class… (it may take a few minutes)</h2></div>
+      <p>We transcribe the voices of the people who consented and prepare the insights. This page updates by itself.</p>
+      <p class="lc-fine" id="ins-proc-step">${procStepHtml()}</p>
+    </section>`;
   }
   const canEdit = () => !!(IP.detail && IP.detail.can_edit) && !inViewAs();
   function detailModel() { return IP._m && IP._m.src === IP.detail ? IP._m.X : (IP._m = { src: IP.detail, X: V.modelFromSession(IP.detail) }).X; }
@@ -187,18 +255,21 @@
     const s = d.session || {}; const X = detailModel(); const rows = Array.isArray(d.students) ? d.students : [];
     const demo = !!(d.teacher && d.teacher.is_demo) || rows.some(r => r.is_demo);
     const missing = !d.teacher || rows.length < (Number(s.students_total) || 0);
-    const genBtn = !inViewAs() && IP.scope !== 'unit' && missing && s.status !== 'cancelled' ? `<button type="button" class="lc-btn lc-sm" data-lc="ins-generate" data-id="${E(s.id)}" data-title="${E(s.title || '')}" data-group="${E(s.group_name || '')}" data-reopen="1">✨ ${d.teacher ? '<span>Add missing students</span>' : '<span>Generate demo insights</span>'}</button>` : '';
+    const real = !!(d.teacher && !d.teacher.is_demo);
+    const genBtn = !inViewAs() && IP.scope !== 'unit' && missing && !real && !IP.rec && s.status !== 'cancelled' ? `<button type="button" class="lc-btn lc-sm" data-lc="ins-generate" data-id="${E(s.id)}" data-title="${E(s.title || '')}" data-group="${E(s.group_name || '')}" data-reopen="1">✨ ${d.teacher ? '<span>Add missing students</span>' : '<span>Generate demo insights</span>'}</button>` : '';
     root.innerHTML = `<div class="lc-wrap ins-wrap ins-detail">
       <button type="button" class="lc-link" data-lc="ins-back">← <span>All insights</span></button>
       <header class="lc-head ins-detail-head"><div><h1 data-no-i18n>${E(s.title || s.group_name || tr('Class'))}</h1>
         <p class="lc-sub"><span data-no-i18n>${E(fDay(s.starts_at))} · ${E(fTime(s.starts_at))}</span>${s.group_name ? ` · <span data-no-i18n>${E(s.group_name)}</span>` : ''}${s.unit_name ? ` · <span data-no-i18n>${E(s.unit_name)}</span>` : ''}${s.teacher_name ? ` · <span>Teacher:</span> <span data-no-i18n>${E(s.teacher_name)}</span>` : ''}${s.duration_min ? ` · <span data-no-i18n>${Number(s.duration_min)} min</span>` : ''}</p></div>
         <div class="ins-head-actions">${demo ? V.demoChip() : ''}${genBtn}${canEdit() ? '' : `<span class="ins-ro"><span aria-hidden="true">👁</span> <span>${inViewAs() ? 'View as: read-only' : 'Read-only'}</span></span>`}</div></header>
-      ${demo ? V.banner() : ''}
-      <div class="lc-tabs" role="tablist" aria-label="${E(tr('Insights'))}">
+      ${IP.rec ? processingHtml() : ''}
+      ${IP.recFailed && !real ? '<div class="lc-card ins-empty" id="ins-rec-failed"><h2>We couldn’t prepare the insights for this class.</h2><p>Nothing could be transcribed from the recording.</p></div>' : ''}
+      ${demo && !IP.rec ? V.banner() : ''}
+      ${IP.rec && !d.teacher && !rows.length ? '' : `<div class="lc-tabs" role="tablist" aria-label="${E(tr('Insights'))}">
         <button type="button" role="tab" class="lc-tab${IP.tab === 'report' ? ' active' : ''}" aria-selected="${IP.tab === 'report'}" data-lc="ins-tab" data-k="report" id="ins-tab-report">👩‍🏫 <span>Teacher report</span></button>
         <button type="button" role="tab" class="lc-tab${IP.tab === 'students' ? ' active' : ''}" aria-selected="${IP.tab === 'students'}" data-lc="ins-tab" data-k="students" id="ins-tab-students">🎒 <span>Students</span> <span class="lc-chip" data-no-i18n>${rows.length}</span></button>
       </div>
-      <div class="lc-ins-body" role="tabpanel" id="ins-body">${IP.tab === 'students' ? studentsHtml(X) : reportHtml(X)}</div>
+      <div class="lc-ins-body" role="tabpanel" id="ins-body">${IP.tab === 'students' ? studentsHtml(X) : reportHtml(X)}</div>`}
     </div>`;
     applyStudentFilter();
   }
@@ -339,7 +410,7 @@
     const a = el.dataset.lc; const id = el.dataset.id;
     switch (a) {
       case 'ins-open': openSession(id); break;
-      case 'ins-back': IP.view = 'list'; IP.detail = null; paintList(); loadList(); break;
+      case 'ins-back': stopPoll(); IP.rec = null; IP.view = 'list'; IP.detail = null; paintList(); loadList(); break;
       case 'ins-reload': IP.err = null; if (IP.scope === 'student') { IP.mine = null; paintMineList(); loadMine(); } else { IP.list = null; paintList(); loadList(); } break;
       case 'ins-clear': IP.f = EMPTY_F(); paintFilters(); loadList(); break;
       case 'ins-tab': IP.tab = el.dataset.k === 'students' ? 'students' : 'report'; repaintBody('#ins-tab-' + IP.tab); break;
@@ -432,5 +503,13 @@
     'Demo insights can only be generated for today’s or past classes.': 'Los insights de demo se generan para clases de hoy o anteriores.',
     'A cancelled class has no insights.': 'Una clase cancelada no tiene insights.', 'Invalid demo data.': 'Datos de demo inválidos.',
     'This class has no insights yet.': 'Esta clase todavía no tiene insights.', 'Write a message before publishing it.': 'Escribí un mensaje antes de publicarlo.',
+    // real insights (recorded classes)
+    'Processing your class… (it may take a few minutes)': 'Procesando tu clase… (puede tardar unos minutos)',
+    'We transcribe the voices of the people who consented and prepare the insights. This page updates by itself.': 'Transcribimos las voces de quienes dieron su consentimiento y preparamos los insights. Esta página se actualiza sola.',
+    'Recordings transcribed:': 'Grabaciones transcriptas:', 'Processing…': 'Procesando…',
+    'The class is still live: the insights are prepared when it ends.': 'La clase sigue en vivo: los insights se preparan cuando termina.',
+    'Your class insights are ready ✓': 'Los insights de tu clase están listos ✓',
+    'We couldn’t prepare the insights for this class.': 'No pudimos preparar los insights de esta clase.',
+    'Nothing could be transcribed from the recording.': 'No se pudo transcribir nada de la grabación.',
   });
 })();

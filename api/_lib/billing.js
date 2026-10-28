@@ -52,7 +52,7 @@ export async function budgetCheck(userId) {
   return b && typeof b.allowed === 'boolean' ? b : null;
 }
 
-const KINDS = new Set(['generate', 'continue', 'verify', 'student', 'playbook', 'other']);
+const KINDS = new Set(['generate', 'continue', 'verify', 'student', 'playbook', 'insights', 'other']);
 export function cleanKind(k) { return KINDS.has(k) ? k : 'generate'; }
 
 export async function recordUsage(userId, usage, kind) {

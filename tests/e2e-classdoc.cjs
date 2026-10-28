@@ -1,4 +1,5 @@
-// Class document ("Documento de la clase"): two browser contexts (teacher + student) editing the same document live
+// Class document ("Documento de la clase", per class: one-off classes without a group; a class of a group uses the group
+// notebook since 2026-10-28, see tests/e2e-notebook.cjs): two browser contexts (teacher + student) editing the same document live
 // through the simulated Realtime broadcast (tests/mock-realtime.cjs), lock, paste a class (student handout only, no
 // answers), admin read-only from the group card, document inside the live room, polling fallback without Realtime,
 // history + restore, export, mobile. Mock Supabase (tests/mock-supabase.cjs + mock-classdoc.cjs) in headless Chromium.
@@ -102,7 +103,10 @@ function seed() {
   const e = (u, name, grp) => { const x = { id: M.uid(), institution_id: centro.id, email: u.email, name, user_id: u.id, loaded_by: adm.id, source: 'manual', created_at: new Date().toISOString() }; db.student_enrollments.push(x); db.group_members.push({ group_id: grp.id, enrollment_id: x.id, created_at: new Date(Date.now() - 40 * 864e5).toISOString() }); return x; };
   const eAna = e(ana, 'Ana Pérez', g); const eBeto = e(beto, 'Beto Ruiz ' + XSS, g); e(carl, 'Carl Otro', g2);
   const mkS = (offMin, dur, title, grp = g) => { const s = { id: M.uid(), institution_id: centro.id, group_id: grp.id, series_id: null, teacher_id: grp.teacher_id, title, starts_at: new Date(Date.now() + offMin * MIN).toISOString(), ends_at: new Date(Date.now() + (offMin + dur) * MIN).toISOString(), timezone: 'America/Montevideo', status: 'scheduled', seq: 0, modified: false, updated_at: new Date().toISOString() }; db.class_sessions.push(s); return s; };
-  const now = mkS(-5, 60, 'Unit 3: making plans');
+  // 2026-10-28: a class of a GROUP opens the group notebook (tests/e2e-notebook.cjs); the per-class document is now the one of a
+  // ONE-OFF class (no group, students invited by email) — so "now" is a one-off class with Ana and Beto invited
+  const now = mkS(-5, 60, 'Unit 3: making plans'); now.group_id = null; now.teacher_id = prof.id;
+  db.session_invitees.push({ session_id: now.id, enrollment_id: eAna.id }, { session_id: now.id, enrollment_id: eBeto.id });
   const past = mkS(-26 * 60, 60, 'Unit 2: routines');
   db.plannings.push({ id: M.uid(), owner_id: prof.id, institution_id: centro.id, title: 'Making plans (B1)', created_at: new Date().toISOString(),
     data: { params: {}, content: 'Making plans — TEACHER GUIDE\nAnswer key\n1. am going (TEACHER-ONLY)\nMethodology applied\n- pair work',

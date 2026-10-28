@@ -5,6 +5,7 @@
 import { resendKey } from './_lib/mail.js';
 import { livekitEnv } from './_lib/livekit.js';
 import { anonLeadsEnabled } from './_lib/notify/lead.js';
+import { recordingConfigured } from './_lib/rec/env.js';
 
 export function publicConfig(env = process.env) {
   const site = String(env.TURNSTILE_SITE_KEY || '').trim();
@@ -13,9 +14,10 @@ export function publicConfig(env = process.env) {
     email: !!String(env.RESEND_API_KEY || '').trim(),
     live: livekitEnv().configured,
     errorReporting: true,
-    // TC-23: the room says "Recording" only when a real recorder is connected (RECORDING_ENABLED=true); otherwise
-    // "Recording ready to be turned on" (the consent logic is the same either way)
-    recording: /^(1|true|yes|on)$/i.test(String(env.RECORDING_ENABLED || '').trim()),
+    // TC-23: the room says "Recording" only when the recording pipeline is configured (RECORDING_ENABLED=true AND every key:
+    // api/_lib/rec/env.js) and, with LiveKit, only once the server really started recording someone (rec_active in their
+    // metadata); otherwise "Recording ready to be turned on" (the consent logic is the same either way)
+    recording: recordingConfigured(env),
     env: env.VERCEL_ENV || 'development',
     appEnv: String(env.APP_ENV || '').trim().toLowerCase(),
     // 2026-10-21: "Hablar con ventas" without signing in (only with Turnstile fully configured + the server key)
