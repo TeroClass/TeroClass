@@ -6381,6 +6381,761 @@ grant execute on function public.my_trial_status() to authenticated;
 revoke all on function public.trial_mark(text) from public, anon;
 grant execute on function public.trial_mark(text) to authenticated;
 
+-- ══ BEGIN GROUP NOTEBOOK ══
+-- ========== CUADERNO DEL GRUPO + PIZARRA ANUAL (2026-10-28) ==========
+-- UN cuaderno compartido (texto enriquecido, mismo motor que el documento de la clase: Yjs + TipTap) por GRUPO y AÑO LECTIVO,
+-- con UNA SECCIÓN POR CLASE ("Clase 12 · lun 3 mar") en orden de fecha, y la pizarra del grupo con UNA PÁGINA POR CLASE.
+-- AÑO LECTIVO: el año calendario, salvo que la unidad (o la de arriba) defina institutions.school_year_start_month (ej. 3 =
+--   marzo: de marzo a febrero). Se calcula con la zona horaria del grupo (tc_school_year).
+-- QUIÉN (tc_notebook_group_role, por GRUPO):
+--   · docente / suplente del grupo: escriben, bloquean (todo el cuaderno o solo las clases anteriores), restauran versiones,
+--     agregan secciones y notas docentes;
+--   · estudiantes del grupo (miembros): escriben, salvo bloqueo;
+--   · admins de la unidad (y de sus superiores) y súper admin: SOLO LECTURA. Nadie más. Nunca se muestran emails.
+-- SECCIONES (group_notebook_sections): una por clase del grupo, idempotente (unique notebook + clase). Se crean al abrir el
+--   cuaderno (las clases del año que ya empezaron), al entrar a la sala de una clase y con "Agregar sección de hoy"; también
+--   secciones sin clase (las manda el docente desde el generador). Cada sección es su propio documento Yjs (foto + cambios),
+--   así el bloqueo de las clases anteriores se controla acá, sección por sección. Nunca se borran.
+-- CÓMO SE GUARDA (sin acceso directo; todo por las funciones de abajo): igual que el documento de la clase, con los cambios
+--   numerados en orden por cuaderno (group_notebook_updates; la fila del cuaderno se bloquea al insertar), una foto compacta
+--   por sección (notebook_snapshot), versiones de TODO el cuaderno (cada 10 min mientras se escribe, fin de clase, manuales,
+--   antes de restaurar; máximo 20 / 64 MB) y la presencia (nombre y color los pone la base). TOPE: 8 MB por cuaderno.
+-- NOTAS DOCENTES (group_notebook_notes): la guía docente que el docente manda desde el generador queda en una nota que SOLO
+--   ven el docente y el suplente; nunca entra en el cuaderno compartido.
+-- PIZARRA DEL GRUPO: cada página es la pizarra de esa clase (class_boards, "PIZARRA DE LA CLASE": mismas reglas, tope y
+--   versiones por página); groupboard_pages lista las páginas del año. Las pizarras que ya existían son esas páginas.
+-- DOCUMENTOS ANTERIORES: los documentos por clase (class_docs) quedan intactos y legibles; la sección los enlaza
+--   ("legacy_doc") y el docente puede importarlos a la sección. Las clases sueltas (sin grupo) siguen con su documento.
+-- TIEMPO REAL: canal PRIVADO "notebook:<id del cuaderno>" (políticas sobre realtime.messages al final): solo avisos "hay
+--   cambios" y cursores, nunca contenido. Sin Realtime, la app consulta cada 2 segundos.
+alter table public.institutions add column if not exists school_year_start_month integer;
+alter table public.institutions drop constraint if exists institutions_school_year_start_ok;
+alter table public.institutions add constraint institutions_school_year_start_ok check (school_year_start_month is null or school_year_start_month between 1 and 12);
+
+create table if not exists public.group_notebooks (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.class_groups(id) on delete cascade,
+  school_year integer not null check (school_year between 2000 and 2200),
+  generation integer not null default 1,              -- sube al restaurar una versión
+  locked boolean not null default false,              -- todo el cuaderno bloqueado para estudiantes
+  lock_past boolean not null default false,           -- solo las secciones de clases anteriores a hoy
+  locked_at timestamptz,
+  channel_key text not null default public.tc_new_token(),
+  bytes bigint not null default 0,                    -- suma de las secciones (tope 8 MB)
+  updated_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (group_id, school_year)
+);
+create table if not exists public.group_notebook_sections (
+  id uuid primary key default gen_random_uuid(),
+  notebook_id uuid not null references public.group_notebooks(id) on delete cascade,
+  session_id uuid references public.class_sessions(id) on delete set null,   -- null = sección sin clase
+  day date,                                           -- "sección de hoy" sin clase: una por día
+  title text not null default '' check (length(title) <= 200),
+  sort_at timestamptz not null default now(),
+  state bytea,                                        -- foto Yjs de la sección hasta state_upto
+  state_upto bigint not null default 0,
+  bytes integer not null default 0,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  unique (notebook_id, session_id),
+  unique (notebook_id, day)
+);
+create index if not exists group_notebook_sections_nb_idx on public.group_notebook_sections (notebook_id, sort_at);
+create table if not exists public.group_notebook_updates (
+  id bigserial primary key,
+  notebook_id uuid not null references public.group_notebooks(id) on delete cascade,
+  section_id uuid not null references public.group_notebook_sections(id) on delete cascade,
+  generation integer not null,
+  data bytea not null check (octet_length(data) between 1 and 262144),
+  client_id text not null default '' check (length(client_id) <= 40),
+  user_id uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists group_notebook_updates_nb_idx on public.group_notebook_updates (notebook_id, id);
+create index if not exists group_notebook_updates_sec_idx on public.group_notebook_updates (section_id, id);
+create table if not exists public.group_notebook_versions (
+  id uuid primary key default gen_random_uuid(),
+  notebook_id uuid not null references public.group_notebooks(id) on delete cascade,
+  label text not null check (label in ('auto','class_end','manual','before_restore')),
+  bytes bigint not null default 0,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists group_notebook_versions_nb_idx on public.group_notebook_versions (notebook_id, created_at desc);
+create table if not exists public.group_notebook_version_parts (
+  version_id uuid not null references public.group_notebook_versions(id) on delete cascade,
+  section_id uuid not null references public.group_notebook_sections(id) on delete cascade,
+  parts bytea[] not null,                             -- foto + cambios pendientes de esa sección en ese momento
+  primary key (version_id, section_id)
+);
+create table if not exists public.group_notebook_presence (
+  notebook_id uuid not null references public.group_notebooks(id) on delete cascade,
+  client_id text not null check (length(client_id) between 1 and 40),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null default '',
+  color text not null default '#7c5cbf',
+  role text not null default 'student',
+  state jsonb not null default '{}'::jsonb,           -- sección + posición del cursor (máx. 2 KB)
+  seen_at timestamptz not null default now(),
+  primary key (notebook_id, client_id)
+);
+create table if not exists public.group_notebook_notes (
+  id uuid primary key default gen_random_uuid(),
+  notebook_id uuid not null references public.group_notebooks(id) on delete cascade,
+  section_id uuid references public.group_notebook_sections(id) on delete set null,
+  kind text not null default 'teacher_guide' check (kind in ('teacher_guide','note')),
+  title text not null default '' check (length(title) <= 200),
+  body text not null check (length(body) between 1 and 200000),
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists group_notebook_notes_nb_idx on public.group_notebook_notes (notebook_id, created_at);
+alter table public.group_notebooks              enable row level security;
+alter table public.group_notebook_sections      enable row level security;
+alter table public.group_notebook_updates       enable row level security;
+alter table public.group_notebook_versions      enable row level security;
+alter table public.group_notebook_version_parts enable row level security;
+alter table public.group_notebook_presence      enable row level security;
+alter table public.group_notebook_notes         enable row level security;
+revoke all on public.group_notebooks, public.group_notebook_sections, public.group_notebook_updates, public.group_notebook_versions,
+              public.group_notebook_version_parts, public.group_notebook_presence, public.group_notebook_notes from anon, authenticated;
+revoke all on sequence public.group_notebook_updates_id_seq from anon, authenticated;
+drop trigger if exists group_notebooks_hide_owner on public.group_notebooks;
+create trigger group_notebooks_hide_owner before insert or update of updated_by on public.group_notebooks
+  for each row execute function public.hide_superadmin_refs('updated_by');
+drop trigger if exists group_notebook_sections_hide_owner on public.group_notebook_sections;
+create trigger group_notebook_sections_hide_owner before insert on public.group_notebook_sections
+  for each row execute function public.hide_superadmin_refs('created_by');
+drop trigger if exists group_notebook_versions_hide_owner on public.group_notebook_versions;
+create trigger group_notebook_versions_hide_owner before insert on public.group_notebook_versions
+  for each row execute function public.hide_superadmin_refs('created_by');
+drop trigger if exists group_notebook_notes_hide_owner on public.group_notebook_notes;
+create trigger group_notebook_notes_hide_owner before insert on public.group_notebook_notes
+  for each row execute function public.hide_superadmin_refs('created_by');
+
+-- ── ayudas internas ──
+-- Mes en que empieza el año lectivo de una unidad (el suyo o el de la unidad más cercana de arriba; 1 = enero = año calendario)
+create or replace function public.tc_school_year_start(p_inst uuid) returns integer
+language sql stable security definer set search_path = public, pg_temp as
+$$ select coalesce((select i.school_year_start_month from public.institution_chain(p_inst) c join public.institutions i on i.id = c.id
+                     where i.school_year_start_month is not null order by c.depth limit 1), 1) $$;
+-- Año lectivo de un momento para un grupo (zona horaria del grupo): el año en que EMPIEZA ese año lectivo
+create or replace function public.tc_school_year(p_group uuid, p_at timestamptz) returns integer
+language sql stable security definer set search_path = public, pg_temp as
+$$ select case when extract(month from x.l)::int >= x.m then extract(year from x.l)::int else extract(year from x.l)::int - 1 end
+     from (select (coalesce(p_at, now()) at time zone coalesce(g.timezone, 'America/Montevideo')) as l, public.tc_school_year_start(g.institution_id) as m
+             from public.class_groups g where g.id = p_group) x $$;
+-- Desde / hasta de un año lectivo de un grupo
+create or replace function public.tc_school_year_bounds(p_group uuid, p_year integer) returns table (f timestamptz, t timestamptz)
+language sql stable security definer set search_path = public, pg_temp as
+$$ select (make_date(p_year, x.m, 1)::timestamp at time zone x.tz), ((make_date(p_year, x.m, 1) + interval '1 year')::timestamp at time zone x.tz)
+     from (select coalesce(g.timezone, 'America/Montevideo') as tz, public.tc_school_year_start(g.institution_id) as m
+             from public.class_groups g where g.id = p_group) x $$;
+-- Cómo se escribe el año lectivo: "2026" (de enero a marzo); "2026–27" si empieza después (ej. septiembre)
+create or replace function public.tc_school_year_label(p_year integer, p_month integer) returns text
+language sql immutable set search_path = public, pg_temp as
+$$ select case when coalesce(p_month, 1) <= 3 then p_year::text else p_year::text || '–' || lpad(((p_year + 1) % 100)::text, 2, '0') end $$;
+-- Mi papel en el cuaderno / la pizarra de un grupo: 'teacher' (docente / suplente), 'student' (miembro), 'admin' (solo lectura) o null
+create or replace function public.tc_notebook_group_role(p_group uuid) returns text
+language sql stable security definer set search_path = public, pg_temp as
+$$ select case when auth.uid() is null or g.id is null then null
+               when auth.uid() in (g.teacher_id, g.substitute_id) then 'teacher'
+               when exists (select 1 from public.group_members m join public.student_enrollments e on e.id = m.enrollment_id
+                             where m.group_id = g.id and e.user_id = auth.uid()) then 'student'
+               when public.is_admin_of(g.institution_id) then 'admin' end
+     from (select p_group as id) x left join public.class_groups g on g.id = x.id $$;
+create or replace function public.tc_notebook_role(p_notebook uuid) returns text
+language sql stable security definer set search_path = public, pg_temp as
+$$ select public.tc_notebook_group_role((select n.group_id from public.group_notebooks n where n.id = p_notebook)) $$;
+-- Nombre visible en el cuaderno (nunca el email): estudiante = el nombre que cargó la institución
+create or replace function public.tc_notebook_name(p_group uuid, p_user uuid, p_role text) returns text
+language sql stable security definer set search_path = public, pg_temp as
+$$ select coalesce(nullif(case when p_role = 'student' then
+            (select btrim(e.name) from public.student_enrollments e join public.group_members m on m.enrollment_id = e.id
+              where e.user_id = p_user and m.group_id = p_group order by e.created_at limit 1) end, ''),
+          nullif(public.tc_person_name(p_user), ''), 'Participante') $$;
+-- "Hoy" en la zona horaria del grupo del cuaderno
+create or replace function public.tc_notebook_today(p_notebook uuid) returns date
+language sql stable security definer set search_path = public, pg_temp as
+$$ select (now() at time zone coalesce(g.timezone, 'America/Montevideo'))::date
+     from public.group_notebooks n join public.class_groups g on g.id = n.group_id where n.id = p_notebook $$;
+-- ¿La sección es de una clase anterior a hoy? (fecha de la clase, o el día / la creación de una sección sin clase)
+create or replace function public.tc_notebook_section_past(p_section uuid) returns boolean
+language sql stable security definer set search_path = public, pg_temp as
+$$ select coalesce((s.starts_at at time zone coalesce(g.timezone, 'America/Montevideo'))::date, sec.day,
+                   (sec.sort_at at time zone coalesce(g.timezone, 'America/Montevideo'))::date)
+          < (now() at time zone coalesce(g.timezone, 'America/Montevideo'))::date
+     from public.group_notebook_sections sec join public.group_notebooks n on n.id = sec.notebook_id
+     join public.class_groups g on g.id = n.group_id left join public.class_sessions s on s.id = sec.session_id
+    where sec.id = p_section $$;
+-- Crea el cuaderno de un grupo y año (si falta) y devuelve su id
+create or replace function public.tc_notebook_ensure(p_group uuid, p_year integer) returns uuid
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v uuid;
+begin
+  insert into public.group_notebooks (group_id, school_year) values (p_group, p_year) on conflict (group_id, school_year) do nothing;
+  select id into v from public.group_notebooks where group_id = p_group and school_year = p_year;
+  return v;
+end $$;
+-- La sección de una clase (la crea si falta; idempotente: nunca hay dos secciones para la misma clase)
+create or replace function public.tc_notebook_ensure_session(p_notebook uuid, p_session uuid) returns uuid
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v uuid; s public.class_sessions%rowtype;
+begin
+  select * into s from public.class_sessions where id = p_session;
+  if s.id is null then return null; end if;
+  insert into public.group_notebook_sections (notebook_id, session_id, title, sort_at, created_by)
+  values (p_notebook, p_session, left(coalesce(s.title, ''), 200), s.starts_at, auth.uid())
+  on conflict (notebook_id, session_id) do nothing;
+  select id into v from public.group_notebook_sections where notebook_id = p_notebook and session_id = p_session;
+  return v;
+end $$;
+-- Bloquea la fila del cuaderno hasta el fin de la transacción: los cambios se numeran en orden
+create or replace function public.tc_notebook_lock_row(p_notebook uuid) returns public.group_notebooks
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare n public.group_notebooks%rowtype;
+begin
+  select * into n from public.group_notebooks where id = p_notebook for update;
+  return n;
+end $$;
+-- Secciones del cuaderno en orden de fecha, con su número de clase en el año ("Clase 12") y, si se pide, su foto
+create or replace function public.tc_notebook_sections_json(p_notebook uuid, p_with_state boolean) returns json
+language sql stable security definer set search_path = public, pg_temp as
+$$ with nb as (select n.*, g.timezone as tz from public.group_notebooks n join public.class_groups g on g.id = n.group_id where n.id = p_notebook),
+        b as (select y.f, y.t from nb, public.tc_school_year_bounds(nb.group_id, nb.school_year) y),
+        num as (select s.id, row_number() over (order by s.starts_at, s.id) as n
+                  from public.class_sessions s, nb, b
+                 where s.group_id = nb.group_id and s.status = 'scheduled' and s.starts_at >= b.f and s.starts_at < b.t)
+   select coalesce(json_agg(json_build_object(
+            'id', sec.id, 'session_id', sec.session_id, 'kind', case when sec.session_id is not null then 'session' else 'free' end,
+            'number', num.n, 'title', coalesce(nullif(s.title, ''), nullif(sec.title, ''), ''),
+            'starts_at', coalesce(s.starts_at, sec.sort_at), 'ends_at', s.ends_at, 'timezone', coalesce(s.timezone, nb.tz), 'status', s.status,
+            'day', coalesce((s.starts_at at time zone nb.tz)::date, sec.day, (sec.sort_at at time zone nb.tz)::date),
+            'past', coalesce((s.starts_at at time zone nb.tz)::date, sec.day, (sec.sort_at at time zone nb.tz)::date) < (now() at time zone nb.tz)::date,
+            'legacy_doc', sec.session_id is not null and exists (select 1 from public.class_docs d where d.session_id = sec.session_id and (d.state is not null or d.bytes > 0)),
+            'bytes', sec.bytes,
+            'state', case when p_with_state and sec.state is not null then public.tc_b64e(sec.state) end,
+            'upto', sec.state_upto)
+          order by coalesce(s.starts_at, sec.sort_at), sec.created_at, sec.id), '[]'::json)
+     from nb join public.group_notebook_sections sec on sec.notebook_id = nb.id
+     left join public.class_sessions s on s.id = sec.session_id left join num on num.id = sec.session_id $$;
+-- Foto + cambios pendientes de cada sección con contenido (lo que guarda una versión)
+create or replace function public.tc_notebook_parts(p_notebook uuid) returns table (section_id uuid, parts bytea[])
+language sql stable security definer set search_path = public, pg_temp as
+$$ select x.id, x.parts from (
+     select sec.id, (case when sec.state is not null then array[sec.state] else '{}'::bytea[] end)
+                    || coalesce((select array_agg(u.data order by u.id) from public.group_notebook_updates u
+                                  where u.section_id = sec.id and u.generation = n.generation and u.id > sec.state_upto), '{}'::bytea[]) as parts
+       from public.group_notebook_sections sec join public.group_notebooks n on n.id = sec.notebook_id
+      where sec.notebook_id = p_notebook) x
+    where coalesce(array_length(x.parts, 1), 0) > 0 $$;
+-- Guarda una versión de TODO el cuaderno (foto + cambios pendientes de cada sección). Máximo 20 y 64 MB por cuaderno.
+create or replace function public.tc_notebook_add_version(p_notebook uuid, p_label text) returns uuid
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_id uuid; v_bytes bigint; v_n integer;
+begin
+  if not exists (select 1 from public.group_notebooks where id = p_notebook) then return null; end if;
+  select count(*), coalesce(sum((select coalesce(sum(octet_length(x)), 0) from unnest(p.parts) x)), 0) into v_n, v_bytes
+    from public.tc_notebook_parts(p_notebook) p;
+  if v_n = 0 then return null; end if;
+  insert into public.group_notebook_versions (notebook_id, label, bytes, created_by)
+  values (p_notebook, p_label, v_bytes, case when p_label in ('manual','before_restore') then auth.uid() end) returning id into v_id;
+  insert into public.group_notebook_version_parts (version_id, section_id, parts) select v_id, p.section_id, p.parts from public.tc_notebook_parts(p_notebook) p;
+  delete from public.group_notebook_versions where id in (
+    select id from (select id, row_number() over (order by created_at desc, id) rn, sum(bytes) over (order by created_at desc, id) acc
+                      from public.group_notebook_versions where notebook_id = p_notebook) x
+     where x.rn > 20 or (x.acc > 67108864 and x.rn > 1));
+  return v_id;
+end $$;
+-- Política de Realtime para "notebook:<uuid>": escuchar = cualquiera con acceso; mandar = docente, o estudiante si no está bloqueado
+create or replace function public.tc_notebook_rt_ok(p_topic text, p_send boolean) returns boolean
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_role text; v_id uuid;
+begin
+  if p_topic is null or p_topic !~ '^notebook:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then return false; end if;
+  v_id := substr(p_topic, 10)::uuid;
+  v_role := public.tc_notebook_role(v_id);
+  if not coalesce(p_send, false) then return v_role is not null; end if;
+  return v_role = 'teacher' or (v_role = 'student' and not coalesce((select locked from public.group_notebooks where id = v_id), false));
+end $$;
+revoke all on function public.tc_school_year_start(uuid) from public, anon, authenticated;
+revoke all on function public.tc_school_year(uuid, timestamptz) from public, anon, authenticated;
+revoke all on function public.tc_school_year_bounds(uuid, integer) from public, anon, authenticated;
+revoke all on function public.tc_school_year_label(integer, integer) from public, anon, authenticated;
+revoke all on function public.tc_notebook_group_role(uuid) from public, anon, authenticated;
+revoke all on function public.tc_notebook_role(uuid) from public, anon, authenticated;
+revoke all on function public.tc_notebook_name(uuid, uuid, text) from public, anon, authenticated;
+revoke all on function public.tc_notebook_today(uuid) from public, anon, authenticated;
+revoke all on function public.tc_notebook_section_past(uuid) from public, anon, authenticated;
+revoke all on function public.tc_notebook_ensure(uuid, integer) from public, anon, authenticated;
+revoke all on function public.tc_notebook_ensure_session(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.tc_notebook_lock_row(uuid) from public, anon, authenticated;
+revoke all on function public.tc_notebook_sections_json(uuid, boolean) from public, anon, authenticated;
+revoke all on function public.tc_notebook_parts(uuid) from public, anon, authenticated;
+revoke all on function public.tc_notebook_add_version(uuid, text) from public, anon, authenticated;
+revoke all on function public.tc_notebook_rt_ok(text, boolean) from public, anon;
+grant execute on function public.tc_notebook_rt_ok(text, boolean) to authenticated;
+
+-- ── funciones de la app ──
+-- Encontrar (y, para docente / estudiantes, crear) el cuaderno de un grupo para un año lectivo, con las secciones de las clases
+-- del año que ya empezaron y la de p_session. Una clase suelta (sin grupo) no tiene cuaderno: adhoc = true (sigue su documento).
+-- Admins: solo encuentran (nunca crean). notebook_find es la versión de solo lectura (Ver como).
+create or replace function public.tc_notebook_resolve(p_group uuid, p_session uuid, p_year integer, p_create boolean) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_group uuid := p_group; s public.class_sessions%rowtype; v_role text; v_year integer; v_nb uuid; v_sec uuid; v_f timestamptz; v_t timestamptz;
+begin
+  if p_session is not null then
+    select * into s from public.class_sessions where id = p_session;
+    if s.id is null then raise exception 'No autorizado'; end if;
+    if s.group_id is null then
+      if public.tc_classdoc_role(p_session) is null then raise exception 'No autorizado'; end if;
+      return json_build_object('notebook_id', null, 'adhoc', true, 'session_id', p_session);
+    end if;
+    if v_group is not null and v_group is distinct from s.group_id then raise exception 'No autorizado'; end if;
+    v_group := s.group_id;
+  end if;
+  v_role := public.tc_notebook_group_role(v_group);
+  if v_role is null then raise exception 'No autorizado'; end if;
+  v_year := coalesce(p_year, public.tc_school_year(v_group, coalesce(s.starts_at, now())));
+  if v_year < 2000 or v_year > 2200 then raise exception 'Año inválido'; end if;
+  select f, t into v_f, v_t from public.tc_school_year_bounds(v_group, v_year);
+  if p_create and v_role in ('teacher','student') then
+    v_nb := public.tc_notebook_ensure(v_group, v_year);
+    perform public.tc_notebook_ensure_session(v_nb, x.id)
+       from (select c.id from public.class_sessions c
+              where c.group_id = v_group and c.status = 'scheduled' and c.starts_at >= v_f and c.starts_at < v_t and c.starts_at <= now()
+              order by c.starts_at, c.id limit 400) x;
+    if s.id is not null and s.status = 'scheduled' and s.starts_at >= v_f and s.starts_at < v_t then
+      v_sec := public.tc_notebook_ensure_session(v_nb, s.id);
+    end if;
+  else
+    select id into v_nb from public.group_notebooks where group_id = v_group and school_year = v_year;
+    if s.id is not null and v_nb is not null then
+      select id into v_sec from public.group_notebook_sections where notebook_id = v_nb and session_id = s.id;
+    end if;
+  end if;
+  return json_build_object('notebook_id', v_nb, 'group_id', v_group, 'year', v_year, 'section_id', v_sec, 'role', v_role,
+                           'adhoc', false, 'session_id', p_session);
+end $$;
+revoke all on function public.tc_notebook_resolve(uuid, uuid, integer, boolean) from public, anon, authenticated;
+create or replace function public.notebook_resolve(p_group uuid default null, p_session uuid default null, p_year integer default null) returns json
+language sql volatile security definer set search_path = public, pg_temp as
+$$ select public.tc_notebook_resolve(p_group, p_session, p_year, true) $$;
+create or replace function public.notebook_find(p_group uuid default null, p_session uuid default null, p_year integer default null) returns json
+language sql volatile security definer set search_path = public, pg_temp as
+$$ select public.tc_notebook_resolve(p_group, p_session, p_year, false) $$;
+
+-- Abrir: el cuaderno, mi papel, si puedo escribir, las secciones con su foto + los cambios pendientes y el canal
+create or replace function public.notebook_open(p_notebook uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_role text := public.tc_notebook_role(p_notebook); n public.group_notebooks%rowtype; g public.class_groups%rowtype; v_m integer;
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  select * into n from public.group_notebooks where id = p_notebook;
+  select * into g from public.class_groups where id = n.group_id;
+  v_m := public.tc_school_year_start(g.institution_id);
+  return json_build_object(
+    'notebook', json_build_object('id', n.id, 'group_id', g.id, 'group_name', g.name, 'timezone', g.timezone, 'year', n.school_year,
+       'year_label', public.tc_school_year_label(n.school_year, v_m), 'start_month', v_m,
+       'teacher_name', public.tc_person_name(g.teacher_id),
+       'years', (select json_agg(x.school_year order by x.school_year desc) from public.group_notebooks x where x.group_id = g.id)),
+    'role', v_role,
+    'can_edit', v_role = 'teacher' or (v_role = 'student' and not n.locked),
+    'can_lock', v_role = 'teacher',
+    'locked', n.locked, 'lock_past', n.lock_past,
+    'generation', n.generation,
+    'today', public.tc_notebook_today(p_notebook),
+    'sections', public.tc_notebook_sections_json(p_notebook, true),
+    'updates', coalesce((select json_agg(json_build_object('id', u.id, 's', u.section_id, 'd', public.tc_b64e(u.data), 'c', u.client_id) order by u.id)
+                           from public.group_notebook_updates u join public.group_notebook_sections sec on sec.id = u.section_id
+                          where u.notebook_id = p_notebook and u.generation = n.generation and u.id > sec.state_upto), '[]'::json),
+    'channel', json_build_object('topic', 'notebook:' || p_notebook::text, 'key', n.channel_key),
+    'me', case when v_role in ('teacher','student') then json_build_object('name', public.tc_notebook_name(g.id, auth.uid(), v_role),
+            'color', public.tc_classdoc_color(p_notebook, auth.uid())) end,
+    'versions', (select count(*) from public.group_notebook_versions v where v.notebook_id = p_notebook),
+    'notes', case when v_role = 'teacher' then (select count(*) from public.group_notebook_notes x where x.notebook_id = p_notebook) end,
+    'bytes', n.bytes, 'max_bytes', 8388608,
+    'updated_at', n.updated_at);
+end $$;
+
+-- Mandar un cambio de UNA sección (actualización Yjs en base64). Docente siempre; estudiantes si no está bloqueado
+-- (ni la sección es de una clase anterior con "bloquear clases anteriores"); admins nunca.
+create or replace function public.notebook_push(p_notebook uuid, p_section uuid, p_generation integer, p_update text, p_client text default '')
+returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_role text := public.tc_notebook_role(p_notebook); n public.group_notebooks%rowtype; v_data bytea := public.tc_b64(p_update);
+        v_len integer; v_id bigint; v_last timestamptz;
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  if v_role not in ('teacher','student') then raise exception 'Solo lectura: no podés editar este cuaderno'; end if;
+  if v_data is null or octet_length(v_data) = 0 then raise exception 'Cambio inválido'; end if;
+  v_len := octet_length(v_data);
+  if v_len > 262144 then raise exception 'Cambio demasiado grande'; end if;
+  n := public.tc_notebook_lock_row(p_notebook);
+  if not exists (select 1 from public.group_notebook_sections where id = p_section and notebook_id = p_notebook) then raise exception 'Sección inválida'; end if;
+  if v_role = 'student' and n.locked then raise exception 'El docente bloqueó el cuaderno'; end if;
+  if v_role = 'student' and n.lock_past and public.tc_notebook_section_past(p_section) then raise exception 'El docente bloqueó las clases anteriores del cuaderno'; end if;
+  if p_generation is distinct from n.generation then raise exception 'Cuaderno desactualizado: volvé a abrirlo'; end if;
+  -- tope: 8 MB por cuaderno (un cambio chico se acepta hasta 9 MB, para poder borrar y compactar)
+  if n.bytes + v_len > 8388608 and (v_len > 4096 or n.bytes + v_len > 9437184) then
+    raise exception 'El cuaderno llegó a su tamaño máximo (8 MB): borrá contenido que ya no uses para seguir escribiendo';
+  end if;
+  if not public.tc_rate_take('notebook:' || auth.uid()::text, v_len, 4194304, 60) then raise exception 'Demasiados cambios seguidos: esperá un momento'; end if;
+  select max(created_at) into v_last from public.group_notebook_versions where notebook_id = p_notebook;
+  if v_last is null or v_last < now() - interval '10 minutes' then perform public.tc_notebook_add_version(p_notebook, 'auto'); end if;
+  insert into public.group_notebook_updates (notebook_id, section_id, generation, data, client_id, user_id)
+  values (p_notebook, p_section, n.generation, v_data, left(coalesce(p_client, ''), 40), auth.uid()) returning id into v_id;
+  update public.group_notebook_sections set bytes = bytes + v_len where id = p_section;
+  update public.group_notebooks set bytes = bytes + v_len, updated_at = now(), updated_by = auth.uid() where id = p_notebook;
+  return json_build_object('id', v_id, 'generation', n.generation);
+end $$;
+
+-- Leer los cambios desde p_after (+ quién está conectado). Si una sección se compactó después de p_after viene su foto;
+-- si cambió la generación (versión restaurada): reset con todo. p_known = cuántas secciones conozco (si cambió, vienen todas).
+create or replace function public.notebook_pull(p_notebook uuid, p_after bigint default 0, p_generation integer default null,
+                                                p_client text default '', p_presence jsonb default null, p_known integer default null)
+returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_role text := public.tc_notebook_role(p_notebook); n public.group_notebooks%rowtype; v_reset boolean; v_client text := left(coalesce(p_client, ''), 40);
+        v_count integer; v_after bigint := coalesce(p_after, 0); g public.class_groups%rowtype;
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  select * into n from public.group_notebooks where id = p_notebook;
+  if p_presence is not null and v_role in ('teacher','student') and v_client <> '' then
+    select * into g from public.class_groups where id = n.group_id;
+    insert into public.group_notebook_presence (notebook_id, client_id, user_id, name, color, role, state, seen_at)
+    values (p_notebook, v_client, auth.uid(), public.tc_notebook_name(g.id, auth.uid(), v_role), public.tc_classdoc_color(p_notebook, auth.uid()),
+            v_role, case when jsonb_typeof(p_presence) = 'object' and octet_length(p_presence::text) <= 2048 then p_presence else '{}'::jsonb end, now())
+    on conflict (notebook_id, client_id) do update
+      set state = excluded.state, seen_at = now(), name = excluded.name, role = excluded.role
+      where group_notebook_presence.user_id = auth.uid();
+    delete from public.group_notebook_presence where notebook_id = p_notebook and seen_at < now() - interval '2 minutes';
+  end if;
+  v_reset := p_generation is distinct from n.generation;
+  select count(*) into v_count from public.group_notebook_sections where notebook_id = p_notebook;
+  return json_build_object(
+    'generation', n.generation, 'locked', n.locked, 'lock_past', n.lock_past,
+    'can_edit', v_role = 'teacher' or (v_role = 'student' and not n.locked),
+    'today', public.tc_notebook_today(p_notebook), 'bytes', n.bytes,
+    'reset', v_reset, 'count', v_count,
+    'sections', case when v_reset or p_known is distinct from v_count then public.tc_notebook_sections_json(p_notebook, false) end,
+    'states', coalesce((select json_agg(json_build_object('s', sec.id, 'd', public.tc_b64e(sec.state), 'upto', sec.state_upto) order by sec.id)
+                          from public.group_notebook_sections sec
+                         where sec.notebook_id = p_notebook and sec.state is not null and (v_reset or sec.state_upto > v_after)), '[]'::json),
+    'updates', coalesce((select json_agg(json_build_object('id', u.id, 's', u.section_id, 'd', public.tc_b64e(u.data), 'c', u.client_id) order by u.id)
+                           from (select u.* from public.group_notebook_updates u join public.group_notebook_sections sec on sec.id = u.section_id
+                                  where u.notebook_id = p_notebook and u.generation = n.generation
+                                    and u.id > (case when v_reset then sec.state_upto else greatest(v_after, sec.state_upto) end)
+                                  order by u.id limit 2000) u), '[]'::json),
+    'presence', coalesce((select json_agg(json_build_object('client', pr.client_id, 'name', pr.name, 'color', pr.color, 'role', pr.role, 'state', pr.state)
+                                          order by pr.name, pr.client_id)
+                            from public.group_notebook_presence pr
+                           where pr.notebook_id = p_notebook and pr.client_id <> v_client and pr.seen_at > now() - interval '45 seconds'), '[]'::json));
+end $$;
+
+-- Foto compacta de UNA sección (la manda un editor cada tanto): reemplaza su foto y borra sus cambios ya incluidos
+create or replace function public.notebook_snapshot(p_notebook uuid, p_section uuid, p_generation integer, p_state text, p_upto bigint)
+returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_role text := public.tc_notebook_role(p_notebook); n public.group_notebooks%rowtype; sec public.group_notebook_sections%rowtype;
+        v_data bytea := public.tc_b64(p_state); v_max bigint; v_new integer; v_total bigint;
+begin
+  if v_role is null then raise exception 'No autorizado'; end if;
+  if v_role not in ('teacher','student') then raise exception 'Solo lectura: no podés editar este cuaderno'; end if;
+  if v_data is null then raise exception 'Cambio inválido'; end if;
+  if octet_length(v_data) > 4194304 then raise exception 'El cuaderno llegó a su tamaño máximo (8 MB): borrá contenido que ya no uses para seguir escribiendo'; end if;
+  n := public.tc_notebook_lock_row(p_notebook);
+  select * into sec from public.group_notebook_sections where id = p_section and notebook_id = p_notebook;
+  if sec.id is null then raise exception 'Sección inválida'; end if;
+  if v_role = 'student' and n.locked then raise exception 'El docente bloqueó el cuaderno'; end if;
+  if v_role = 'student' and n.lock_past and public.tc_notebook_section_past(p_section) then raise exception 'El docente bloqueó las clases anteriores del cuaderno'; end if;
+  if p_generation is distinct from n.generation then raise exception 'Cuaderno desactualizado: volvé a abrirlo'; end if;
+  if coalesce(p_upto, -1) < sec.state_upto then return json_build_object('ok', false, 'upto', sec.state_upto); end if;
+  select greatest(coalesce((select max(id) from public.group_notebook_updates where notebook_id = p_notebook), 0),
+                  coalesce((select max(state_upto) from public.group_notebook_sections where notebook_id = p_notebook), 0)) into v_max;
+  if p_upto > v_max then raise exception 'Cambio inválido'; end if;
+  v_new := octet_length(v_data) + coalesce((select sum(octet_length(u.data)) from public.group_notebook_updates u where u.section_id = p_section and u.id > p_upto), 0)::integer;
+  v_total := n.bytes - sec.bytes + v_new;
+  -- una foto que achica el cuaderno siempre se acepta; una que lo agranda, solo bajo el tope
+  if v_total > 8388608 and v_total > n.bytes then
+    raise exception 'El cuaderno llegó a su tamaño máximo (8 MB): borrá contenido que ya no uses para seguir escribiendo';
+  end if;
+  update public.group_notebook_sections set state = v_data, state_upto = p_upto, bytes = v_new where id = p_section;
+  delete from public.group_notebook_updates where section_id = p_section and id <= p_upto;
+  update public.group_notebooks set bytes = (select coalesce(sum(bytes), 0) from public.group_notebook_sections where notebook_id = p_notebook),
+         updated_at = now() where id = p_notebook;
+  return json_build_object('ok', true, 'upto', p_upto);
+end $$;
+
+-- Bloquear (los estudiantes solo leen) todo el cuaderno o solo las clases anteriores a hoy: solo docente / suplente
+create or replace function public.notebook_set_lock(p_notebook uuid, p_locked boolean, p_lock_past boolean default null) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare n public.group_notebooks%rowtype;
+begin
+  if public.tc_notebook_role(p_notebook) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  n := public.tc_notebook_lock_row(p_notebook);
+  update public.group_notebooks set locked = coalesce(p_locked, n.locked), lock_past = coalesce(p_lock_past, n.lock_past),
+         locked_at = case when coalesce(p_locked, n.locked) or coalesce(p_lock_past, n.lock_past) then now() end,
+         updated_at = now(), updated_by = auth.uid()
+   where id = p_notebook returning * into n;
+  return json_build_object('locked', n.locked, 'lock_past', n.lock_past);
+end $$;
+
+-- Agregar una sección (docente / suplente): la de una clase del grupo, la de HOY ("Agregar sección de hoy": la clase de hoy
+-- o, si hoy no hay clase, una sección del día) o una sección sin clase con título. Idempotente para clases y para "hoy".
+create or replace function public.notebook_add_section(p_notebook uuid, p_title text default null, p_session uuid default null, p_today boolean default false)
+returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare n public.group_notebooks%rowtype; g public.class_groups%rowtype; v_today date; v_sid uuid; v_sec uuid; v_f timestamptz; v_t timestamptz;
+        v_title text := btrim(coalesce(p_title, '')); v_before integer;
+begin
+  if public.tc_notebook_role(p_notebook) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  n := public.tc_notebook_lock_row(p_notebook);
+  select * into g from public.class_groups where id = n.group_id;
+  select count(*) into v_before from public.group_notebook_sections where notebook_id = p_notebook;
+  if v_before >= 500 then raise exception 'El cuaderno ya tiene demasiadas secciones'; end if;
+  select f, t into v_f, v_t from public.tc_school_year_bounds(g.id, n.school_year);
+  if p_session is not null then
+    if not exists (select 1 from public.class_sessions s where s.id = p_session and s.group_id = g.id and s.status = 'scheduled'
+                    and s.starts_at >= v_f and s.starts_at < v_t) then raise exception 'Esa clase no es de este cuaderno'; end if;
+    v_sec := public.tc_notebook_ensure_session(p_notebook, p_session);
+  elsif coalesce(p_today, false) then
+    v_today := (now() at time zone g.timezone)::date;
+    select s.id into v_sid from public.class_sessions s
+     where s.group_id = g.id and s.status = 'scheduled' and (s.starts_at at time zone g.timezone)::date = v_today
+     order by s.starts_at, s.id limit 1;
+    if v_sid is not null then v_sec := public.tc_notebook_ensure_session(p_notebook, v_sid);
+    else
+      insert into public.group_notebook_sections (notebook_id, day, title, sort_at, created_by)
+      values (p_notebook, v_today, left(v_title, 200), now(), auth.uid()) on conflict (notebook_id, day) do nothing;
+      select id into v_sec from public.group_notebook_sections where notebook_id = p_notebook and day = v_today;
+    end if;
+  else
+    if length(v_title) = 0 then raise exception 'Escribí un título para la sección'; end if;
+    insert into public.group_notebook_sections (notebook_id, title, sort_at, created_by)
+    values (p_notebook, left(v_title, 200), now(), auth.uid()) returning id into v_sec;
+  end if;
+  update public.group_notebooks set updated_at = now() where id = p_notebook;
+  return json_build_object('section_id', v_sec,
+                           'created', (select count(*) from public.group_notebook_sections where notebook_id = p_notebook) > v_before);
+end $$;
+
+-- Historial: versiones (cualquiera con acceso las ve) · una versión completa · guardar una ahora / fin de clase (docente)
+create or replace function public.notebook_versions(p_notebook uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if public.tc_notebook_role(p_notebook) is null then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(json_build_object('id', v.id, 'label', v.label, 'created_at', v.created_at, 'bytes', v.bytes,
+                     'sections', (select count(*) from public.group_notebook_version_parts p where p.version_id = v.id),
+                     'by', case when v.created_by is not null then public.tc_person_name(v.created_by) end) order by v.created_at desc, v.id)
+                     from public.group_notebook_versions v where v.notebook_id = p_notebook), '[]'::json);
+end $$;
+create or replace function public.notebook_version(p_version uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v public.group_notebook_versions%rowtype;
+begin
+  select * into v from public.group_notebook_versions where id = p_version;
+  if v.id is null or public.tc_notebook_role(v.notebook_id) is null then raise exception 'No autorizado'; end if;
+  return json_build_object('id', v.id, 'notebook_id', v.notebook_id, 'label', v.label, 'created_at', v.created_at,
+    'sections', coalesce((select json_agg(json_build_object('s', p.section_id,
+                   'parts', (select json_agg(public.tc_b64e(x) order by o) from unnest(p.parts) with ordinality t(x, o))))
+                   from public.group_notebook_version_parts p where p.version_id = v.id), '[]'::json));
+end $$;
+create or replace function public.notebook_add_version(p_notebook uuid, p_label text default 'manual') returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_id uuid;
+begin
+  if public.tc_notebook_role(p_notebook) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  if coalesce(p_label, '') not in ('manual','class_end') then raise exception 'Versión inválida'; end if;
+  perform public.tc_notebook_lock_row(p_notebook);
+  v_id := public.tc_notebook_add_version(p_notebook, p_label);
+  return json_build_object('id', v_id, 'created', v_id is not null);
+end $$;
+-- Restaurar una versión (solo docente / suplente): guarda la actual como "antes de restaurar", vuelve a esa versión (las
+-- secciones que no estaban quedan vacías) y sube generation (los navegadores abiertos recargan).
+create or replace function public.notebook_restore(p_version uuid) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v public.group_notebook_versions%rowtype; n public.group_notebooks%rowtype; p record; x bytea;
+begin
+  select * into v from public.group_notebook_versions where id = p_version;
+  if v.id is null or public.tc_notebook_role(v.notebook_id) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  n := public.tc_notebook_lock_row(v.notebook_id);
+  perform public.tc_notebook_add_version(v.notebook_id, 'before_restore');
+  delete from public.group_notebook_updates where notebook_id = v.notebook_id;
+  update public.group_notebook_sections set state = null, state_upto = 0, bytes = 0 where notebook_id = v.notebook_id;
+  update public.group_notebooks set generation = generation + 1, updated_at = now(), updated_by = auth.uid() where id = v.notebook_id returning * into n;
+  for p in select * from public.group_notebook_version_parts where version_id = v.id loop
+    foreach x in array p.parts loop
+      insert into public.group_notebook_updates (notebook_id, section_id, generation, data, client_id, user_id)
+      values (v.notebook_id, p.section_id, n.generation, x, 'restore', auth.uid());
+    end loop;
+    update public.group_notebook_sections set bytes = (select coalesce(sum(octet_length(y)), 0) from unnest(p.parts) y) where id = p.section_id;
+  end loop;
+  update public.group_notebooks set bytes = (select coalesce(sum(bytes), 0) from public.group_notebook_sections where notebook_id = v.notebook_id)
+   where id = v.notebook_id;
+  return json_build_object('generation', n.generation, 'restored', v.id);
+end $$;
+
+-- Notas docentes (SOLO docente / suplente; nunca estudiantes ni el cuaderno compartido): la guía docente enviada desde el generador
+create or replace function public.notebook_add_note(p_notebook uuid, p_section uuid, p_title text, p_body text, p_kind text default 'teacher_guide')
+returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_id uuid;
+begin
+  if public.tc_notebook_role(p_notebook) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  if p_section is not null and not exists (select 1 from public.group_notebook_sections where id = p_section and notebook_id = p_notebook) then raise exception 'Sección inválida'; end if;
+  if length(btrim(coalesce(p_body, ''))) = 0 or length(p_body) > 200000 then raise exception 'Nota inválida'; end if;
+  if coalesce(p_kind, '') not in ('teacher_guide','note') then raise exception 'Nota inválida'; end if;
+  if (select count(*) from public.group_notebook_notes where notebook_id = p_notebook) >= 300 then raise exception 'El cuaderno ya tiene demasiadas notas docentes'; end if;
+  insert into public.group_notebook_notes (notebook_id, section_id, kind, title, body, created_by)
+  values (p_notebook, p_section, p_kind, left(btrim(coalesce(p_title, '')), 200), p_body, auth.uid()) returning id into v_id;
+  return json_build_object('id', v_id);
+end $$;
+create or replace function public.notebook_notes(p_notebook uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if public.tc_notebook_role(p_notebook) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(json_build_object('id', x.id, 'section_id', x.section_id, 'kind', x.kind, 'title', x.title, 'body', x.body,
+                     'created_at', x.created_at, 'by', public.tc_person_name(x.created_by)) order by x.created_at, x.id)
+                     from public.group_notebook_notes x where x.notebook_id = p_notebook), '[]'::json);
+end $$;
+create or replace function public.notebook_delete_note(p_note uuid) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v public.group_notebook_notes%rowtype;
+begin
+  select * into v from public.group_notebook_notes where id = p_note;
+  if v.id is null or public.tc_notebook_role(v.notebook_id) is distinct from 'teacher' then raise exception 'No autorizado'; end if;
+  delete from public.group_notebook_notes where id = p_note;
+  return json_build_object('deleted', true);
+end $$;
+
+-- "Enviar al cuaderno" (generador): los grupos que doy (docente / suplente) con las clases de su año lectivo actual
+create or replace function public.notebook_targets() returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(x order by lower(x.name)) from (
+    select g.id, g.name, g.timezone, public.tc_school_year(g.id, now()) as year,
+           (select s.id from public.class_sessions s where s.group_id = g.id and s.status = 'scheduled'
+               and (s.starts_at at time zone g.timezone)::date = (now() at time zone g.timezone)::date order by s.starts_at, s.id limit 1) as today_session,
+           (select s.id from public.class_sessions s where s.group_id = g.id and s.status = 'scheduled' and s.ends_at > now()
+             order by s.starts_at, s.id limit 1) as next_session,
+           coalesce((select json_agg(json_build_object('id', s.id, 'n', s.n, 'title', coalesce(nullif(s.title, ''), g.name), 'starts_at', s.starts_at,
+                       'ends_at', s.ends_at, 'timezone', s.timezone) order by s.starts_at, s.id)
+                       from (select c.*, row_number() over (order by c.starts_at, c.id) as n
+                               from public.class_sessions c, public.tc_school_year_bounds(g.id, public.tc_school_year(g.id, now())) b
+                              where c.group_id = g.id and c.status = 'scheduled' and c.starts_at >= b.f and c.starts_at < b.t) s
+                      where s.starts_at > now() - interval '60 days' and s.starts_at < now() + interval '120 days'), '[]'::json) as sessions
+      from public.class_groups g where auth.uid() in (g.teacher_id, g.substitute_id)) x), '[]'::json);
+end $$;
+
+-- Pizarra del grupo: sus páginas (una por clase del año lectivo; cada una es la pizarra de esa clase: class_boards)
+create or replace function public.groupboard_pages(p_session uuid default null, p_group uuid default null, p_year integer default null) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_group uuid := p_group; s public.class_sessions%rowtype; g public.class_groups%rowtype; v_role text; v_year integer; v_f timestamptz; v_t timestamptz; v_m integer;
+begin
+  if p_session is not null then
+    select * into s from public.class_sessions where id = p_session;
+    if s.id is null then raise exception 'No autorizado'; end if;
+    if s.group_id is null then
+      if public.tc_classboard_role(p_session) is null then raise exception 'No autorizado'; end if;
+      return null; -- clase suelta: una sola pizarra, sin páginas
+    end if;
+    v_group := s.group_id;
+  end if;
+  v_role := public.tc_notebook_group_role(v_group);
+  if v_role is null then raise exception 'No autorizado'; end if;
+  select * into g from public.class_groups where id = v_group;
+  v_year := coalesce(p_year, public.tc_school_year(v_group, coalesce(s.starts_at, now())));
+  if v_year < 2000 or v_year > 2200 then raise exception 'Año inválido'; end if;
+  v_m := public.tc_school_year_start(g.institution_id);
+  select f, t into v_f, v_t from public.tc_school_year_bounds(v_group, v_year);
+  return json_build_object('group_id', g.id, 'group_name', g.name, 'timezone', g.timezone, 'year', v_year,
+    'year_label', public.tc_school_year_label(v_year, v_m), 'role', v_role,
+    'today', (now() at time zone g.timezone)::date,
+    'today_session', (select c.id from public.class_sessions c where c.group_id = g.id and c.status = 'scheduled'
+                        and (c.starts_at at time zone g.timezone)::date = (now() at time zone g.timezone)::date order by c.starts_at, c.id limit 1),
+    'pages', coalesce((select json_agg(json_build_object('session_id', c.id, 'n', c.n, 'title', coalesce(nullif(c.title, ''), g.name),
+                 'starts_at', c.starts_at, 'ends_at', c.ends_at, 'timezone', c.timezone,
+                 'day', (c.starts_at at time zone g.timezone)::date,
+                 'today', (c.starts_at at time zone g.timezone)::date = (now() at time zone g.timezone)::date,
+                 'has_board', coalesce(b.rev, 0) > 0, 'locked', coalesce(b.locked, false)) order by c.starts_at, c.id)
+               from (select x.*, row_number() over (order by x.starts_at, x.id) as n from public.class_sessions x
+                      where x.group_id = g.id and x.status = 'scheduled' and x.starts_at >= v_f and x.starts_at < v_t) c
+               left join public.class_boards b on b.session_id = c.id), '[]'::json));
+end $$;
+
+-- Año lectivo de una unidad (admins): mes en que empieza (null = heredar de la unidad de arriba; sin ninguno = enero)
+create or replace function public.set_school_year_start(p_unit uuid, p_month integer) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+begin
+  perform public.tc_assert_admin(p_unit);
+  if p_month is not null and (p_month < 1 or p_month > 12) then raise exception 'Mes inválido (de 1 a 12)'; end if;
+  update public.institutions set school_year_start_month = p_month where id = p_unit;
+  return json_build_object('own', p_month, 'effective', public.tc_school_year_start(p_unit),
+                           'inherited', (select public.tc_school_year_start(i.parent_id) from public.institutions i where i.id = p_unit and i.parent_id is not null));
+end $$;
+create or replace function public.school_year_start(p_unit uuid) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  perform public.tc_assert_admin(p_unit);
+  return json_build_object('own', (select school_year_start_month from public.institutions where id = p_unit), 'effective', public.tc_school_year_start(p_unit),
+                           'inherited', (select public.tc_school_year_start(i.parent_id) from public.institutions i where i.id = p_unit and i.parent_id is not null));
+end $$;
+
+do $$
+declare f text;
+begin
+  foreach f in array array[
+    'notebook_resolve(uuid, uuid, integer)', 'notebook_find(uuid, uuid, integer)', 'notebook_open(uuid)',
+    'notebook_push(uuid, uuid, integer, text, text)', 'notebook_pull(uuid, bigint, integer, text, jsonb, integer)',
+    'notebook_snapshot(uuid, uuid, integer, text, bigint)', 'notebook_set_lock(uuid, boolean, boolean)',
+    'notebook_add_section(uuid, text, uuid, boolean)', 'notebook_versions(uuid)', 'notebook_version(uuid)',
+    'notebook_add_version(uuid, text)', 'notebook_restore(uuid)', 'notebook_add_note(uuid, uuid, text, text, text)',
+    'notebook_notes(uuid)', 'notebook_delete_note(uuid)', 'notebook_targets()', 'groupboard_pages(uuid, uuid, integer)',
+    'set_school_year_start(uuid, integer)', 'school_year_start(uuid)'] loop
+    execute format('revoke all on function public.%s from public, anon', f);
+    execute format('grant execute on function public.%s to authenticated', f);
+  end loop;
+end $$;
+
+-- Tiempo real: políticas del canal privado "notebook:<id>" (solo si el proyecto tiene Realtime)
+do $$
+begin
+  if to_regclass('realtime.messages') is not null and to_regproc('realtime.topic') is not null then
+    execute 'drop policy if exists tc_notebook_listen on realtime.messages';
+    execute 'create policy tc_notebook_listen on realtime.messages for select to authenticated using (public.tc_notebook_rt_ok((select realtime.topic()), false))';
+    execute 'drop policy if exists tc_notebook_send on realtime.messages';
+    execute 'create policy tc_notebook_send on realtime.messages for insert to authenticated with check (public.tc_notebook_rt_ok((select realtime.topic()), true))';
+  end if;
+end $$;
+-- ══ END GROUP NOTEBOOK ══
+
 -- Que la API de Supabase vea enseguida las funciones nuevas
 notify pgrst, 'reload schema';
 

@@ -790,6 +790,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
 <link rel="stylesheet" href="/groups-calendar.css">
 <link rel="stylesheet" href="/class-doc.css">
 <link rel="stylesheet" href="/class-board.css">
+<link rel="stylesheet" href="/group-notebook.css">
 <link rel="stylesheet" href="/plans.css">
 </head>
 <body>
@@ -1121,6 +1122,11 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
         <div class="admin-card" id="consent-card" style="display:none;margin-top:16px"><div class="admin-card-title">Recording consent of minors <span>Students under 18</span></div>
           <label class="switch-row access-row"><input type="checkbox" id="access-consent-managed"> <span>Our institution collects the families' consent itself</span></label>
           <p class="access-help">Off: a student under 18 writes their guardian's name and email and declares that the guardian agrees (TeroClass does not verify it; you see it as "declared by the student"). On: your institution declares that it already collected the written authorization of the families of its students under 18 (for example on paper), so they are not asked for their guardian's details. Applies to this unit and everything below it.</p>
+        </div>
+        <!-- 2026-10-28: school year of the group notebooks and boards (public/group-notebook.js) -->
+        <div class="admin-card" id="schoolyear-card" style="display:none;margin-top:16px"><div class="admin-card-title">School year <span>Group notebooks and boards</span></div>
+          <label class="switch-row access-row" for="schoolyear-month"><span>The school year starts in</span> <select id="schoolyear-month" class="member-role"></select></label>
+          <p class="access-help">Each group has one notebook and one board per school year, with a section (and a page) per class. By default the school year is the calendar year (January to December); choose March, for example, for a school year from March to February. Applies to this unit and everything below it (a unit below can choose its own).</p>
         </div>
       </div>
 
@@ -3359,6 +3365,7 @@ function displayResult(text,params,opts={}){
   </div>`;
   out.classList.add('visible');
   if(window.LiveClass)LiveClass.onDocShown();
+  if(window.TCNotebook)TCNotebook.onDocShown(); // "Send to the group notebook" (student handout → a class section; teacher guide → a teacher-only note)
   out.oninput=()=>{docDirty=true;};
   if(currentResult.student)renderStudent(currentResult.student);
   else generateStudentHandout();
@@ -4558,6 +4565,7 @@ function vaBlocked(){if(!viewAs)return false;showToast(VA_RO,'err');return true;
     'list_insight_sessions','get_session_insights','my_insights','my_insight', // class insights: reads only
     'classdoc_open','classdoc_pull','classdoc_versions','classdoc_version','group_sessions', // class document: reads only (the owner is read-only there anyway)
     'classboard_open','classboard_pull','classboard_versions','classboard_version', // class whiteboard: reads only
+    'notebook_find','notebook_open','notebook_pull','notebook_versions','notebook_version','groupboard_pages','school_year_start', // group notebook + board pages: reads only
     'session_attendance','attendance_report', // attendance: reads only
     'consent_overview','consent_new_declines']); // recording consent (Groups → Consents): reads only
 
@@ -5359,7 +5367,34 @@ function renderAccessCard(orgFilter){
   const cb=document.getElementById('access-open-reg');cb.checked=org.openRegistration===true;cb.dataset.org=org.id;
   document.getElementById('access-link').textContent=location.origin+'/org/'+(org.slug||'');
   const cc=document.getElementById('consent-card');if(cc){cc.style.display='block';const c2=document.getElementById('access-consent-managed');c2.checked=org.consentManaged===true;c2.dataset.org=org.id;}
+  renderSchoolYearCard(org);
 }
+// 2026-10-28: the month the school year starts (group notebooks + boards: one per group and school year); null = inherit
+async function renderSchoolYearCard(org){
+  const card=document.getElementById('schoolyear-card');const sel=document.getElementById('schoolyear-month');if(!card||!sel)return;
+  card.style.display='block';sel.dataset.org=org.id;sel.disabled=true;
+  const {data,error}=await sb.rpc('school_year_start',{p_unit:org.id});
+  if(sel.dataset.org!==org.id)return;
+  const d=typeof data==='string'?JSON.parse(data):data;
+  if(error||!d){card.style.display='none';return;}
+  const month=m=>{try{return new Date(2026,m-1,1).toLocaleString(uiLocale(),{month:'long'});}catch(e){return String(m);}};
+  const cap=t=>t.charAt(0).toUpperCase()+t.slice(1);
+  const hasParent=d.inherited!=null;
+  sel.innerHTML=(hasParent?`<option value="" data-no-i18n>${esc(trText('Same as the unit above'))} (${esc(cap(month(d.inherited)))})</option>`:'')
+    +Array.from({length:12},(_,i)=>i+1).map(m=>`<option value="${m}" data-no-i18n>${esc(cap(month(m)))}${m===1?' — '+esc(trText('calendar year')):''}</option>`).join('');
+  sel.value=d.own!=null?String(d.own):(hasParent?'':'1');
+  sel.disabled=false;
+}
+document.addEventListener('change',async e=>{
+  if(e.target?.id!=='schoolyear-month')return;
+  const sel=e.target;const id=sel.dataset.org;const v=sel.value;
+  if(viewAs){vaBlocked();renderSchoolYearCard(orgsCache[id]||{id});return;}
+  sel.disabled=true;
+  const {error}=await sb.rpc('set_school_year_start',{p_unit:id,p_month:v?Number(v):null});
+  sel.disabled=false;
+  if(error){showToast('Error: '+error.message,'err');renderSchoolYearCard(orgsCache[id]||{id});return;}
+  showToast('Saved: the school year of this unit was updated. New notebooks and boards follow it.','ok');
+});
 document.addEventListener('change',async e=>{
   if(e.target?.id!=='access-consent-managed')return;
   const cb=e.target;const id=cb.dataset.org;const want=cb.checked;
@@ -5456,7 +5491,10 @@ const I18N_ES_FIX={
 "and creates an account becomes a teacher of this unit, uses a seat of your plan and sees the unit's AI settings and playbooks. Turn it on only for a short time and share the link only with your team.":'y cree una cuenta pasa a ser docente de esta unidad, ocupa un asiento de tu plan y ve los ajustes de IA y los playbooks de la unidad. Encendelo solo por un rato y compartí el link solo con tu equipo.',
 'Open join by link?':'¿Abrir el registro por link?','Anyone who gets the link can create an account and join as a teacher of this unit.':'Cualquiera que tenga el link puede crear una cuenta y sumarse como docente de esta unidad.',
 'Each person uses a seat of your plan':'Cada persona ocupa un asiento de tu plan',"They can see this unit's AI settings and playbooks":'Ve los ajustes de IA y los playbooks de esta unidad','You can turn it off at any time':'Lo podés apagar cuando quieras',
-'Recording consent of minors':'Consentimiento de grabación de menores','Students under 18':'Estudiantes menores de 18',
+'Recording consent of minors':'Consentimiento de grabación de menores','School year':'Año lectivo','Group notebooks and boards':'Cuadernos y pizarras de los grupos',
+'The school year starts in':'El año lectivo empieza en','Same as the unit above':'Igual que la unidad de arriba','calendar year':'año calendario',
+'Each group has one notebook and one board per school year, with a section (and a page) per class. By default the school year is the calendar year (January to December); choose March, for example, for a school year from March to February. Applies to this unit and everything below it (a unit below can choose its own).':'Cada grupo tiene un cuaderno y una pizarra por año lectivo, con una sección (y una página) por clase. Por defecto el año lectivo es el año calendario (de enero a diciembre); elegí marzo, por ejemplo, para un año lectivo de marzo a febrero. Se aplica a esta unidad y a todo lo que cuelga de ella (una unidad de abajo puede elegir el suyo).',
+'Saved: the school year of this unit was updated. New notebooks and boards follow it.':'Guardado: se actualizó el año lectivo de esta unidad. Los cuadernos y pizarras nuevos lo siguen.','Students under 18':'Estudiantes menores de 18',
 "Our institution collects the families' consent itself":'Nuestra institución junta el consentimiento de las familias',
 'Off: a student under 18 writes their guardian\'s name and email and declares that the guardian agrees (TeroClass does not verify it; you see it as "declared by the student"). On: your institution declares that it already collected the written authorization of the families of its students under 18 (for example on paper), so they are not asked for their guardian\'s details. Applies to this unit and everything below it.':
 'Apagado: un estudiante menor de 18 escribe el nombre y el email de su tutor/a y declara que está de acuerdo (TeroClass no lo verifica; lo ves como "declarado por el estudiante"). Encendido: tu institución declara que ya juntó la autorización escrita de las familias de sus estudiantes menores de 18 (por ejemplo, en papel), así que no se les piden los datos del tutor/a. Vale para esta unidad y todo lo que cuelga de ella.',
@@ -5519,6 +5557,7 @@ I18N_RULES_ES.push([/^They open it and create their account with (.+)\.$/,'La ab
 <script src="/attendance.js"></script>
 <script src="/class-doc.js"></script>
 <script src="/class-board.js"></script>
+<script src="/group-notebook.js"></script>
 <script src="/plans.js"></script>
 <script src="/plans-admin.js"></script>
 </body>

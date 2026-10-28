@@ -688,7 +688,7 @@
   async function closeOverlay() {
     const v = overlay; overlay = null; if (v) await v.close();
     const el = document.getElementById('cd-overlay'); if (el) { el.classList.remove('active'); el.innerHTML = ''; }
-    document.body.classList.remove('cd-open');
+    if (!document.querySelector('#cb-overlay.active, #nb-overlay.active')) document.body.classList.remove('cd-open');
   }
   // embedded (live-class side panel)
   async function mount(host, sessionId, opts = {}) { const v = new DocView(host, sessionId, { ...opts, compact: true }); await v.init(); return v; }
@@ -701,7 +701,7 @@
   });
   window.addEventListener('pagehide', () => { if (overlay) overlay.flush(); });
 
-  window.TCClassDoc = { open, close: closeOverlay, mount, loadEditor, _test: { handoutToHtml, toMarkdown, get view() { return overlay; } } };
+  window.TCClassDoc = { open, close: closeOverlay, mount, loadEditor, handoutToHtml, toMarkdown, _test: { handoutToHtml, toMarkdown, get view() { return overlay; } } };
 
   // ════════════════════════════════════════════════════════════════════════════════════════════
   // SPANISH (rioplatense "vos")

@@ -175,11 +175,12 @@
     const d = GS.data || {}; const now = Date.now(); const edit = !!d.can_edit && !inViewAs();
     const all = d.sessions || [];
     const item = s => {
-      const started = Date.parse(s.starts_at) - 10 * MIN <= now; const docOk = s.has_doc || edit;
+      const started = Date.parse(s.starts_at) - 10 * MIN <= now; const nb = !!window.TCNotebook; const docOk = s.has_doc || (edit && !nb);
       return `<li class="gcs-item${s.status === 'cancelled' ? ' cancelled' : ''}">
         <span class="gcs-when" data-no-i18n>${esc(fDay(s.starts_at))} · ${esc(fTime(s.starts_at))}</span>
         <span class="gcs-main"><b data-no-i18n>${esc(s.title)}</b><span>${s.status === 'cancelled' ? '<span class="gc-chip cancelled">Cancelled</span> ' : ''}${s.has_doc ? `<span class="gc-chip ok">📄 ${esc(tr('Document'))}</span>` : `<span class="gc-chip">${esc(tr('No document yet'))}</span>`} ${s.doc_locked ? `<span class="gc-chip warn">🔒 ${esc(tr('Locked'))}</span>` : ''}${s.has_board ? ` <span class="gc-chip ok">🖍️ ${esc(tr('Board'))}</span>` : ''}</span></span>
-        <span class="gcs-act"><button type="button" class="tree-btn" data-att="gs-doc" data-id="${esc(s.id)}"${docOk ? '' : ' disabled'}>📄 <span>${esc(tr(edit ? 'Open document' : 'Read document'))}</span></button>
+        <span class="gcs-act">${nb && s.status !== 'cancelled' ? `<button type="button" class="tree-btn" data-att="gs-nb" data-id="${esc(s.id)}">📒 <span>${esc(tr('Notebook'))}</span></button>` : ''}
+          ${nb && !s.has_doc ? '' : `<button type="button" class="tree-btn" data-att="gs-doc" data-id="${esc(s.id)}"${docOk ? '' : ' disabled'}>📄 <span>${esc(tr(nb ? 'Previous document' : edit ? 'Open document' : 'Read document'))}</span></button>`}
           ${window.TCClassBoard && (s.has_board || edit) ? `<button type="button" class="tree-btn" data-att="gs-board" data-id="${esc(s.id)}">🖍️ <span>${esc(tr(edit ? 'Open board' : 'See board'))}</span></button>` : ''}
           ${started && s.status !== 'cancelled' ? `<button type="button" class="tree-btn" data-att="gs-att" data-id="${esc(s.id)}">✅ <span>${esc(tr('Attendance'))}</span></button>` : ''}</span>
       </li>`;
@@ -187,7 +188,7 @@
     const past = all.filter(s => Date.parse(s.starts_at) <= now); const next = all.filter(s => Date.parse(s.starts_at) > now).reverse();
     modal(`<div class="modal-title" id="gc-modal-title"><span>${esc(tr('Classes and documents'))}</span> · <span data-no-i18n>${esc(d.group?.name || '')}</span></div>
       <div class="modal-sub">${edit ? esc(tr('The shared document of each class and its attendance.')) : esc(tr('Read-only: the shared document of each class (it stays as a record) and its attendance.'))}</div>
-      <div class="gc-btn-row" style="margin-bottom:10px"><button type="button" class="tree-btn primary" data-att="gs-report">📊 <span>${esc(tr('Attendance report'))}</span></button></div>
+      <div class="gc-btn-row" style="margin-bottom:10px">${window.TCNotebook ? `<button type="button" class="tree-btn primary" data-att="gs-group-nb">📒 <span>${esc(tr('Group notebook'))}</span></button>` : ''}${window.TCClassBoard ? `<button type="button" class="tree-btn" data-att="gs-group-board">🖍️ <span>${esc(tr('Group board'))}</span></button>` : ''}<button type="button" class="tree-btn${window.TCNotebook ? '' : ' primary'}" data-att="gs-report">📊 <span>${esc(tr('Attendance report'))}</span></button></div>
       ${past.length ? `<div class="gc-sec-title">${esc(tr('Past classes'))}</div><ul class="gcs-list">${past.map(item).join('')}</ul>` : ''}
       ${next.length ? `<div class="gc-sec-title">${esc(tr('Next classes'))}</div><ul class="gcs-list">${next.slice(0, 10).map(item).join('')}</ul>` : ''}
       ${all.length ? '' : `<div class="bl-empty">${esc(tr('No classes in the last 90 days or the next 30.'))}</div>`}
@@ -252,6 +253,9 @@
       case 'rep-back': if (typeof REP.back === 'function') REP.back(); break;
       case 'gs-report': openReport(GS.group, { back: () => openGroupSessions(GS.group) }); break;
       case 'gs-doc': if (window.TCClassDoc) window.TCClassDoc.open(el.dataset.id); break;
+      case 'gs-nb': if (window.TCNotebook) window.TCNotebook.open({ session: el.dataset.id }); break;
+      case 'gs-group-nb': if (window.TCNotebook) window.TCNotebook.open({ group: GS.group }); break;
+      case 'gs-group-board': if (window.TCClassBoard) window.TCClassBoard.openGroup(GS.group); break;
       case 'gs-board': if (window.TCClassBoard) window.TCClassBoard.open(el.dataset.id); break;
       case 'gs-att': openSessionAttendance(el.dataset.id); break;
       case 'gs-back': renderGroupSessions(); break;
@@ -282,7 +286,7 @@
     '% = present + late over the classes counted (excused and classes in progress are not counted).': '% = presentes + tarde sobre las clases contadas (las justificadas y las clases en curso no cuentan).',
     'This group has no students.': 'Este grupo no tiene estudiantes.', 'No classes held in this period.': 'No hubo clases en este período.', 'Close': 'Cerrar', 'Loading…': 'Cargando…',
     'Name': 'Nombre', 'Email': 'Email', 'Classes and documents': 'Clases y documentos', 'Document': 'Documento', 'No document yet': 'Todavía sin documento', 'Locked': 'Bloqueado',
-    'Open document': 'Abrir documento', 'Read document': 'Leer documento', 'The shared document of each class and its attendance.': 'El documento compartido de cada clase y su asistencia.',
+    'Open document': 'Abrir documento', 'Read document': 'Leer documento', 'Previous document': 'Documento anterior', 'Notebook': 'Cuaderno', 'Group notebook': 'Cuaderno del grupo', 'Group board': 'Pizarra del grupo', 'The shared document of each class and its attendance.': 'El documento compartido de cada clase y su asistencia.',
     'Read-only: the shared document of each class (it stays as a record) and its attendance.': 'Solo lectura: el documento compartido de cada clase (queda como registro) y su asistencia.',
     'Attendance report': 'Informe de asistencia', 'Past classes': 'Clases pasadas', 'Next classes': 'Próximas clases', 'No classes in the last 90 days or the next 30.': 'No hay clases en los últimos 90 días ni en los próximos 30.',
     'Your attendance will appear here after your first classes.': 'Tu asistencia va a aparecer acá después de tus primeras clases.',

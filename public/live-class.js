@@ -455,6 +455,7 @@ Cierre y ticket de salida (5 min)
           <button type="button" class="lc-btn lc-primary" data-lc="start" id="lc-start-btn">▶ Start live class</button>
         </div>
         ${list.length ? '' : '<p class="lc-hint">Tip: save a class first and it will appear here with its activity timers.</p>'}
+        <p class="lc-hint lc-nb-hint" id="lc-nb-hint">📒 <span>For a notebook and a board, enter from a class in the Calendar.</span></p>
       </section>
       <section class="lc-card lc-demo-card" id="lc-demo-card" aria-labelledby="lc-demo-h">
         <h2 id="lc-demo-h"><span aria-hidden="true">🧪</span> <span>Try the demo</span></h2>
@@ -886,6 +887,8 @@ Cierre y ticket de salida (5 min)
     // Attendance (public/attendance.js): a calendar class records who entered (students: present / late; the teacher too).
     // TODO(live): with real LiveKit, its webhook (participant_joined / left) also feeds attendance_record_external.
     if (S.sessionId && window.TCAttendance) { R.attendance = true; window.TCAttendance.roomJoin(S.sessionId); }
+    // the class started: its section of the group notebook exists from now on (public/group-notebook.js; one-off classes: none)
+    if (S.sessionId && window.TCNotebook) window.TCNotebook.ensureSession(S.sessionId);
   }
 
   function wireProvider(p, R) {
@@ -1225,17 +1228,19 @@ Cierre y ticket de salida (5 min)
     const R = S.room; R.side = R.side === k && document.activeElement?.closest('.lc-controls') ? null : k;
     if (R.side === 'chat') { R.unread = 0; renderChat(); setTimeout(() => document.getElementById('lc-chat-input')?.focus(), 30); }
     updateRoomUi();
-    // the shared class document (public/class-doc.js), mounted the first time the tab opens; it keeps syncing while in the room
-    if (R.side === 'doc' && !R.doc && S.sessionId && window.TCClassDoc) {
+    // the GROUP NOTEBOOK on this class's section (public/group-notebook.js; a one-off class without a group: its class document,
+    // public/class-doc.js), mounted the first time the tab opens; it keeps syncing while in the room
+    if (R.side === 'doc' && !R.doc && S.sessionId && (window.TCNotebook || window.TCClassDoc)) {
       const host = document.getElementById('lc-side-doc');
-      if (host) { R.doc = 'loading'; window.TCClassDoc.mount(host, S.sessionId).then(v => { if (S.room === R) R.doc = v; else if (v) v.destroy(); }); }
+      if (host) { R.doc = 'loading'; (window.TCNotebook ? window.TCNotebook.mount(host, S.sessionId) : window.TCClassDoc.mount(host, S.sessionId)).then(v => { if (S.room === R) R.doc = v; else if (v) v.destroy(); }); }
     }
     // the class whiteboard (public/class-board.js), same: mounted the first time its tab opens; "Full screen" covers the stage
     if (R.side === 'board' && !R.board && S.sessionId && window.TCClassBoard) {
       const host = document.getElementById('lc-side-board');
       if (host) {
         R.board = 'loading';
-        window.TCClassBoard.mount(host, S.sessionId, { onExpand: full => { if (S.room === R) { R.boardFull = !!full; updateRoomUi(); } } })
+        // a class of a group: the group board with a page per class, opened on this class's page ("Today")
+        window.TCClassBoard.mount(host, S.sessionId, { onExpand: full => { if (S.room === R) { R.boardFull = !!full; updateRoomUi(); } }, onSwap: v => { if (S.room === R) R.board = v; } })
           .then(v => { if (S.room === R) R.board = v; else if (v) v.destroy(); });
       }
     }
@@ -1290,6 +1295,8 @@ Cierre y ticket de salida (5 min)
     if (sess && typeof sb !== 'undefined') sb.rpc('classdoc_add_version', { p_session: sess.id, p_label: 'class_end' }).then(() => {}, () => {});
     // … and so does the class whiteboard (nothing is created if nobody drew)
     if (sess && typeof sb !== 'undefined') sb.rpc('classboard_add_version', { p_session: sess.id, p_label: 'class_end' }).then(() => {}, () => {});
+    // … and the group notebook (a version of the whole notebook labelled "end of class")
+    if (sess && window.TCNotebook) window.TCNotebook.classEnd(sess.id);
     // P-07 / P-08: sample insights only for the explicit demo; a calendar class gets its (demo-flagged) stored insights;
     // a quick room outside the calendar (or a student) gets none — nothing invented is shown as if it were real
     if (!S.demo && !sess) {
@@ -1909,6 +1916,7 @@ Cierre y ticket de salida (5 min)
     'Teacher (sample)': 'Docente (ejemplo)', 'Participant': 'Participante', 'Consented': 'Aceptó',
     // P-07 / TC-13 / TC-23 (2026-10)
     'The video classroom is not connected yet: a room opens in preview mode (only you, nothing is recorded).': 'El aula de video todavía no está conectada: la sala se abre en modo vista previa (solo vos, no se graba nada).',
+    'For a notebook and a board, enter from a class in the Calendar.': 'Para tener cuaderno y pizarra, entrá desde una clase del Calendario.',
     'Your scheduled classes are in the Calendar. Here you can open a quick room and invite your students with a link.': 'Tus clases programadas están en el Calendario. Acá podés abrir una sala rápida e invitar a tus estudiantes con un link.',
     'No plan': 'Sin plan', 'Try the demo': 'Probar la demo', '▶ Try the demo': '▶ Probar la demo',
     'See how a class looks with a sample plan, invented participants and sample insights. Nothing is saved and nobody else sees it.': 'Mirá cómo se ve una clase con un plan de ejemplo, participantes inventados e insights de ejemplo. No se guarda nada y nadie más lo ve.',

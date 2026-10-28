@@ -37,6 +37,8 @@ const HTML = RAW_HTML
   .replace('<script src="/class-doc.js"></script>', () => `<script>${asset('class-doc.js')}</script>`)
   .replace('<link rel="stylesheet" href="/class-board.css">', () => `<style>${asset('class-board.css')}</style>`)
   .replace('<script src="/class-board.js"></script>', () => `<script>${asset('class-board.js')}</script>`)
+  .replace('<link rel="stylesheet" href="/group-notebook.css">', () => `<style>${asset('group-notebook.css')}</style>`)
+  .replace('<script src="/group-notebook.js"></script>', () => `<script>${asset('group-notebook.js')}</script>`)
   .replace('<link rel="stylesheet" href="/plans.css">', () => `<style>${asset('plans.css')}</style>`)
   .replace('<script src="/plans.js"></script>', () => `<script>${asset('plans.js')}</script>`)
   .replace('<script src="/plans-admin.js"></script>', () => `<script>${asset('plans-admin.js')}</script>`);
@@ -62,6 +64,7 @@ const db = { users: {}, profiles: [], institutions: [], plannings: [], invitatio
   teacher_insights: [], student_insights: [],
   class_docs: [], class_doc_updates: [], class_doc_versions: [], class_doc_presence: [], session_attendance: [],
   class_boards: [], class_board_elements: [], class_board_versions: [], class_board_presence: [],
+  group_notebooks: [], group_notebook_sections: [], group_notebook_updates: [], group_notebook_versions: [], group_notebook_presence: [], group_notebook_notes: [],
   user_consents: [], consent_declines: [] };
 const calls = { rpc: [], inserts: {}, otp: [] };
 // billing state (same rules as the SQL functions, simplified): accounts[rootId] = {seats, monthly_tokens, extra}; usage[rootId] = used this month
@@ -349,6 +352,7 @@ async function handleSupabase(route) {
     { const r = consent.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classInsights.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classBoard.handle(fn, body, me); if (r) return json(r.status, r.data); }
+    { const r = notebook.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classDoc.handle(fn, body, me);
       if (r && fn === 'group_sessions' && r.status === 200) r.data.sessions.forEach(x => Object.assign(x, classBoard.flags(x.id))); // + the class whiteboard
       if (r) return json(r.status, r.data); }
@@ -401,8 +405,9 @@ const classDoc = require('./mock-classdoc.cjs')({ db, uid, instById, chainOf, de
 const plans = require('./mock-plans.cjs')({ db, uid, instById, rootOf, account, bill });
 const consent = require('./mock-consent.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
 const classBoard = require('./mock-classboard.cjs')({ db, uid, classDoc });
-const realtime = require('./mock-realtime.cjs')({ tokUser, canRealtime: (me, t, send) => classDoc.canRealtime(me, t, send) || classBoard.canRealtime(me, t, send),
-  publicTopicOk: t => classDoc.publicTopicOk(t) || classBoard.publicTopicOk(t) });
+const notebook = require('./mock-notebook.cjs')({ db, uid, chainOf, classDoc });
+const realtime = require('./mock-realtime.cjs')({ tokUser, canRealtime: (me, t, send) => classDoc.canRealtime(me, t, send) || classBoard.canRealtime(me, t, send) || notebook.canRealtime(me, t, send),
+  publicTopicOk: t => classDoc.publicTopicOk(t) || classBoard.publicTopicOk(t) || notebook.publicTopicOk(t) });
 const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0),
   insightSummaries: (eids, me) => classInsights.summaries(eids, 5, me) });
-module.exports = { plans, tokUser, consent, students, classInsights, classDoc, classBoard, realtime, serveVendor, serveWhiteboard, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+module.exports = { plans, tokUser, consent, students, classInsights, classDoc, classBoard, notebook, realtime, serveVendor, serveWhiteboard, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

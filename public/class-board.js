@@ -112,12 +112,17 @@
     async init() {
       this.host.innerHTML = `<div class="cd-shell cb-shell${this.opts.compact ? ' compact' : ''}" id="${this.id}"><div class="cd-loading">${H(tr('Opening the board…'))}</div></div>`;
       this.host.addEventListener('click', this.onClick);
-      let M, res;
-      try { [M, res] = await Promise.all([loadLib(), rpc('classboard_open', { p_session: this.sid })]); }
+      this.onPageSel = e => { if (e.target?.dataset?.cbChange === 'page') this.goPage(e.target.value); };
+      this.host.addEventListener('change', this.onPageSel);
+      let M, res, pg;
+      // the group board: one page per class of the school year (each page is that class's board); a one-off class has none
+      const pagesP = this.opts.pages === false ? Promise.resolve({ data: null }) : (this.opts.pagesData ? Promise.resolve({ data: this.opts.pagesData }) : rpc('groupboard_pages', { p_session: this.sid }).catch(() => ({ data: null })));
+      try { [M, res, pg] = await Promise.all([loadLib(), rpc('classboard_open', { p_session: this.sid }), pagesP]); }
       catch (e) { console.warn('classboard library', e); return this.fail(tr('Could not load the board. Check your connection and try again.')); }
       if (this.dead) return null;
       if (res.error || !res.data) return this.fail(/No autorizado/.test(res.error?.message || '') ? tr("You don't have access to this board.") : tr('Could not open the board.') + ' ' + (res.error?.message || ''));
       this.M = M; this.info = res.data; this.gen = res.data.generation || 1; this.rev = Number(res.data.rev) || 0;
+      this.pages = pg && pg.data && Array.isArray(pg.data.pages) && pg.data.pages.length ? pg.data : null;
       this.renderShell();
       this.mountExcalidraw(res.data.elements || []);
       document.addEventListener('visibilitychange', this.onVis);
@@ -156,9 +161,30 @@
             ${c ? '' : `<button type="button" class="tree-btn cd-close" data-cb="close" aria-label="${H(tr('Close'))}">✕ <span>Close</span></button>`}
           </div>
         </header>
+        ${this.pagesHtml()}
         <div class="cd-notice" role="status" hidden></div>
         <div class="cb-canvas" data-no-i18n></div>
         <div class="cd-sheet" hidden></div>`;
+    }
+    // page selector of the group board ("Class 12 · Mon 3 Mar"; today marked; ‹ › and "Today")
+    pagesHtml() {
+      const P = this.pages; if (!P) return '';
+      const list = P.pages; const i = list.findIndex(p => p.session_id === this.sid);
+      const day = p => { try { return new Date(p.starts_at).toLocaleDateString(loc(), { weekday: 'short', day: 'numeric', month: 'short', timeZone: p.timezone || P.timezone || undefined }).replace(/\./g, '').replace(lang() === 'es' ? /,/g : /^$/, ''); } catch (e) { return ''; } };
+      const label = p => `${tr('Class')} ${p.n} · ${day(p)}${p.today ? ' · ' + tr('Today') : ''}${p.has_board ? '' : ' · ' + tr('blank')}`;
+      return `<div class="cb-pages" role="navigation" aria-label="${H(tr('Board pages'))}">
+        <span class="cb-pages-k">🖍️ <span>${H(tr('Group board'))}</span> · <span data-no-i18n>${H(P.group_name || '')} · ${H(P.year_label || P.year || '')}</span></span>
+        <button type="button" class="tree-btn cb-pg-btn" data-cb="page-prev" aria-label="${H(tr('Previous page'))}"${i > 0 ? '' : ' disabled'}>‹</button>
+        <label class="sr-only" for="${this.id}-page">${H(tr('Page'))}</label>
+        <select id="${this.id}-page" class="cb-page-sel" data-cb-change="page">${list.map(p => `<option value="${H(p.session_id)}"${p.session_id === this.sid ? ' selected' : ''} data-no-i18n>${H(label(p))}</option>`).join('')}</select>
+        <button type="button" class="tree-btn cb-pg-btn" data-cb="page-next" aria-label="${H(tr('Next page'))}"${i >= 0 && i < list.length - 1 ? '' : ' disabled'}>›</button>
+        ${P.today_session && P.today_session !== this.sid ? `<button type="button" class="tree-btn cb-pg-today" data-cb="page-today">${H(tr('Today'))}</button>` : ''}
+        <span class="cb-pages-n" data-no-i18n>${i >= 0 ? `${i + 1} / ${list.length}` : ''}</span>
+      </div>`;
+    }
+    goPage(sid) {
+      if (!sid || sid === this.sid || this.dead || !this.pages || !this.pages.pages.some(p => p.session_id === sid)) return;
+      swapPage(this, sid);
     }
     updateUi() {
       const root = this.host.querySelector('.cb-shell'); if (!root || !this.info) return;
@@ -519,6 +545,8 @@
         case 'export-menu': this.toggleMenu(); break;
         case 'png': this.exportPng(); break;
         case 'svg': this.exportSvg(); break;
+        case 'page-prev': case 'page-next': { const l = this.pages?.pages || []; const i = l.findIndex(p => p.session_id === this.sid); const j = i + (a === 'page-next' ? 1 : -1); if (l[j]) this.goPage(l[j].session_id); break; }
+        case 'page-today': this.goPage(this.pages?.today_session); break;
         case 'expand': this.full = !this.full; if (this.opts.onExpand) this.opts.onExpand(this.full); this.updateUi(); break;
         case 'close': if (this.opts.onClose) this.opts.onClose(); break;
       }
@@ -633,11 +661,33 @@
       if (this.collabRaf) cancelAnimationFrame(this.collabRaf);
       document.removeEventListener('visibilitychange', this.onVis);
       this.host.removeEventListener('click', this.onClick);
+      if (this.onPageSel) this.host.removeEventListener('change', this.onPageSel);
       if (this.channel) { try { sb.removeChannel(this.channel); } catch (e) { /* ignore */ } this.channel = null; }
       const root = this.root; this.root = null; this.api = null;
       if (root) { try { root.unmount(); } catch (e) { /* ignore */ } }
       if (!keepDom) this.host.innerHTML = '';
     }
+  }
+
+  // ── group board: another page = another class's board in the same place (overlay or side panel) ──
+  async function swapPage(view, sid) {
+    const host = view.host; const opts = { ...view.opts, pagesData: view.pages }; const full = view.full;
+    await view.close();
+    const v = new BoardView(host, sid, opts); v.full = full;
+    if (overlay === view) overlay = v;
+    host.__boardView = v;
+    if (typeof opts.onSwap === 'function') opts.onSwap(v);
+    await v.init();
+    return v;
+  }
+  // the group board from a group card / the student dashboard: today's page, else the last class before today, else the first
+  async function openGroup(groupId) {
+    const { data, error } = await rpc('groupboard_pages', { p_group: groupId });
+    if (error || !data) { toast(error ? 'Error: ' + error.message : tr('Could not open the board.'), 'err'); return null; }
+    const list = data.pages || [];
+    if (!list.length) { toast(tr('This group has no classes this school year yet.'), 'err', 5000); return null; }
+    const pick = data.today_session || (list.filter(p => String(p.day) <= String(data.today)).pop() || list[0]).session_id;
+    return open(pick, { pagesData: data });
   }
 
   // ── full-screen overlay ──
@@ -668,7 +718,7 @@
   });
   window.addEventListener('pagehide', () => { if (overlay) { try { if (overlay.api) overlay.collectLocal(overlay.api.getSceneElementsIncludingDeleted()); } catch (e) { /* ignore */ } overlay.flush(); } });
 
-  window.TCClassBoard = { open, close: closeOverlay, mount, loadLib, _test: { validEl, get view() { return overlay; } } };
+  window.TCClassBoard = { open, openGroup, close: closeOverlay, mount, loadLib, _test: { validEl, get view() { return overlay; } } };
 
   // ════════════════════════════════════════════════════════════════════════════════════════════
   // SPANISH (rioplatense "vos")
@@ -680,7 +730,9 @@
     [/Las imágenes no están disponibles en la pizarra/, 'Images are not available on the board yet.'], [/Elemento no permitido en la pizarra/, 'That element is not allowed on the board.']
   );
   if (typeof I18N_ES === 'object' && I18N_ES) Object.assign(I18N_ES, {
-    'Class board': 'Pizarra de la clase', 'Board': 'Pizarra', 'Opening the board…': 'Abriendo la pizarra…',
+    'Class board': 'Pizarra de la clase', 'Board': 'Pizarra', 'Group board': 'Pizarra del grupo', 'Board pages': 'Páginas de la pizarra', 'Page': 'Página',
+    'Previous page': 'Página anterior', 'Next page': 'Página siguiente', 'Class': 'Clase', 'Today': 'Hoy', 'blank': 'en blanco',
+    'This group has no classes this school year yet.': 'Este grupo todavía no tiene clases este año lectivo.', 'Opening the board…': 'Abriendo la pizarra…',
     'Class boards': 'Pizarras de tus clases', 'Open board': 'Abrir pizarra', 'See board': 'Ver pizarra',
     'Read-only: you can see what the class drew.': 'Solo lectura: podés ver lo que dibujó la clase.',
     'Everyone in the class can draw on it at the same time; it stays as a record.': 'Todos en la clase pueden dibujar a la vez; queda como registro.',

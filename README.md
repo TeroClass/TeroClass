@@ -17,6 +17,8 @@ AI-powered didactic planning platform for teachers.
 - Class whiteboard ("Pizarra"): `public/class-board.js` / `.css` and the vendored Excalidraw `public/vendor/whiteboard/`
   (React 18.3.1 + ReactDOM 18.3.1 + @excalidraw/excalidraw 0.18.1, MIT; one pinned ES module + lazy chunks + fonts, loaded only
   when a board is opened; rebuilt only when upgrading, with `scripts/vendor/build-whiteboard.sh`).
+- Group notebook ("Cuaderno del grupo") + group board pages: `public/group-notebook.js` / `.css` (same vendored editor as the class
+  document; the board pages live in `public/class-board.js`).
 
 ## Environment variables (Vercel → Settings → Environment Variables)
 
@@ -44,8 +46,10 @@ AI-powered didactic planning platform for teachers.
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for plans and the free
-trial (2026-10-21, see *Plans, free trial and sales*): run it again** — tested from git a4f00d3 with data, then twice; `002_live_class.sql`
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for the group notebook
+(2026-10-28, see *Group notebook*): run it again** — tested from git b0afe36 with data, then twice; `002_live_class.sql` did not
+change and still applies after it. Before that it changed for plans and the free
+trial (2026-10-21, see *Plans, free trial and sales*) — tested from git a4f00d3 with data, then twice; `002_live_class.sql`
 did not change and still applies after it. **The first run marks every existing institution as "Pilot"** (nothing stops working);
 set the ones that are not paying to "No plan" in *Platform*. Before that it changed for the class whiteboard
 (2026-10-21, see *Class whiteboard*) — tested from git 3c0ef7b with data, then twice; `002_live_class.sql` did not
@@ -353,7 +357,9 @@ email keeps the classes already linked.
 ## Class document (Documento de la clase)
 
 One shared document per calendar class, like a Google Doc: everyone in the class reads and types at the same time, the
-teacher can paste the class there, and it stays as a record afterwards.
+teacher can paste the class there, and it stays as a record afterwards. **Since 2026-10-28 a class of a GROUP uses the group
+notebook instead (see *Group notebook*)**: this per-class document is now used by one-off classes without a group, and the ones
+written before stay readable as the *previous document* of their class.
 - **Who:** the class's teacher and substitute (or whoever created a one-off class) and its students (group members and
   invited emails) read and edit live. Institution admins of that unit (and above) and the super admin: **read-only**
   (Groups → group card → *Classes & documents* → *Read document*). Nobody else (checked in the database on every read
@@ -404,7 +410,8 @@ teacher-only private note for the teacher guide was not built.
 ## Class whiteboard (Pizarra)
 
 One shared drawing board per calendar class (Excalidraw): everyone in the class draws at the same time, the teacher can lock
-it, and it stays as a record afterwards.
+it, and it stays as a record afterwards. Since 2026-10-28 the board of a class of a group is a **page of the group board** (a
+page selector inside the board; see *Group notebook*).
 - **Who:** the same people as the class document — the class's teacher and substitute (or whoever created a one-off class)
   and its students (group members and invited emails) draw live; institution admins of that unit (and above) and the super
   admin: **read-only** (Groups → group card → *Classes & documents* → *See board*, or the class detail). Nobody else (checked
@@ -459,6 +466,68 @@ last saved version wins; Excalidraw's own Spanish texts are from Spain (and a fe
 shared shape library isn't available; no offline drawing (unsent changes are retried while the page is open); a student who
 was already connected when the board was locked can't send drawings (the app stops, the database refuses them and the
 others' screens drop anything not stored), but the Realtime policy itself is checked when joining the channel.
+
+## Group notebook (Cuaderno del grupo) and group board (2026-10-28)
+
+**One shared notebook per group and school year**, with **one section per class** in date order ("Clase 12 · lun 3 mar"), and
+the **group board** with **one page per class**. The owner's words: *"each class should have its annual whiteboard, to record
+session by session, and both students and teachers can edit; the class generated with the AI can be copied into it."*
+- **School year:** the calendar year by default; an institution (or a unit below it) can set the month it starts in
+  *Dashboard → School year* (e.g. March = March to February; inherited by the units below unless they choose their own;
+  `set_school_year_start`). Computed in the group's time zone. Title: "Cuaderno · <group> · 2026" ("2026–27" when the year starts
+  after March).
+- **Sections:** created (idempotently: never two for the same class) for every class of the year that already started when the
+  notebook is opened, when a class's notebook is opened from the Calendar, when the class starts (entering the live room) and with
+  *Agregar sección de hoy* (today's class, or a section of the day when there is no class). The teacher can also add sections
+  without a class (from the generator). Each section has a stable id (`data-sec`) and the notebook opens on today's section
+  (or the class it was opened from). Cancelled classes get none. Sections are never deleted.
+- **Who:** teacher and substitute of the group and its students (members) write live (same engine as the class document:
+  TipTap 2 + Yjs, private Realtime channel `notebook:<id>` with pokes and cursors only, polling fallback); institution admins of the
+  unit (and above) and the super admin read only (Groups → group card → *Cuaderno*); View as is read-only. Nobody else
+  (checked in the database on every read and write). Names come from the database; no emails anywhere.
+- **Lock:** the teacher locks the whole notebook for students, or **only the past classes** (each section is its own Yjs
+  document, so the database refuses a student's change to a section of a class before today; today's and the next ones stay
+  open).
+- **History:** versions of the whole notebook (every 10 minutes while people write, *end of class* when the teacher ends the class
+  in the live room, manual, before a restore; max 20 / 64 MB); everyone can preview them, **only the teacher restores**.
+- **Size cap: 8 MB per notebook** (a year of text fits easily): a warning from 80 % ("El cuaderno está casi lleno (6,6 / 8 MB)…")
+  and a clear message at the cap (small changes such as deletions are still accepted up to 9 MB so people can make room; the
+  editors compact each section regularly).
+- **Navigation:** an outline of the classes (a "Go to" select on phones and in the live room) jumps to a section.
+- **Export:** the whole notebook or the current section — Print / PDF, HTML, Markdown.
+- **Where:** the live room's *Documento* tab opens the GROUP notebook on today's class; *Cuaderno* in the class detail (Calendar),
+  the group card (admins; *Classes & documents* also has it per class), and the student dashboard (each group chip and
+  *Notebooks and documents*). **One-off classes without a group keep their own class document** (*Class document* above).
+  Quick rooms from *Aula en vivo* have neither (a hint says: "Para tener cuaderno y pizarra, entrá desde una clase del Calendario.").
+- **Previous class documents** (per class, from before the notebook) are kept untouched and readable: the section of that class
+  links *Documento anterior de esta clase*, and the teacher can *Importar documento anterior a esta sección* (the original stays).
+- **Group board:** each page is the board of that class (`class_boards`, so the boards that already existed are those pages, with
+  their drawings, 2 MB cap and versions per page); a page selector (‹ / select / › / *Hoy*) inside the board; the live room's
+  *Pizarra* tab opens it on today's page. Same people and read-only rules as the notebook.
+- **From the generator:** *Enviar al cuaderno del grupo* (after a class is generated and in a saved class) → group (the teacher's
+  groups), class (the next / current one by default; or a new section without a class), what to send (**student handout without
+  answers**, by default — inserted as rich text with headings, lists and tables, through the same conversion and answer filter as
+  *Pegar una clase*; or the **teacher guide**, which is only stored as a **teacher-only note** in that section, never in the shared
+  notebook) and optionally *attach this plan to the class*; then *Abrir cuaderno*. *Pegar una clase* inside the notebook pastes into
+  the section with the cursor (or today's).
+
+**Database (`001_base.sql`, block `══ BEGIN GROUP NOTEBOOK ══`; no direct table access).** `institutions.school_year_start_month`;
+tables `group_notebooks` (group + school year, generation, lock / lock_past, bytes), `group_notebook_sections` (class or free
+section; its Yjs photo), `group_notebook_updates`, `group_notebook_versions` + `group_notebook_version_parts`,
+`group_notebook_presence`, `group_notebook_notes` (teacher-only). Functions: `notebook_resolve` / `notebook_find` (read-only, View as),
+`notebook_open`, `notebook_push`, `notebook_pull`, `notebook_snapshot`, `notebook_set_lock`, `notebook_add_section`, `notebook_versions`,
+`notebook_version`, `notebook_add_version`, `notebook_restore`, `notebook_add_note`, `notebook_notes`, `notebook_delete_note`,
+`notebook_targets`, `groupboard_pages`, `set_school_year_start`, `school_year_start`; Realtime policies `tc_notebook_listen` /
+`tc_notebook_send` on `realtime.messages`.
+**Supabase dashboard steps (Ignacio):** run the new `001_base.sql` and check Database → Policies → `realtime.messages` lists
+`tc_notebook_listen` and `tc_notebook_send`. Nothing else (no new environment variable; still 10 Vercel functions).
+
+**Limitations (group notebook).** The board keeps its lock per page (the notebook's lock does not lock the board); a restore
+of the notebook replaces all its sections (sections created after that version become empty; the "before restore" version keeps
+them); the "past classes" lock uses the class date in the group's time zone (a class edited to another day moves with it); a student
+added to a group later sees the whole year's notebook; teacher notes are plain formatted text (not editable in place; delete and send
+again); the generator's handout is the text of the handout tab (the same filter removes answers again); everything else as in the
+class document (no images, no offline editing, cursors live only with Realtime).
 
 ## Attendance (Asistencia)
 
@@ -582,6 +651,8 @@ Findings TC-xx (technical audit) and P-xx (product audit). Summary of the behavi
 - [ ] Supabase Auth: Site URL + Redirect URLs (prod, preview, `/org/*`, `/?reset=1`), **Confirm email ON**, own SMTP
       (e.g. Resend with @teroclass.com), minimum password length 8, Bot and Abuse Protection → Turnstile with the secret
       key — TC-05 / TC-18. Realtime: turn off "Allow public access".
+- [ ] Group notebook (2026-10-28): run the new `001_base.sql`; check `tc_notebook_listen` / `tc_notebook_send` on
+      `realtime.messages`; optionally set the month the school year starts in *Dashboard → School year* (e.g. March).
 - [ ] Class whiteboard (2026-10-21): run the new `001_base.sql` and check that Database → Policies → `realtime.messages` lists
       `tc_classboard_listen` and `tc_classboard_send` (see *Class whiteboard*). No new environment variable.
 - [ ] **Azure budget alerts** (TC-01): Azure portal → Cost Management → Budgets → *Add*: monthly budget for the
@@ -623,7 +694,7 @@ Findings TC-xx (technical audit) and P-xx (product audit). Summary of the behavi
 `tests/e2e-mock.cjs`, `tests/e2e-qa-fixes.cjs`, `tests/e2e-hierarchy.cjs`, `tests/e2e-billing.cjs`, `tests/e2e-viewas.cjs`, `tests/e2e-nav-insights.cjs` (switcher, sidebar, Metrics), `tests/e2e-students-calendar.cjs` (groups, CSV import, calendar, student magic link, View as Student, mobile), `tests/e2e-csv-schedule.cjs` (CSV with schedules, pending teachers, enter the room), `tests/e2e-insights.cjs` (class insights per role, demo generation, reflection, publish a message, student privacy, admin subtree, View as, mobile, Métricas), `tests/e2e-classdoc.cjs` (two browsers editing the same class document through a simulated Realtime broadcast, lock, paste a class without answers, admin read-only, live room tab, polling fallback, history/restore, export, mobile), `tests/e2e-classboard.cjs` (class whiteboard: two browsers drawing on the same board through the simulated Realtime channel, lock, broadcasts never stored, admin read-only, live room tab + full screen, polling fallback, history/restore, PNG/SVG export, images refused, phone with touch drawing; `SHOTS=<dir>` saves `wb-*.png`) `tests/e2e-attendance.cjs` (join → present for the teacher, corrections, admin group report + CSV, student summary, mobile) and `tests/e2e-consent.cjs` (one checkbox asked once, decline + required justification → admin Consentimientos + badge + CSV, profile revoke / turn on, minor + guardian, auto-recording + pause, View as, Métricas, mobile; `SHOTS=<dir>` saves `cons-*.png`) run the app in a headless browser
 against a simulated Supabase (`NODE_PATH=/opt/npm-tools/node_modules node tests/<file>`).
 Pre-launch fixes: `tests/e2e-launch-fixes.cjs`, `tests/e2e-sprint-fixes.cjs` (`SHOTS=<dir>` saves `fix-*.png`) and
-`tests/e2e-csp.cjs` (the app under the real `vercel.json` headers / CSP); `tests/api-launch.test.mjs` and
+`tests/e2e-csp.cjs` (the app under the real `vercel.json` headers / CSP; also opens the group notebook and the board page selector); `tests/api-launch.test.mjs` and
 `tests/sql/launch_fixes.sql` (also run after an upgrade from git 203e2e1 with data).
 Plans and free trial (2026-10-21): `tests/e2e-plans.cjs` (trial pop-up at the 2nd class, reminder at the 4th, hard block at the 6th
 with the plans pop-up — also when the server refuses it —, watermark, active-plan teachers / super admin / students never see it,
@@ -634,6 +705,14 @@ key, model accepted only from the super admin, mini deployment + fallback, sales
 and `tests/sql/plans.sql` (get_plans, trial counting with the user token, in-flight and failed classes, follow-ups, active plans,
 Docente plan, model override, update_plans validation, sales_leads and model_comparisons privacy + rate limits, funnel; also after
 an upgrade from git a4f00d3 with data). `tests/e2e-csp.cjs` opens the plans pop-up and /planes under the real headers.
+Group notebook (2026-10-28): `tests/e2e-notebook.cjs` (teacher + student in the same section live, outline jump, "Agregar sección
+de hoy" idempotent, generator → *Enviar al cuaderno* (handout without answers in the right section, teacher guide only as a teacher
+note, plan attached, new section), *Pegar una clase* into the current section, previous documents linked + imported, past-classes lock,
+live room tabs on today's section / page, board page selector, admin read-only, history + restore, export, quick-room hint, Dashboard
+school year, mobile; `SHOTS=<dir>` saves `nb-*.png`) and `tests/sql/notebook.sql` (access matrix, sections idempotent, school-year
+boundaries, lock, 8 MB cap, versions / restore permission, teacher notes, Realtime policies, board pages, legacy documents and boards;
+also after an upgrade from git b0afe36 with data). The class-document suites now use a one-off class (a class of a group opens the
+notebook).
 
 `tests/sql/run.sh` runs the database security suites (base guarantees, hierarchy permissions, plan & usage, insights, students & calendar privacy, and the upgrade path from the previous `001`) on a local
 Postgres 16: `PGHOST=… PGPORT=… PGUSER=postgres tests/sql/run.sh` (includes `csv_schedule.sql`, `class_insights.sql`,

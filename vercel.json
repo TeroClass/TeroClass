@@ -70,6 +70,14 @@
       "destination": "/class-board.css"
     },
     {
+      "source": "/group-notebook.js",
+      "destination": "/group-notebook.js"
+    },
+    {
+      "source": "/group-notebook.css",
+      "destination": "/group-notebook.css"
+    },
+    {
       "source": "/attendance.js",
       "destination": "/attendance.js"
     },
