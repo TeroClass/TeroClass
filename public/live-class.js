@@ -117,6 +117,8 @@ Cierre y ticket de salida (5 min)
     async disconnect() {}
     async setMicrophoneEnabled() {}
     async setCameraEnabled() {}
+    async publishMic() {}
+    async startAudio() {}
     async startScreenShare() {}
     async stopScreenShare() {}
     async sendChat() {}
@@ -243,7 +245,11 @@ Cierre y ticket de salida (5 min)
         .on(E.ParticipantDisconnected, sync)
         .on(E.TrackSubscribed, (track) => {
           // remote voices must be attached to an <audio> element to be heard
-          if (track.kind === 'audio') { const el = track.attach(); el.className = 'lc-remote-audio'; el.hidden = true; document.body.appendChild(el); }
+          if (track.kind === 'audio') {
+            const el = track.attach(); el.className = 'lc-remote-audio'; el.hidden = true; document.body.appendChild(el);
+            // 2026-10-29: browsers (Safari above all) can block sound that starts without a click → ask for one click
+            try { const pr = el.play && el.play(); if (pr && pr.catch) pr.catch(() => this.emit('audioblocked', true)); } catch (e) { /* ignore */ }
+          }
           sync();
         })
         .on(E.TrackUnsubscribed, (track) => { try { track.detach().forEach(el => { el.srcObject = null; if (el.classList.contains('lc-remote-audio')) el.remove(); }); } catch (e) { /* ignore */ } sync(); })
@@ -252,8 +258,10 @@ Cierre y ticket de salida (5 min)
         .on(E.ParticipantMetadataChanged, sync)
         .on(E.ActiveSpeakersChanged, (speakers) => this.emit('speaking', new Set(speakers.map(s => this._id(s)))))
         .on(E.DataReceived, (payload, participant) => this._onData(payload, participant))
+        .on(E.AudioPlaybackStatusChanged, () => this.emit('audioblocked', !room.canPlaybackAudio))
         .on(E.Disconnected, () => this.emit('disconnected'));
       await room.connect(j.url, j.token);
+      if (!room.canPlaybackAudio) this.emit('audioblocked', true);
       const lp = room.localParticipant;
       const [a] = o.localStream ? o.localStream.getAudioTracks() : [];
       const [v] = o.localStream ? o.localStream.getVideoTracks() : [];
@@ -310,6 +318,13 @@ Cierre y ticket de salida (5 min)
       if (m.type === 'rec' && ['on', 'paused', 'off'].includes(m.state) && this._meta(participant || {}).role === 'teacher') this.emit('recording', m.state);
     }
     async setMicrophoneEnabled(on) { await this.room.localParticipant.setMicrophoneEnabled(on); this._sync(); }
+    // a microphone allowed after joining (it was blocked or missing in the lobby)
+    async publishMic(track) { await this.room.localParticipant.publishTrack(track, { source: this.LK.Track.Source.Microphone }); this._sync(); }
+    async startAudio() {
+      try { await this.room.startAudio(); } catch (e) { /* ignore */ }
+      document.querySelectorAll('audio.lc-remote-audio').forEach(el => { try { const pr = el.play(); if (pr && pr.catch) pr.catch(() => {}); } catch (e) { /* ignore */ } });
+      this.emit('audioblocked', !this.room.canPlaybackAudio);
+    }
     async setCameraEnabled(on) { await this.room.localParticipant.setCameraEnabled(on); this._sync(); }
     async startScreenShare(stream) {
       const [t] = stream ? stream.getVideoTracks() : [];
@@ -941,6 +956,7 @@ Cierre y ticket de salida (5 min)
       fresh.forEach(x => toast('🖥️ ' + x.name + ' — ' + tr('is sharing their screen')));
       renderGrid();
     });
+    p.on('audioblocked', blocked => { R.audioBlocked = !!blocked; if (S.room === R) showAudioUnlock(R); });
     p.on('disconnected', () => { if (S.room === R && S.view === 'room') { toast('You were disconnected.', 'err'); } });
   }
 
@@ -1199,8 +1215,39 @@ Cierre y ticket de salida (5 min)
     updateRoomUi();
   }
 
+  // 2026-10-29: "I can't hear the student" → a big button when the browser blocked the sound
+  function showAudioUnlock(R) {
+    let b = document.getElementById('lc-audio-unlock');
+    if (!R.audioBlocked || S.room !== R) { if (b) b.remove(); return; }
+    if (b) return;
+    b = document.createElement('button');
+    b.type = 'button'; b.id = 'lc-audio-unlock'; b.className = 'lc-audio-unlock';
+    b.textContent = '🔊 ' + tr('Click here to hear the class');
+    b.addEventListener('click', async () => { await R.provider.startAudio(); R.audioBlocked = false; b.remove(); });
+    document.body.appendChild(b);
+  }
+  // the microphone was blocked or missing in the lobby → ask for it now instead of a dead button
+  async function enableMicLate(R) {
+    let s = null;
+    try { s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+    catch (e) {
+      toast(e && e.name === 'NotAllowedError'
+        ? 'Your browser is blocking the microphone. Click the lock next to the address, allow the microphone and join again.'
+        : mediaErrorText(e), 'err');
+      return;
+    }
+    if (S.room !== R) { stopStream(s); return; }
+    const [t] = s.getAudioTracks();
+    if (!R.stream) R.stream = new MediaStream();
+    R.stream.addTrack(t);
+    try { await R.provider.publishMic(t); R.mic = true; toast('Microphone on', 'ok'); } catch (e) { console.warn(e); toast('Could not turn on the microphone. Leave and join the class again.', 'err'); }
+    updateRoomUi(); updateTiles();
+  }
+
   async function toggleMic() {
-    const R = S.room; if (!R.stream?.getAudioTracks().length) return;
+    const R = S.room;
+    if (R.provider && R.provider.startAudio) R.provider.startAudio().catch(() => {});
+    if (!R.stream?.getAudioTracks().length) { await enableMicLate(R); return; }
     R.mic = !R.mic; R.stream.getAudioTracks().forEach(t => { t.enabled = R.mic; });
     try { await R.provider.setMicrophoneEnabled(R.mic); } catch (e) { console.warn(e); }
     updateRoomUi(); updateTiles();
@@ -1893,7 +1940,10 @@ Cierre y ticket de salida (5 min)
     'Planned': 'Planificado', 'Activities': 'Actividades', 'Sample plan — open a saved class to see yours here.': 'Plan de ejemplo: abrí una clase guardada para ver la tuya acá.',
     'Objectives and notes': 'Objetivos y notas', 'Whole class': 'Clase completa', 'Reset timer': 'Reiniciar temporizador', 'Details': 'Detalles',
     '▶ Start': '▶ Iniciar', '⏸ Pause': '⏸ Pausar', '▶ Resume': '▶ Reanudar', 'Next activity ⏭': 'Siguiente actividad ⏭',
-    'raised a hand': 'levantó la mano', 'Recording started': 'Grabación iniciada', 'participants consented': 'participantes dieron su consentimiento',
+    'raised a hand': 'levantó la mano', 'Click here to hear the class': 'Tocá acá para escuchar la clase',
+    'Your browser is blocking the microphone. Click the lock next to the address, allow the microphone and join again.': 'El navegador está bloqueando el micrófono. Tocá el candado al lado de la dirección, permití el micrófono y volvé a entrar.',
+    'Microphone on': 'Micrófono activado',
+    'Could not turn on the microphone. Leave and join the class again.': 'No se pudo activar el micrófono. Salí y volvé a entrar a la clase.', 'Recording started': 'Grabación iniciada', 'participants consented': 'participantes dieron su consentimiento',
     'Recording stopped': 'Grabación detenida', 'Recording paused': 'Grabación en pausa', 'Recording resumed': 'Grabación reanudada',
     'The teacher started recording. You are being recorded.': 'El/la docente empezó a grabar. Te están grabando.',
     'The teacher started recording. You are not being recorded.': 'El/la docente empezó a grabar. A vos no te graban.',

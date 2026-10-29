@@ -289,3 +289,30 @@ dialog.lc-dialog .lc-modal{max-width:none;box-shadow:0 18px 50px rgba(0,0,0,.3)}
 /* TC-23: no recorder connected → the indicator is neutral (never the red "recording" look) */
 .lc-rec[data-recorder="off"][data-state="on"]{background:#3a3a4a;color:#e4e4ee;box-shadow:none}
 .lc-rec[data-recorder="off"][data-state="on"] .lc-rec-dot{background:#9b9bb0;animation:none}
+
+/* 2026-10-29: lighter room (the black background was too heavy) + big tiles when there are few people */
+.lc-root[data-view="room"]{background:#eef0f5}
+.lc-room{color:#1f2330}
+.lc-room-top{border-bottom-color:#dde1ea;background:#fff}
+.lc-room-title .lc-chip:not(.lc-chip-demo){background:#eef0f5;color:#4a5163}
+.lc-rec{background:#eef0f5;color:#4a5163}
+.lc-talk,.lc-clock{color:#4a5163}
+.lc-talk b{color:#1f2330}
+.lc-controls{border-top-color:#dde1ea;background:#fff}
+.lc-ctl{background:#f3f4f8;color:#1f2330;border:1px solid #dde1ea}
+.lc-ctl:hover{background:#e6e9f0}
+.lc-ctl.off{background:#fde8e8;color:#991b1b;border-color:#f5b5b5}
+.lc-ctl.on{background:#ede7fb;color:#4c3a86;border-color:#d4c8f3}
+.lc-ctl.rec-paused{background:#fef3c7;color:#92400e;border-color:#fcd34d}
+.lc-ctl.lc-end{background:#dc2626;color:#fff;border-color:#dc2626}
+.lc-ctl.lc-end:hover{background:#b91c1c}
+.lc-side{border-left-color:#dde1ea}
+.lc-tile{background:#2b303c}
+.lc-stage{display:flex;align-items:center;justify-content:center}
+.lc-grid{width:100%;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));align-content:center}
+.lc-grid[data-count="1"]{max-width:min(100%,calc((100vh - 190px) * 1.6))}
+.lc-grid[data-count="2"]{max-width:min(100%,calc((100vh - 190px) * 3.2 + 10px));grid-template-columns:1fr 1fr}
+.lc-grid[data-count="3"],.lc-grid[data-count="4"]{max-width:min(100%,calc((100vh - 200px) * 1.6 + 10px));grid-template-columns:1fr 1fr}
+@media (max-width:760px){.lc-grid[data-count="2"]{grid-template-columns:1fr}}
+/* "Click here to hear the class" when the browser blocked the sound */
+.lc-audio-unlock{position:fixed;left:50%;top:72px;transform:translateX(-50%);z-index:1100;background:#16a34a;color:#fff;border:none;border-radius:999px;padding:12px 22px;font:700 15px 'Inter',sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.25);cursor:pointer;animation:lc-blink 1.6s ease-in-out 3}
