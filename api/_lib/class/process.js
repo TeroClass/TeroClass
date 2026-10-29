@@ -8,10 +8,13 @@
 // 501 {configured:false} while the pipeline is off (RECORDING_ENABLED + every key: see api/_lib/rec/env.js).
 import { getUser, bearer, SUPABASE_URL, SUPABASE_KEY } from '../livekit.js';
 import { recordingEnv, cronAuthorized } from '../rec/env.js';
-import { processSession, processAll, runRetention, deadline } from '../rec/pipeline.js';
+import { processSession, processAll, runRetention, deadline, kick, MAX_KICKS } from '../rec/pipeline.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-export const BUDGET_MS = 45000; // vercel.json gives api/class.js 60 s
+export const BUDGET_MS = 45000;      // the app's polling call (answers within a minute)
+export const CRON_BUDGET_MS = 230000; // the cron and the server's own "kick" calls (vercel.json gives api/class.js 300 s)
+export const KICK_WAIT_MS = 20000;    // pause before the next kick while a class is still processing
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // The class's recording state as the CALLER may see it (rec_session_status, with their own session): null = not allowed
 export async function sessionStatus(token, sessionId) {
@@ -33,11 +36,19 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     if (!cronAuthorized(req, env.cronSecret)) return res.status(401).json({ error: 'Unauthorized' });
     if (!env.configured) return res.status(200).json({ configured: false });
-    const dl = deadline(BUDGET_MS);
-    const retention = await runRetention(env, { dl: deadline(12000) });
+    const hopRaw = req.query?.hop; const hop = hopRaw === undefined ? null : parseInt(String(hopRaw), 10);
+    if (hop !== null && !(hop >= 0 && hop <= MAX_KICKS)) return res.status(400).json({ error: 'Invalid request.' });
+    const dl = deadline(CRON_BUDGET_MS);
+    const retention = hop === null ? await runRetention(env, { dl: deadline(12000) }) : null; // retention: only the daily cron
     const work = await processAll(env, { dl });
-    console.log('rec: cron', JSON.stringify({ retention, work }));
-    return res.status(200).json({ ok: true, retention, work });
+    // still processing (e.g. waiting for Azure) → wake up again in a moment, in a new invocation
+    let next = null;
+    if (work.states.includes('processing') && (hop ?? 0) < MAX_KICKS) {
+      await sleep(Math.min(KICK_WAIT_MS, Math.max(0, parseInt(process.env.RECORDING_KICK_WAIT_MS ?? '', 10) || KICK_WAIT_MS)));
+      next = (await kick(env, (hop ?? 0) + 1)) ? (hop ?? 0) + 1 : null;
+    }
+    console.log('rec: cron', JSON.stringify({ hop, retention, work, next }));
+    return res.status(200).json({ ok: true, hop, retention, work, next });
   }
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const token = bearer(req);

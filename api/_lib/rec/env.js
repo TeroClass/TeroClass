@@ -40,7 +40,16 @@ export function recordingEnv(env = process.env) {
     sessionTokenCap: Math.max(20000, parseInt(env.INSIGHTS_SESSION_TOKEN_CAP || '', 10) || 150000),
     // Spanish of the transcription when the class says only "Spanish": es-UY (Uruguay) unless RECORDING_SPANISH_LOCALE=es-ES
     spanishLocale: t('RECORDING_SPANISH_LOCALE') === 'es-ES' ? 'es-ES' : 'es-UY',
+    // FAST transcription (minutes instead of hours; falls back to batch). On unless RECORDING_FAST_TRANSCRIPTION=false
+    fast: !/^(0|false|no|off)$/i.test(t('RECORDING_FAST_TRANSCRIPTION')),
+    // where the server "wakes itself up" to keep processing after a class ends (GET /api/class/process with CRON_SECRET)
+    kickUrl: kickBase(env),
   };
+}
+export function kickBase(env = process.env) {
+  const t = k => String(env[k] || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  const host = t('RECORDING_KICK_HOST') || (t('VERCEL_ENV') === 'production' ? t('VERCEL_PROJECT_PRODUCTION_URL') : '') || t('VERCEL_URL');
+  return /^[A-Za-z0-9.-]+(:\d+)?$/.test(host) ? `https://${host}` : '';
 }
 export const recordingConfigured = (env = process.env) => recordingEnv(env).configured;
 

@@ -13,6 +13,7 @@ const AN = await import('../api/_lib/rec/analysis.js');
 const pipeline = await import('../api/_lib/rec/pipeline.js');
 const webhookMod = await import('../api/livekit/webhook.js');
 const classFn = (await import('../api/class.js')).default;
+const processMod = await import('../api/_lib/class/process.js');
 const health = (await import('../api/health.js')).default;
 const config = await import('../api/config.js');
 const lib = await import('../api/_lib/livekit.js');
@@ -31,7 +32,7 @@ const ENV = {
   AZURE_SPEECH_KEY: 'speech-key-123', AZURE_SPEECH_REGION: 'brazilsouth', CRON_SECRET: 'cron-secret-0123456789abcdef',
   SUPABASE_SERVICE_ROLE_KEY: 'service-role-key-for-tests', AZURE_OPENAI_ENDPOINT: 'https://tero-ai.openai.azure.com', AZURE_OPENAI_API_KEY: 'aoai-key',
 };
-const ALL_KEYS = [...Object.keys(ENV), 'INSIGHTS_SESSION_TOKEN_CAP', 'RECORDING_SPANISH_LOCALE', 'AZURE_OPENAI_DEPLOYMENT_MINI'];
+const ALL_KEYS = [...Object.keys(ENV), 'INSIGHTS_SESSION_TOKEN_CAP', 'RECORDING_SPANISH_LOCALE', 'AZURE_OPENAI_DEPLOYMENT_MINI', 'RECORDING_FAST_TRANSCRIPTION', 'RECORDING_KICK_HOST', 'VERCEL_URL', 'VERCEL_ENV', 'VERCEL_PROJECT_PRODUCTION_URL'];
 function setEnv(on, extra = {}) { for (const k of ALL_KEYS) delete process.env[k]; if (on) Object.assign(process.env, ENV, extra); }
 const SECRETS = [ENV.LIVEKIT_API_SECRET, ENV.AZURE_STORAGE_KEY, ENV.AZURE_SPEECH_KEY, ENV.CRON_SECRET, ENV.SUPABASE_SERVICE_ROLE_KEY, ENV.AZURE_OPENAI_API_KEY];
 const noSecrets = body => { const s = JSON.stringify(body); for (const k of SECRETS) assert.ok(!s.includes(k), 'leaked a secret'); };
@@ -563,12 +564,14 @@ test('process: the daily cron needs CRON_SECRET; the app only for people of that
   assert.equal(r.statusCode, 501);
 });
 
-test('vercel.json: /api/class/rec and /api/class/process go to the dispatcher; daily cron; 60 s for the pipeline', () => {
+test('vercel.json: /api/class/rec and /api/class/process go to the dispatcher; daily cron; 300 s for the pipeline', () => {
   const v = JSON.parse(readFileSync('vercel.json', 'utf8'));
   const find = p => v.rewrites.find(r => new RegExp('^' + r.source + '$').test(p));
   for (const a of ['rec', 'process', 'config', 'ticket', 'token']) assert.equal(find('/api/class/' + a).destination, '/api/class?action=$1');
   assert.deepEqual(v.crons, [{ path: '/api/class/process', schedule: '17 7 * * *' }], 'Hobby: at most once a day');
-  assert.equal(v.functions['api/class.js'].maxDuration, 60);
+  assert.equal(v.functions['api/class.js'].maxDuration, 300, 'Fluid compute (Hobby): up to 300 s');
+  assert.ok(processMod.CRON_BUDGET_MS + processMod.KICK_WAIT_MS + 15000 < 300000, 'a kick call fits in its 300 s');
+  assert.ok(pipeline.FAST_MIN_MS > processMod.BUDGET_MS, 'the app\'s polling call never starts a fast transcription');
   assert.ok(v.functions['api/livekit/webhook.js'].maxDuration <= 60);
   assert.ok(pipeline.MIN_AI_MS + 2500 < 45000, 'an AI step fits in one call');
   const csp = v.headers[0].headers.find(h => h.key === 'Content-Security-Policy').value;
@@ -585,4 +588,113 @@ test('LiveKit JSON helpers: enums as names or numbers, int64 nanoseconds, omitte
   const f = lkApi.egressFinal({ status: 'EGRESS_COMPLETE', file: { startedAt: '1761652800000000000', endedAt: '1761652860000000000' } });
   assert.equal(f.ok, true); assert.equal(f.durationS, 60); assert.equal(f.startedAt.toISOString(), '2025-10-28T12:00:00.000Z');
   assert.equal(lkApi.egressFinal({ status: 'EGRESS_ACTIVE' }).done, false);
+});
+
+// ── FAST transcription + the server waking itself up ──
+const BLOB = 'https://teroclassrec.blob.core.windows.net/recordings/';
+const fastJson = phrases => ({ durationMilliseconds: 60000, combinedPhrases: [{ text: phrases.map(p => p[2]).join(' ') }],
+  phrases: phrases.map(([o, d, text]) => ({ offsetMilliseconds: o, durationMilliseconds: d, text, confidence: 0.8, locale: 'en-US', words: text.split(' ').map(w => ({ text: w })) })) });
+const freshWork = (extra = {}) => rpc('rec_work', () => ({ json: [{ id: LIVE, status: 'processing', started_at: new Date(T0).toISOString(),
+  processing_started_at: new Date(Date.now() - 30000).toISOString(), class_language: 'English', ...extra,
+  recordings: [
+    { id: 'f1', status: 'uploaded', speech_status: null, storage_path: `${LIVE}/p1/f1.ogg`, started_at: new Date(T0 + 4000).toISOString(), created_at: new Date(T0).toISOString() },
+    { id: 'f2', status: 'uploaded', speech_status: null, storage_path: `${LIVE}/p2/f2.ogg`, started_at: new Date(T0).toISOString(), created_at: new Date(T0).toISOString() }] }] }));
+
+test('fast transcription: new recordings in parallel, under the class lock, no batch job; the transcript keeps the call offset', async () => {
+  setEnv(true);
+  const calls = mockNet([
+    freshWork(),
+    rpc('rec_claim_analysis', () => ({ json: true })), rpc('rec_release_analysis', () => ({ json: null })),
+    rpc('rec_store_transcript', () => ({ json: { ok: true } })),
+    [BLOB, () => new Response(Buffer.from('OggS-audio'), { status: 200 })],
+    [`${SPEECH}/speechtotext/transcriptions:transcribe`, () => ({ json: fastJson([[1000, 2000, 'Hello teacher'], [5000, 1000, 'Yes.']]) })],
+  ]);
+  const out = await quiet(() => pipeline.processSession(envMod.recordingEnv(), { live: LIVE, dl: pipeline.deadline(280000), analysis: false }));
+  assert.equal(out.step, 'analysis_pending'); assert.equal(out.transcribed, 2);
+  assert.equal(calls.filter(c => c.url.includes(':submit')).length, 0, 'no batch job');
+  const tr = calls.filter(c => c.url.includes(':transcribe'));
+  assert.equal(tr.length, 2);
+  assert.ok(tr.every(c => c.headers['Ocp-Apim-Subscription-Key'] === ENV.AZURE_SPEECH_KEY && /api-version=2024-11-15/.test(c.url)));
+  assert.deepEqual(JSON.parse(tr[0].body.get('definition')).locales, ['en-US']);
+  const blob = calls.filter(c => c.url.startsWith(BLOB));
+  assert.ok(blob.every(c => new URL(c.url).searchParams.get('sp') === 'r' && !c.headers['Ocp-Apim-Subscription-Key']), 'read-only SAS, no Speech key to storage');
+  const f1 = calls.rpc('rec_store_transcript').find(c => c.body.p_recording === 'f1');
+  assert.deepEqual(f1.body.p_segments, [{ start_ms: 5000, end_ms: 7000, text: 'Hello teacher', words: 2, confidence: 0.8 }, { start_ms: 9000, end_ms: 10000, text: 'Yes.', words: 1, confidence: 0.8 }]);
+  assert.equal(calls.rpc('rec_claim_analysis')[0].body.p_stale_s, pipeline.FAST_LOCK_S);
+  assert.equal(calls.rpc('rec_release_analysis').length, 1, 'lock released');
+  setEnv(false);
+});
+
+test('fast transcription fails → batch job in the same call; lock busy → nothing; RECORDING_FAST_TRANSCRIPTION=false → batch', async () => {
+  for (const [label, extra, routes, expect] of [
+    ['speech 500', {}, [rpc('rec_claim_analysis', () => ({ json: true })), [`${SPEECH}/speechtotext/transcriptions:transcribe`, () => ({ status: 500, json: {} })]], { submit: 2, transcribe: 2 }],
+    ['lock busy', {}, [rpc('rec_claim_analysis', () => ({ json: false }))], { submit: 0, transcribe: 0 }],
+    ['fast off', { RECORDING_FAST_TRANSCRIPTION: 'false' }, [], { submit: 2, transcribe: 0 }],
+  ]) {
+    setEnv(true, extra);
+    const calls = mockNet([freshWork(), rpc('rec_release_analysis', () => ({ json: null })), rpc('rec_speech_submitted', () => ({ json: true })),
+      [BLOB, () => new Response(Buffer.from('OggS'), { status: 200 })],
+      [`${SPEECH}/speechtotext/transcriptions:submit`, () => ({ status: 201, json: { self: `${SPEECH}/speechtotext/transcriptions/j?api-version=2024-11-15` } })], ...routes]);
+    await quiet(() => pipeline.processSession(envMod.recordingEnv(), { live: LIVE, dl: pipeline.deadline(280000), analysis: false }));
+    assert.equal(calls.filter(c => c.url.includes(':submit')).length, expect.submit, label + ': batch jobs');
+    assert.equal(calls.filter(c => c.url.includes(':transcribe')).length, expect.transcribe, label + ': fast calls');
+  }
+  setEnv(false);
+});
+
+test('short calls leave new recordings to the long "kick" call (5 min), then fall back to batch', async () => {
+  for (const [label, extra, startedAgo, submit] of [
+    ['no kick URL (old behaviour)', {}, 30000, 2], ['kick URL, new class', { VERCEL_URL: 'teroclass-abc.vercel.app' }, 30000, 0],
+    ['kick URL, waiting > 5 min', { VERCEL_URL: 'teroclass-abc.vercel.app' }, 6 * 60000, 2]]) {
+    setEnv(true); Object.assign(process.env, extra);
+    const calls = mockNet([freshWork({ processing_started_at: new Date(Date.now() - startedAgo).toISOString() }), rpc('rec_speech_submitted', () => ({ json: true })),
+      [`${SPEECH}/speechtotext/transcriptions:submit`, () => ({ status: 201, json: { self: `${SPEECH}/speechtotext/transcriptions/j?api-version=2024-11-15` } })]]);
+    await quiet(() => pipeline.processSession(envMod.recordingEnv(), { live: LIVE, dl: pipeline.deadline(8000), analysis: false }));
+    assert.equal(calls.filter(c => c.url.includes(':submit')).length, submit, label);
+    assert.equal(calls.filter(c => c.url.includes(':transcribe')).length, 0, label + ': never fast in a short call');
+    delete process.env.VERCEL_URL;
+  }
+  setEnv(false);
+});
+
+test('kick: room_finished wakes the server up (production domain, CRON_SECRET); the cron call chains itself while processing', async () => {
+  assert.equal(envMod.kickBase({ VERCEL_ENV: 'production', VERCEL_PROJECT_PRODUCTION_URL: 'teroclass.com', VERCEL_URL: 'x.vercel.app' }), 'https://teroclass.com');
+  assert.equal(envMod.kickBase({ VERCEL_ENV: 'preview', VERCEL_PROJECT_PRODUCTION_URL: 'teroclass.com', VERCEL_URL: 'x.vercel.app' }), 'https://x.vercel.app');
+  assert.equal(envMod.kickBase({ VERCEL_URL: 'evil.com/path?x' }), '');
+  assert.equal(envMod.kickBase({}), '');
+  setEnv(true, { RECORDING_KICK_HOST: 'teroclass.com' });
+  let calls = mockNet([
+    rpc('rec_room_finished', () => ({ json: { ok: true, status: 'processing', live_session_id: LIVE } })), freshWork(),
+    ['https://teroclass.com/api/class/process', () => ({ json: { ok: true } })]]);
+  let r = res(); await quiet(() => webhookMod.default(hook({ event: 'room_finished', room: { name: ROOM } }), r));
+  assert.equal(r.statusCode, 200);
+  const k = calls.filter(c => c.url.startsWith('https://teroclass.com/'));
+  assert.equal(k.length, 1); assert.equal(k[0].url, 'https://teroclass.com/api/class/process?hop=0');
+  assert.equal(k[0].headers.Authorization, 'Bearer ' + ENV.CRON_SECRET);
+  assert.equal(calls.filter(c => c.url.includes(':submit') || c.url.includes(':transcribe')).length, 0, 'the webhook leaves it to the long call');
+  // the kicked call: still processing → next hop; ready → stops; bad hop → 400; daily cron (no hop) runs retention
+  process.env.RECORDING_KICK_WAIT_MS = '1';
+  const get = async (q, state) => {
+    calls = mockNet([rpc('rec_work', () => ({ json: state ? [{ id: LIVE, status: state, started_at: new Date(T0).toISOString(),
+        recordings: [{ id: 'w1', status: 'uploaded', speech_status: 'submitted', speech_job: `${SPEECH}/speechtotext/transcriptions/W`, started_at: new Date(T0).toISOString() }] }] : [] })),
+      [`${SPEECH}/speechtotext/transcriptions/W`, () => ({ json: { status: 'Running' } })],
+      rpc('recordings_due_for_deletion', () => ({ json: [] })), ['https://teroclass.com/api/class/process', () => ({ json: { ok: true } })]]);
+    const rr = res(); await quiet(() => classFn({ method: 'GET', query: { action: 'process', ...q }, headers: { authorization: 'Bearer ' + ENV.CRON_SECRET } }, rr));
+    return rr;
+  };
+  r = await get({ hop: '3' }, 'processing');
+  assert.equal(r.statusCode, 200); assert.equal(r.body.next, 4); assert.equal(r.body.retention, null);
+  assert.equal(calls.filter(c => c.url === 'https://teroclass.com/api/class/process?hop=4').length, 1);
+  r = await get({ hop: String(pipeline.MAX_KICKS) }, 'processing'); assert.equal(r.body.next, null, 'stops after MAX_KICKS');
+  r = await get({ hop: '2' }, null); assert.equal(r.body.next, null, 'nothing processing: no more kicks');
+  r = await get({ hop: '-1' }, null); assert.equal(r.statusCode, 400);
+  r = await get({}, null); assert.ok(r.body.retention, 'daily cron: retention'); assert.equal(r.body.hop, null);
+  delete process.env.RECORDING_KICK_WAIT_MS;
+  setEnv(false);
+});
+
+test('fast transcript parser: phrases → segments, junk ignored', () => {
+  assert.deepEqual(az.parseFastTranscript({ phrases: [{ offsetMilliseconds: 2000, durationMilliseconds: 500, text: ' Hi  there ' }, { text: 'no offset' }, { offsetMilliseconds: 10, text: '' }, null] }, 1000),
+    [{ start_ms: 3000, end_ms: 3500, text: 'Hi there', words: 2 }]);
+  assert.deepEqual(az.parseFastTranscript(null), []);
 });

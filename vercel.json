@@ -144,7 +144,7 @@
       "maxDuration": 10
     },
     "api/class.js": {
-      "maxDuration": 60
+      "maxDuration": 300
     },
     "api/notify.js": {
       "maxDuration": 30

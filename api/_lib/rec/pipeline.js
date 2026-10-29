@@ -13,6 +13,13 @@ import * as AN from './analysis.js';
 export const MIN_AI_MS = 22000;          // an AI step starts only with at least this much time left
 export const MAX_ANALYSIS_ATTEMPTS = 40; // process calls that claimed the analysis of one class (each does one or more steps)
 const SAS_TTL_S = 6 * 3600;              // Speech may start a job some time after it is created
+// FAST transcription (the audio goes up, the transcript comes back in the same call: ~1 min for a class instead of hours).
+// Only calls with enough time try it (the "kick" calls below, 300 s); if it fails or times out → batch job, as before.
+export const FAST_MIN_MS = 60000;          // a call needs at least this much time left to try the fast transcription
+export const FAST_LOCK_S = 300;            // one fast attempt per class at a time (rec_claim_analysis as the lock)
+export const FAST_GRACE_MS = 5 * 60000;    // short calls leave new recordings to a long call for this long, then use batch
+export const FAST_MAX_S = 2 * 3600;        // Speech fast transcription: audio under 2 hours
+export const MAX_KICKS = 60;               // self-calls in a row while a class is still processing (then the app / daily cron)
 
 export const deadline = ms => { const end = Date.now() + ms; return { left: () => end - Date.now(), end }; };
 const log = (...a) => console.log('rec:', ...a);
@@ -30,6 +37,17 @@ export async function svc(fn, body, { timeoutMs = 8000, query = '' } = {}) {
     return { ok: r.ok, status: r.status, data };
   } catch (e) { warn(`${fn} failed (${e?.name === 'AbortError' ? 'timeout' : 'network'})`); return { ok: false, status: 0, data: null }; }
   finally { clearTimeout(timer); }
+}
+
+// The server "wakes itself up": GET /api/class/process?hop=n with CRON_SECRET in a NEW invocation (300 s), so a class is
+// processed right after it ends without anyone having the page open. Fire-and-forget: the request is sent, we don't wait.
+export async function kick(env, hop = 0) {
+  if (!env.kickUrl || !env.cronSecret || !(hop >= 0 && hop <= MAX_KICKS)) return false;
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 2500);
+  try { await fetch(`${env.kickUrl}/api/class/process?hop=${hop}`, { headers: { Authorization: `Bearer ${env.cronSecret}` }, signal: controller.signal }); }
+  catch { /* aborted on purpose (the other invocation keeps running) or unreachable */ }
+  finally { clearTimeout(timer); }
+  return true;
 }
 
 const isCalendarRoom = room => /^sess-[0-9a-f]{32}$/.test(String(room || ''));
@@ -102,7 +120,10 @@ export async function onRoomFinished(env, event, budgetMs = 8000) {
   const room = event?.room?.name; if (!isCalendarRoom(room)) return { ok: true, skipped: 'room' };
   const r = await svc('rec_room_finished', { p_room: room });
   if (!r.ok) return { ok: false, retry: true };
-  if (r.data?.status === 'processing') await processSession(env, { live: r.data.live_session_id, dl: deadline(budgetMs), analysis: false });
+  if (r.data?.status === 'processing') {
+    await kick(env);
+    await processSession(env, { live: r.data.live_session_id, dl: deadline(budgetMs), analysis: false });
+  }
   return { ok: true, status: r.data?.status };
 }
 
@@ -117,6 +138,7 @@ export async function setRecState(env, room, state, budgetMs = 15000) {
     // end of class: close the room for everyone (LiveKit sends room_finished too; both paths are idempotent)
     await LK.deleteRoom(env.livekit, room, 5000);
     const fin = await svc('rec_room_finished', { p_room: room });
+    if (fin.data?.status === 'processing') await kick(env);
     if (fin.data?.status === 'processing') await processSession(env, { live: fin.data.live_session_id, dl: deadline(Math.min(budgetMs, 8000)), analysis: false });
     return { ok: true, state, stopped: stop.length, status: fin.data?.status || null };
   }
@@ -186,6 +208,40 @@ async function stepRecording(env, s, rec, base, locale, dl) {
   }
 }
 
+// New recordings (uploaded, no Speech job yet) → fast transcription, all of them in parallel, under the class lock.
+// Returns the ids the batch step must leave alone in THIS call (another call is transcribing them, or a long call will).
+async function fastStep(env, s, recs, base, locale, dl) {
+  const skip = new Set();
+  if (!env.fast) return skip;
+  const fresh = recs.filter(r => r.status === 'uploaded' && !r.speech_status && r.storage_path && !(Number(r.duration_s) > FAST_MAX_S));
+  if (!fresh.length) return skip;
+  const age = Date.now() - (Date.parse(s.processing_started_at) || 0);
+  if (dl.left() < FAST_MIN_MS) {
+    if (env.kickUrl && age < FAST_GRACE_MS) fresh.forEach(r => skip.add(r.id));
+    return skip;
+  }
+  const claim = await svc('rec_claim_analysis', { p_live: s.id, p_stale_s: FAST_LOCK_S });
+  if (!claim.ok || claim.data !== true) { fresh.forEach(r => skip.add(r.id)); return skip; }
+  try {
+    await Promise.all(fresh.map(r => fastRecording(env, r, base, locale, dl).catch(e => { warn('fast transcription error', e?.message || e); return false; })));
+  } finally { await svc('rec_release_analysis', { p_live: s.id }); }
+  return skip;
+}
+async function fastRecording(env, rec, base, locale, dl) {
+  const d = await AZ.downloadBlob(env.storage, rec.storage_path, Math.min(30000, dl.left() - 25000));
+  if (!d.ok) { warn('fast: audio download failed', d.status, d.error || ''); return false; }
+  const t0 = Date.now();
+  const f = await AZ.fastTranscribe(env.speech, { audio: d.buf, filename: String(rec.storage_path).split('/').pop(), locale }, dl.left() - 12000);
+  if (!f.ok) { warn('fast transcription failed', f.status, f.data?.error?.code || f.data?.code || f.data?.error || ''); return false; }
+  const offset = Math.max(0, (Date.parse(rec.started_at) || base) - base);
+  const segs = AZ.parseFastTranscript(f.data, offset);
+  const st = await svc('rec_store_transcript', { p_recording: rec.id, p_segments: segs }, { timeoutMs: 15000 });
+  if (!st.ok) return false;
+  rec.status = 'transcribed';
+  log('fast transcription', rec.id, JSON.stringify({ segments: segs.length, mb: +(d.buf.length / 1048576).toFixed(1), s: Math.round((Date.now() - t0) / 1000) }));
+  return true;
+}
+
 const DONE = new Set(['transcribed', 'failed', 'deleted', 'gone']);
 function counts(s) {
   const r = s.recordings.filter(x => x.status !== 'gone');
@@ -203,8 +259,10 @@ export async function processSession(env, { live = null, cls = null, dl = deadli
   const starts = recs.map(r => Date.parse(r.started_at)).filter(Number.isFinite);
   const base = Date.parse(s.started_at) || (starts.length ? Math.min(...starts) : Date.now());
   const locale = speechLocale([s.class_language, s.plan_language], env);
+  const skip = await fastStep(env, s, recs, base, locale, dl);
   for (const rec of recs) {
     if (dl.left() < 4000) break;
+    if (skip.has(rec.id)) continue;
     try { await stepRecording(env, s, rec, base, locale, dl); } catch (e) { warn('recording step failed', e?.message || e); }
   }
   const c = counts(s);

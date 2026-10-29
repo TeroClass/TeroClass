@@ -85,6 +85,44 @@ export async function deleteTranscription(sp, job, timeoutMs = 5000) {
   return call(withVersion(job, sp.apiVersion), { method: 'DELETE', headers: { 'Ocp-Apim-Subscription-Key': sp.key } }, timeoutMs);
 }
 
+// ── Speech FAST transcription (synchronous: the audio goes up, the transcript comes back in the same call) ──
+// Download one blob with a short read-only SAS → { ok, status, buf }
+export async function downloadBlob(st, path, timeoutMs = 30000) {
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), Math.max(500, timeoutMs));
+  try {
+    const r = await fetch(blobSasUrl(st, path, { perm: 'r', ttlS: 900 }), { headers: { 'x-ms-version': SAS_VERSION }, signal: controller.signal });
+    if (!r.ok) return { ok: false, status: r.status };
+    return { ok: true, status: r.status, buf: Buffer.from(await r.arrayBuffer()) };
+  } catch (e) { return { ok: false, status: 0, error: e?.name === 'AbortError' ? 'timeout' : 'network' }; }
+  finally { clearTimeout(timer); }
+}
+const audioType = name => (/\.ogg$/i.test(name) ? 'audio/ogg' : /\.webm$/i.test(name) ? 'audio/webm' : /\.mp4$|\.m4a$/i.test(name) ? 'audio/mp4' : 'application/octet-stream');
+// → { ok, status, data } (data = { durationMilliseconds, phrases: [...] })
+export async function fastTranscribe(sp, { audio, filename = 'audio.ogg', locale }, timeoutMs = 60000) {
+  const fd = new FormData();
+  fd.append('audio', new Blob([audio], { type: audioType(filename) }), filename);
+  fd.append('definition', JSON.stringify({ locales: [locale], profanityFilterMode: 'None' }));
+  return call(`https://${speechHost(sp)}/speechtotext/transcriptions:transcribe?api-version=${encodeURIComponent(sp.apiVersion)}`, {
+    method: 'POST', headers: { 'Ocp-Apim-Subscription-Key': sp.key }, body: fd,
+  }, timeoutMs);
+}
+// Fast transcription JSON → the same segments as parseTranscript (ms from the start of the CALL: + offsetMs)
+export function parseFastTranscript(json, offsetMs = 0) {
+  const off = Math.max(0, Math.round(Number(offsetMs) || 0));
+  const out = [];
+  for (const p of Array.isArray(json?.phrases) ? json.phrases : []) {
+    const text = String(p?.text || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+    if (!text) continue;
+    const start = Number(p.offsetMilliseconds); const dur = Number(p.durationMilliseconds);
+    if (!Number.isFinite(start) || start < 0) continue;
+    const words = Array.isArray(p.words) && p.words.length ? p.words.length : text.split(/\s+/).filter(w => /[\p{L}\p{N}]/u.test(w)).length;
+    const conf = Number(p.confidence);
+    out.push({ start_ms: off + Math.round(start), end_ms: off + Math.round(start) + Math.max(0, Math.round(dur) || 0), text, words,
+      ...(Number.isFinite(conf) ? { confidence: Math.min(1, Math.max(0, conf)) } : {}) });
+  }
+  return out.sort((a, b) => a.start_ms - b.start_ms);
+}
+
 // "PT1M2.5S" → ms
 export function isoDurationMs(s) {
   const m = /^P(?:(\d+(?:\.\d+)?)D)?T?(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?$/.exec(String(s || ''));
