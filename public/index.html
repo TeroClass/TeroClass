@@ -280,6 +280,41 @@ button.home-action-card{font:inherit;text-align:left;border:1px solid var(--bord
 .status-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;margin-right:5px}
 
 /* ── BRANDING WIZARD ── */
+/* Branding → Classroom: the live-room background (color / image / default) with a small live preview */
+.rbg-options{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px}
+.rbg-opt{display:flex;align-items:center;gap:10px;padding:10px;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;transition:border-color .15s,background .15s;position:relative}
+.rbg-opt[hidden]{display:none}
+.rbg-opt:hover{border-color:var(--teal)}
+.rbg-opt:has(input:checked){border-color:var(--teal);background:#e6f7f7}
+.rbg-opt:has(input:focus-visible){outline:2px solid var(--teal);outline-offset:2px}
+.rbg-opt input{position:absolute;opacity:0;pointer-events:none}
+.rbg-sw{width:38px;height:28px;border-radius:7px;flex-shrink:0;border:1px solid rgba(0,0,0,.08);background:#eef0f5 center/cover no-repeat}
+.rbg-sw-image:not([style*="url"]){background:linear-gradient(135deg,#c7d2fe,#99f6e4)}
+.rbg-txt{display:flex;flex-direction:column;min-width:0}
+.rbg-txt b{font-size:12.5px;color:var(--ink);font-weight:600}
+.rbg-txt small{font-size:10.5px;color:var(--ink-muted);line-height:1.35;margin-top:1px}
+.rbg-presets{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.rbg-preset{width:26px;height:26px;border-radius:7px;border:1.5px solid rgba(0,0,0,.1);cursor:pointer;padding:0}
+.rbg-preset[aria-pressed="true"]{box-shadow:0 0 0 2px var(--white),0 0 0 4px var(--teal)}
+.rbg-preview-wrap{margin:4px 0 8px}
+.rbg-preview{border:1px solid var(--border);border-radius:12px;overflow:hidden;background:#fff;box-shadow:0 6px 20px rgba(16,24,40,.08);max-width:440px}
+.rbg-pv-top,.rbg-pv-ctrls{height:22px;background:#fff;display:flex;align-items:center;gap:6px;padding:0 10px}
+.rbg-pv-top{border-bottom:1px solid #e6e8ef}
+.rbg-pv-dot{width:8px;height:8px;border-radius:50%;background:var(--brand-primary,#7c5cbf)}
+.rbg-pv-bar{width:90px;height:6px;border-radius:4px;background:#e6e8ef}
+.rbg-pv-rec{margin-left:auto;width:46px;height:10px;border-radius:999px;background:#fde8e8}
+.rbg-pv-ctrls{justify-content:center;border-top:1px solid #e6e8ef;height:26px}
+.rbg-pv-ctrls span{width:22px;height:12px;border-radius:4px;background:#eef0f5}
+.rbg-pv-ctrls span.end{background:#fca5a5}
+.rbg-pv-stage{position:relative;aspect-ratio:16/8.4;padding:9px;background:#eef0f5 center/cover no-repeat}
+.rbg-pv-stage{display:flex;align-items:center;justify-content:center}
+.rbg-pv-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;width:72%}
+.rbg-pv-t{position:relative;aspect-ratio:16/10;border-radius:8px;background:linear-gradient(160deg,#3a4152,#232733);display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(10,14,25,.28)}
+.rbg-pv-t.on{box-shadow:0 0 0 2px #22c55e,0 4px 14px rgba(10,14,25,.28)}
+.rbg-pv-av{width:30px;height:30px;border-radius:50%;color:#fff;font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.rbg-pv-name{position:absolute;left:7px;bottom:6px;width:46px;height:7px;border-radius:3px;background:rgba(0,0,0,.45)}
+.rbg-note{font-size:11px;color:var(--ink-muted);line-height:1.5;margin-top:8px}
+@media (max-width:600px){.rbg-options{grid-template-columns:1fr}}
 #panel-branding{flex-direction:column;overflow-y:auto;padding:24px 28px;background:var(--bg)}
 .wizard-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
 .wizard-title{font-size:20px;font-weight:700;color:var(--ink)}
@@ -1146,7 +1181,8 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
               <div class="step-item active" id="step-item-1"><div class="step-circle">1</div><div class="step-label">Colors</div></div>
               <div class="step-item" id="step-item-2"><div class="step-circle">2</div><div class="step-label">Typography</div></div>
               <div class="step-item" id="step-item-3"><div class="step-circle">3</div><div class="step-label">Logo</div></div>
-              <div class="step-item" id="step-item-4"><div class="step-circle">4</div><div class="step-label">Details</div></div>
+              <div class="step-item" id="step-item-4"><div class="step-circle">4</div><div class="step-label">Classroom</div></div>
+              <div class="step-item" id="step-item-5"><div class="step-circle">5</div><div class="step-label">Details</div></div>
             </div>
 
             <!-- Step 1: Colors -->
@@ -1208,12 +1244,60 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
               </div>
               <div class="wizard-nav">
                 <button class="btn-wizard-prev" onclick="goStep(2)">← Back</button>
-                <button class="btn-wizard-next" onclick="goStep(4)">Next → Details</button>
+                <button class="btn-wizard-next" onclick="goStep(4)">Next → Classroom</button>
               </div>
             </div>
 
-            <!-- Step 4: Details -->
+            <!-- Step 4: Live classroom background (001_base.sql "ROOM BRANDING") -->
             <div class="wizard-step" id="wizard-step-4">
+              <div class="wizard-step-title">Live classroom background</div>
+              <div class="wizard-step-sub">What teachers and students see behind the videos in your live classes (and in the waiting room).</div>
+              <div class="rbg-options" role="radiogroup" aria-label="Classroom background" id="rbg-options">
+                <label class="rbg-opt" id="rbg-opt-inherit" hidden><input type="radio" name="rbg-kind" value="inherit" onchange="rbgPick('inherit')"><span class="rbg-sw" id="rbg-sw-inherit" aria-hidden="true"></span><span class="rbg-txt"><b>Same as the unit above</b><small id="rbg-inherit-desc"></small></span></label>
+                <label class="rbg-opt"><input type="radio" name="rbg-kind" value="default" onchange="rbgPick('default')"><span class="rbg-sw rbg-sw-default" aria-hidden="true"></span><span class="rbg-txt"><b>Default</b><small>Light grey, goes with everything</small></span></label>
+                <label class="rbg-opt"><input type="radio" name="rbg-kind" value="color" onchange="rbgPick('color')"><span class="rbg-sw" id="rbg-sw-color" aria-hidden="true"></span><span class="rbg-txt"><b>A color</b><small>Your brand color or any other</small></span></label>
+                <label class="rbg-opt"><input type="radio" name="rbg-kind" value="image" onchange="rbgPick('image')"><span class="rbg-sw rbg-sw-image" id="rbg-sw-image" aria-hidden="true"></span><span class="rbg-txt"><b>An image</b><small>JPG, PNG or WebP · up to 3 MB</small></span></label>
+              </div>
+              <div class="wizard-field" id="rbg-color-field" hidden>
+                <label class="wizard-label" for="rbg-color-hex">Background color</label>
+                <div class="color-field">
+                  <div class="color-swatch"><input type="color" id="rbg-color" value="#1e3a5f" aria-label="Background color" oninput="rbgColor(this.value)"></div>
+                  <input type="text" class="wizard-input" id="rbg-color-hex" value="#1e3a5f" oninput="rbgColor(this.value)" style="flex:1">
+                </div>
+                <div class="rbg-presets" id="rbg-presets"></div>
+              </div>
+              <div class="wizard-field" id="rbg-image-field" hidden>
+                <div class="upload-zone" id="rbg-zone" role="button" tabindex="0" onclick="document.getElementById('rbg-upload').click()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
+                  <div class="upload-zone-text">🖼️ <span>Click to upload an image</span></div>
+                  <div class="upload-zone-sub">JPG, PNG or WebP · Max 3MB · Landscape works best (1920 × 1080)</div>
+                </div>
+                <input type="file" id="rbg-upload" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" style="display:none" onchange="rbgFile(this)">
+                <div class="upload-success" id="rbg-file-ok"></div>
+              </div>
+              <div class="rbg-preview-wrap">
+                <div class="wizard-label">Preview</div>
+                <div class="rbg-preview" id="rbg-preview" aria-hidden="true">
+                  <div class="rbg-pv-top"><span class="rbg-pv-dot"></span><span class="rbg-pv-bar"></span><span class="rbg-pv-rec"></span></div>
+                  <div class="rbg-pv-stage" id="rbg-pv-stage">
+                    <div class="rbg-pv-grid">
+                      <div class="rbg-pv-t"><span class="rbg-pv-av" style="background:#7c5cbf">LG</span><span class="rbg-pv-name"></span></div>
+                      <div class="rbg-pv-t on"><span class="rbg-pv-av" style="background:#0891b2">AP</span><span class="rbg-pv-name"></span></div>
+                      <div class="rbg-pv-t"><span class="rbg-pv-av" style="background:#d97706">MF</span><span class="rbg-pv-name"></span></div>
+                      <div class="rbg-pv-t"><span class="rbg-pv-av" style="background:#059669">SP</span><span class="rbg-pv-name"></span></div>
+                    </div>
+                  </div>
+                  <div class="rbg-pv-ctrls"><span></span><span></span><span></span><span class="end"></span></div>
+                </div>
+              </div>
+              <p class="rbg-note">Videos keep their own frame, and images get a soft shade so names stay readable. Branches use this background unless they choose their own.</p>
+              <div class="wizard-nav">
+                <button class="btn-wizard-prev" onclick="goStep(3)">← Back</button>
+                <button class="btn-wizard-next" onclick="goStep(5)">Next → Details</button>
+              </div>
+            </div>
+
+            <!-- Step 5: Details -->
+            <div class="wizard-step" id="wizard-step-5">
               <div class="wizard-step-title">Institution Details</div>
               <div class="wizard-step-sub">Set the name and URL slug for your institution.</div>
               <div class="wizard-field"><label class="wizard-label">Institution Name</label><input type="text" id="wl-name" class="wizard-input" placeholder="St. Mary's Academy" oninput="autoSlug('wl-name','wl-slug');updatePreview()"></div>
@@ -1227,7 +1311,7 @@ body.viewas-on .topbar{box-shadow:inset 0 -3px 0 #c2410c}
               <div class="wizard-field"><label class="wizard-label">Admin Email</label><input type="email" id="wl-admin-email" class="wizard-input" placeholder="admin@stmarys.edu"></div>
               <div id="inst-url-preview" class="inst-url-box" style="display:none">🔗 Institution link: <strong id="inst-url-text" data-no-i18n></strong></div>
               <div class="wizard-nav">
-                <button class="btn-wizard-prev" onclick="goStep(3)">← Back</button>
+                <button class="btn-wizard-prev" onclick="goStep(4)">← Back</button>
                 <button class="btn-wizard-next" style="background:var(--green)" onclick="saveBranding()">✓ Save Institution</button>
               </div>
             </div>
@@ -1999,6 +2083,7 @@ function normOrg(r){
     masterPrompt:r.master_prompt||'',docText:r.doc_text||'',docName:r.doc_name||'',
     // hierarchy: parent unit, own (non-inherited) branding values, learning-approach bars config
     parentId:r.parent_id||null,ownColor:r.color||null,ownBg:r.bg_color||null,ownFont:r.font||null,ownLogo:safeImgUrl(r.logo_url)||null,
+    roomBgKind:['default','color','image'].includes(r.room_bg_kind)?r.room_bg_kind:null,roomBgColor:r.room_bg_color||null,roomBgUrl:r.room_bg_url||null, // live-room background (own value; null = inherited)
     methodologyConfig:(r.methodology_config&&typeof r.methodology_config==='object')?r.methodology_config:{}};
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -2197,6 +2282,7 @@ function fillBrandingForm(org){
   const msg=document.getElementById('wl-logo-success');msg.style.display='none';msg.textContent='';
   document.getElementById('wl-logo-upload').value='';
   hierBrandingInherit(org);
+  rbgReset(org);
   updatePreview();
 }
 function loadBrandingForOrg(orgId){
@@ -2219,7 +2305,7 @@ function startNewInstitution(){
 // ══ BRANDING WIZARD ══
 function goStep(n){
   wizardStep=n;
-  for(let i=1;i<=4;i++){
+  for(let i=1;i<=5;i++){
     document.getElementById('wizard-step-'+i).classList.toggle('active',i===n);
     const item=document.getElementById('step-item-'+i);
     item.classList.toggle('active',i===n);
@@ -2330,6 +2416,8 @@ async function saveBranding(){
       wlLogoFile=null;
     }
   }
+  // Fondo del aula en vivo (paso "Aula")
+  await rbgSave(orgId);
   // Admin de la institución
   if(!created&&adminEmail&&(orgsCache[orgId]?.adminEmail||'').toLowerCase()!==adminEmail.toLowerCase()){
     const {data:inv,error}=await sb.rpc('invite_member',{p_inst:orgId,p_email:adminEmail,p_role:'org_admin'});
@@ -4116,6 +4204,108 @@ function hierInheritUI(){
 }
 function hierInheritChecked(orgId){const cb=document.getElementById('wl-inherit');return !!(cb&&cb.checked&&orgsCache[orgId]?.parentId);}
 
+// ── BRANDING: live classroom background (001_base.sql "ROOM BRANDING"; the room: public/live-class.js syncRoomBg) ──
+// The institution picks a color, an uploaded image (bucket room-backgrounds, same rules as the logos) or the default light
+// background; a sub-unit can keep "the same as the unit above" (inherit). Saved with set_room_background.
+const RBG_MAX=3*1024*1024,RBG_TYPES={'image/jpeg':'jpg','image/png':'png','image/webp':'webp'};
+const RBG_PRESETS=['#1e3a5f','#0f766e','#4c1d95','#14532d','#7c2d12','#334155','#f3efe6','#dfe9f5'];
+const RBG_URL_RE=/^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?\/storage\/v1\/object\/public\/room-backgrounds\/[0-9a-f-]{36}\/[A-Za-z0-9._-]{1,120}\.(jpe?g|png|webp)$/i;
+const RBG_DATA_RE=/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+let rbg={kind:'default',color:'#1e3a5f',url:'',file:null,preview:'',dirty:false,child:false,parent:null,seq:0};
+const rbgHex=v=>/^#[0-9a-f]{6}$/i.test(String(v||'').trim());
+const rbgImg=u=>(RBG_URL_RE.test(u||'')||RBG_DATA_RE.test(u||''))?`url("${u}")`:'';
+function rbgReset(org){
+  const o=org||{};const own=o.roomBgKind||null;
+  rbg={kind:own||(o.parentId?'inherit':'default'),color:rbgHex(o.roomBgColor)?o.roomBgColor:'#1e3a5f',url:RBG_URL_RE.test(o.roomBgUrl||'')?o.roomBgUrl:'',
+    file:null,preview:'',dirty:false,child:!!o.parentId,parent:null,seq:rbg.seq+1};
+  const up=document.getElementById('rbg-upload');if(up)up.value='';
+  const ok=document.getElementById('rbg-file-ok');if(ok){ok.style.display='none';ok.textContent='';}
+  rbgUI();
+  // what "the same as the unit above" means right now (the parent may not be readable by a sub-unit admin: ask the server)
+  if(org&&org.parentId&&typeof sb!=='undefined'){
+    const seq=rbg.seq;
+    sb.rpc('get_room_background',{p_inst:org.id}).then(({data,error})=>{if(seq!==rbg.seq||error||!data)return;rbg.parent=data.parent||null;rbgUI();}).catch(()=>{});
+  }
+}
+// {kind,color,image} that the room will show
+function rbgEffective(){
+  if(rbg.kind==='inherit'){const p=rbg.parent||{kind:'default'};return {kind:p.kind,color:p.color,image:p.image_url||''};}
+  return {kind:rbg.kind,color:rbg.color,image:rbg.preview||rbg.url};
+}
+function rbgPaint(el,b,stage){
+  if(!el)return;
+  if(b.kind==='color'&&rbgHex(b.color))el.style.background=stage?`radial-gradient(120% 90% at 50% 0%,rgba(255,255,255,.14),rgba(255,255,255,0) 60%),linear-gradient(rgba(0,0,0,0),rgba(0,0,0,.08)),${b.color}`:b.color;
+  else if(b.kind==='image'&&rbgImg(b.image))el.style.background=(stage?'linear-gradient(rgba(14,17,27,.30),rgba(14,17,27,.30)),':'')+rbgImg(b.image)+' center/cover no-repeat,#2b303c';
+  else el.style.background='';
+}
+function rbgUI(){
+  const box=document.getElementById('rbg-options');if(!box)return;
+  if(rbg.kind==='inherit'&&!rbg.child)rbg.kind='default';
+  document.getElementById('rbg-opt-inherit').hidden=!rbg.child;
+  box.querySelectorAll('input[name="rbg-kind"]').forEach(i=>{i.checked=i.value===rbg.kind;});
+  document.getElementById('rbg-color-field').hidden=rbg.kind!=='color';
+  document.getElementById('rbg-image-field').hidden=rbg.kind!=='image';
+  const c=document.getElementById('rbg-color'),h=document.getElementById('rbg-color-hex');
+  if(c&&c.value!==rbg.color)c.value=rbg.color;if(h&&document.activeElement!==h)h.value=rbg.color;
+  rbgPaint(document.getElementById('rbg-sw-color'),{kind:'color',color:rbg.color});
+  rbgPaint(document.getElementById('rbg-sw-image'),{kind:'image',image:rbg.preview||rbg.url});
+  const p=rbg.parent||{kind:'default'};
+  rbgPaint(document.getElementById('rbg-sw-inherit'),{kind:p.kind,color:p.color,image:p.image_url});
+  const d=document.getElementById('rbg-inherit-desc');
+  if(d){const t=p.kind==='color'?trText('Now: a color')+' '+p.color:p.kind==='image'?trText('Now: an image'):trText('Now: the default');if(d.textContent!==t)d.textContent=t;}
+  const pr=document.getElementById('rbg-presets');
+  if(pr){if(!pr.childElementCount)pr.innerHTML=RBG_PRESETS.map(x=>`<button type="button" class="rbg-preset" data-c="${x}" style="background:${x}" aria-label="${x}" onclick="rbgColor(this.dataset.c)"></button>`).join('');
+    pr.querySelectorAll('.rbg-preset').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.c.toLowerCase()===rbg.color.toLowerCase())));}
+  rbgPaint(document.getElementById('rbg-pv-stage'),rbgEffective(),true);
+}
+function rbgPick(k){rbg.kind=k;rbg.dirty=true;rbgUI();if(k==='image'&&!rbg.url&&!rbg.preview)document.getElementById('rbg-upload')?.click();}
+function rbgColor(v){
+  v=String(v||'').trim();if(!rbgHex(v))return;
+  rbg.color=v.toLowerCase();rbg.kind='color';rbg.dirty=true;rbgUI();
+}
+function rbgFile(input){
+  const f=input.files&&input.files[0];if(!f)return;
+  if(!RBG_TYPES[f.type]){showToast('The background must be a JPG, PNG or WebP image.','err');input.value='';return;}
+  if(f.size>RBG_MAX){showToast('The background image must be under 3 MB.','err');input.value='';return;}
+  const r=new FileReader();
+  r.onerror=()=>{showToast('Could not read that file.','err');input.value='';};
+  r.onload=e=>{
+    const d=String(e.target.result||'');if(!RBG_DATA_RE.test(d)){showToast('The background must be a JPG, PNG or WebP image.','err');input.value='';return;}
+    rbg.file=f;rbg.preview=d;rbg.kind='image';rbg.dirty=true;
+    const ok=document.getElementById('rbg-file-ok');ok.style.display='block';ok.textContent='✓ '+f.name;
+    rbgUI();
+  };r.readAsDataURL(f);
+}
+// called by saveBranding once the unit exists; true = saved (or nothing to save)
+async function rbgSave(orgId){
+  if(!rbg.dirty||!orgId)return true;
+  let url=rbg.url;
+  if(rbg.kind==='image'&&rbg.file){
+    const path=`${orgId}/room-${Date.now()}.${RBG_TYPES[rbg.file.type]}`;
+    const up=await sb.storage.from('room-backgrounds').upload(path,rbg.file,{upsert:false,contentType:rbg.file.type,cacheControl:'31536000'});
+    if(up.error){showToast('Background upload failed: '+up.error.message,'err');return false;}
+    url=sb.storage.from('room-backgrounds').getPublicUrl(path).data.publicUrl;
+  }
+  if(rbg.kind==='image'&&!RBG_URL_RE.test(url||'')){showToast('Choose an image for the classroom background.','err');return false;}
+  const {error}=await sb.rpc('set_room_background',{p_inst:orgId,p_kind:rbg.kind,p_color:rbg.kind==='color'?rbg.color:null,p_url:rbg.kind==='image'?url:null});
+  if(error){showToast('Classroom background: '+error.message,'err');return false;}
+  rbg.url=rbg.kind==='image'?url:rbg.url;rbg.file=null;rbg.preview='';rbg.dirty=false;
+  return true;
+}
+const I18N_ES_ROOMBG={
+  'Classroom':'Aula','Next → Classroom':'Siguiente → Aula','Live classroom background':'Fondo del aula en vivo',
+  'What teachers and students see behind the videos in your live classes (and in the waiting room).':'Lo que ven docentes y estudiantes detrás de los videos en sus clases en vivo (y en la sala de espera).',
+  'Same as the unit above':'Igual que la unidad de arriba','Default':'Predeterminado','Light grey, goes with everything':'Gris claro, combina con todo',
+  'A color':'Un color','Your brand color or any other':'El color de tu marca u otro','An image':'Una imagen','JPG, PNG or WebP · up to 3 MB':'JPG, PNG o WebP · hasta 3 MB',
+  'Background color':'Color de fondo','Click to upload an image':'Tocá para subir una imagen','JPG, PNG or WebP · Max 3MB · Landscape works best (1920 × 1080)':'JPG, PNG o WebP · Máx. 3 MB · Mejor horizontal (1920 × 1080)',
+  'Preview':'Vista previa','Classroom background':'Fondo del aula',
+  'Videos keep their own frame, and images get a soft shade so names stay readable. Branches use this background unless they choose their own.':'Los videos mantienen su propio marco y a las imágenes se les suma una sombra suave para que los nombres se lean bien. Las sedes usan este fondo salvo que elijan uno propio.',
+  'Now: a color':'Ahora: un color','Now: an image':'Ahora: una imagen','Now: the default':'Ahora: el predeterminado',
+  'The background must be a JPG, PNG or WebP image.':'El fondo tiene que ser una imagen JPG, PNG o WebP.','The background image must be under 3 MB.':'La imagen de fondo tiene que pesar menos de 3 MB.',
+  'Choose an image for the classroom background.':'Elegí una imagen para el fondo del aula.'};
+Object.assign(I18N_ES,I18N_ES_ROOMBG);
+I18N_RULES_ES.push([/^Background upload failed: (.+)$/,'No se pudo subir el fondo: $1'],[/^Classroom background: (.+)$/,'Fondo del aula: $1']);
+
 // ── PLATFORM (super admin) ──
 async function renderPlatform(){
   if(!currentUser?.isSuperAdmin)return;
@@ -4567,7 +4757,8 @@ function vaBlocked(){if(!viewAs)return false;showToast(VA_RO,'err');return true;
     'classboard_open','classboard_pull','classboard_versions','classboard_version', // class whiteboard: reads only
     'notebook_find','notebook_open','notebook_pull','notebook_versions','notebook_version','groupboard_pages','school_year_start', // group notebook + board pages: reads only
     'session_attendance','attendance_report', // attendance: reads only
-    'consent_overview','consent_new_declines']); // recording consent (Groups → Consents): reads only
+    'consent_overview','consent_new_declines', // recording consent (Groups → Consents): reads only
+    'get_room_background']); // live-room background (Branding → Classroom, the room): read only
 
   const roResult=()=>({data:null,error:{message:VA_RO,code:'viewas'},status:403,statusText:'View as',count:null});
   const roChain=()=>{const r=roResult();let p;p=new Proxy(function(){},{get(_,k){

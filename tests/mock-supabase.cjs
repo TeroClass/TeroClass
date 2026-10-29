@@ -10,6 +10,7 @@
 // Class document + attendance (tests/mock-classdoc.cjs) and Realtime broadcast (tests/mock-realtime.cjs, routeWebSocket).
 // Class insights (tests/mock-insights.cjs): generate_demo_insights, list_insight_sessions, get_session_insights,
 // save_teacher_reflection, save_insight_message, my_insights, my_insight (+ insights in student_view).
+// Live-room background per institution + a tiny Storage API (tests/mock-roombg.cjs): get_room_background, set_room_background.
 // Recording consent (tests/mock-consent.cjs): my_consent, grant / revoke / decline_recording_consent, consent_overview,
 // consent_new_declines, platform_consent_counts.
 const fs = require('fs');
@@ -75,7 +76,7 @@ const bill = BILL_DEFAULTS();
 let n = 0; const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 const tokUser = t => Object.values(db.users).find(u => 'tok-' + u.id === t);
 const insights = { fixture: null }; // tests may set insights.fixture = (body) => json
-function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; if (typeof realtime !== 'undefined') realtime.reset(); calls.rpc = []; calls.inserts = {}; calls.otp = []; calls.recover = []; calls.passwords = []; calls.captcha = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; recording.status = {}; recording.processing = []; if (typeof plans !== 'undefined') plans.reset(); }
+function resetDb() { for (const k of Object.keys(db)) db[k] = k === 'users' ? {} : []; if (typeof realtime !== 'undefined') realtime.reset(); calls.rpc = []; calls.inserts = {}; calls.otp = []; calls.recover = []; calls.passwords = []; calls.captcha = []; Object.assign(bill, BILL_DEFAULTS()); insights.fixture = null; recording.status = {}; recording.processing = []; if (typeof plans !== 'undefined') plans.reset(); if (typeof roomBg !== 'undefined') { roomBg.storage.files = {}; roomBg.storage.uploads.length = 0; } }
 // Default insights: deterministic sample data shaped like public.platform_insights (smaller numbers for a unit)
 function insightsData(body) {
   const days = Math.min(Math.max(Number(body.p_days) || 30, 1), 366); const unit = body.p_unit ? instById(body.p_unit) : null;
@@ -188,7 +189,7 @@ function project(rows, url) {
 }
 async function handleSupabase(route) {
   const req = route.request(); const url = new URL(req.url()); const p = url.pathname; const m = req.method();
-  const body = req.postData() ? JSON.parse(req.postData()) : null;
+  let body = null; try { body = req.postData() ? JSON.parse(req.postData()) : null; } catch (e) { body = null; } // file uploads are not JSON
   const json = (status, data) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data), headers: { 'access-control-allow-origin': '*' } });
   const auth = (req.headers()['authorization'] || '').replace('Bearer ', '');
   if (m === 'OPTIONS') return route.fulfill({ status: 200, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' } });
@@ -350,6 +351,7 @@ async function handleSupabase(route) {
       return json(200, pl ? { id: pl.id, title: pl.title, content: pl.data?.content || '', student: pl.data?.student || '', params: pl.data?.params || {}, mine: pl.owner_id === me.id } : null);
     }
     if (fn === 'my_data_export') { if (!me) return NOAUTH(); return json(200, { exported_at: new Date().toISOString(), profile: { email: meP.email, name: meP.name, role: meP.role }, plannings: db.plannings.filter(x => x.owner_id === me.id).map(x => ({ title: x.title, data: x.data })) }); }
+    { const r = roomBg.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = plans.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = consent.handle(fn, body, me); if (r) return json(r.status, r.data); }
     { const r = classInsights.handle(fn, body, me); if (r) return json(r.status, r.data); }
@@ -371,6 +373,7 @@ async function handleSupabase(route) {
     }
     return json(404, { message: 'no fn' });
   }
+  if (p.startsWith('/storage/v1/object/') && await roomBg.handleStorage(route, me)) return;
   if (p.startsWith('/rest/v1/')) {
     if (!me) return json(401, { message: 'JWT required' });
     const table = p.split('/').pop(); const rows = db[table];
@@ -409,9 +412,10 @@ const classDoc = require('./mock-classdoc.cjs')({ db, uid, instById, chainOf, de
 const plans = require('./mock-plans.cjs')({ db, uid, instById, rootOf, account, bill });
 const consent = require('./mock-consent.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf });
 const classBoard = require('./mock-classboard.cjs')({ db, uid, classDoc });
+const roomBg = require('./mock-roombg.cjs')({ db, instById, chainOf });
 const notebook = require('./mock-notebook.cjs')({ db, uid, chainOf, classDoc });
 const realtime = require('./mock-realtime.cjs')({ tokUser, canRealtime: (me, t, send) => classDoc.canRealtime(me, t, send) || classBoard.canRealtime(me, t, send) || notebook.canRealtime(me, t, send),
   publicTopicOk: t => classDoc.publicTopicOk(t) || classBoard.publicTopicOk(t) || notebook.publicTopicOk(t) });
 const students = require('./mock-students.cjs')({ db, uid, instById, chainOf, descendantsOf, rootOf, inviteMember, seatsFree: root => Math.max(account(root).seats - seatsUsed(root), 0),
   insightSummaries: (eids, me) => classInsights.summaries(eids, 5, me) });
-module.exports = { recording, plans, tokUser, consent, students, classInsights, classDoc, classBoard, notebook, realtime, serveVendor, serveWhiteboard, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };
+module.exports = { roomBg, recording, plans, tokUser, consent, students, classInsights, classDoc, classBoard, notebook, realtime, serveVendor, serveWhiteboard, db, bill, calls, insights, insightsData, uid, resetDb, newUser, seedInstitution, session, handleSupabase, HTML, RAW_HTML, SB_JS, SB, SUPERADMIN_EMAIL, effectiveConfig, chainOf };

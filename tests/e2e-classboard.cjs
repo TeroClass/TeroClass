@@ -304,7 +304,8 @@ async function studentOpenBoard(page) {
     await T.page.click('#lc-tab-board');
     await waitBoard(T.page, '#lc-side-board');
     await studentLogin(S.page, t.ana); await studentOpenBoard(S.page);
-    await pickTool(T.page, 'rectangle', '#lc-side-board'); await drag(T.page, [120, 200], [300, 320], '#lc-side-board');
+    // the Board tab opens a wide panel (58%, 2026-10-29): Excalidraw shows its desktop style panel on the left → draw to its right
+    await pickTool(T.page, 'rectangle', '#lc-side-board'); await drag(T.page, [400, 240], [580, 360], '#lc-side-board');
     await waitScene(S.page, "t.includes('rectangle')");
     await shot(T.page, 'live-room-panel');
     // full screen inside the room: the board covers the stage, the room controls stay

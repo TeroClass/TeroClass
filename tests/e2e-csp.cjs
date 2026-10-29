@@ -7,6 +7,7 @@
 // third-party origins (the old CDNs) are blocked. The class whiteboard (Excalidraw + React, /vendor/whiteboard, lazy chunks,
 // its fonts from /vendor/whiteboard/fonts via EXCALIDRAW_ASSET_PATH) opens, draws, saves and exports PNG / SVG under the CSP.
 // The group notebook (public/group-notebook.js / .css) opens, saves typing and the group board shows its page selector.
+// The institution's room background image (Supabase Storage, bucket room-backgrounds) loads under img-src.
 // Usage: NODE_PATH=/opt/npm-tools/node_modules node tests/e2e-csp.cjs
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -177,6 +178,19 @@ function fileFor(p) {
     await page.click('.tp-card[data-plan="docente"] [data-tp="docente"]');
     await page.waitForSelector('#tp-form');
     await page.goBack().catch(() => {});
+  });
+
+  await step('Room background (2026-10-29): an institution image from Supabase Storage (bucket room-backgrounds) loads under img-src, as an <img> and as the stage CSS background', async () => {
+    const id = '11111111-2222-4333-8444-555555555555';
+    const url = SB + '/storage/v1/object/public/room-backgrounds/' + id + '/room-1.png';
+    M.roomBg.storage.files['room-backgrounds/' + id + '/room-1.png'] = { type: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64') };
+    const r = await page.evaluate(u => new Promise(res => {
+      const i = new Image(); i.onload = () => {
+        const d = document.createElement('div'); d.className = 'lc-root'; d.dataset.view = 'lobby'; d.dataset.roombg = 'image'; d.style.setProperty('--lc-room-img', `url("${u}")`);
+        document.body.appendChild(d); const bg = getComputedStyle(d).backgroundImage; d.remove(); res({ w: i.naturalWidth, bg });
+      }; i.onerror = () => res({ w: 0 }); i.src = u; }), url);
+    if (r.w !== 1 || !r.bg.includes(url)) throw new Error('background image: ' + JSON.stringify(r));
+    if (!/img-src[^;]*https:\/\/\*\.supabase\.co/.test(headersFor('/')['Content-Security-Policy'] || '')) throw new Error('img-src does not cover Supabase Storage');
   });
 
   await step('TC-11 nothing violated the CSP; third-party script origins are blocked', async () => {

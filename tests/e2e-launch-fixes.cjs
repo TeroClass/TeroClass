@@ -46,6 +46,7 @@ async function register(page, base, email, { name = 'Test User', path = '/' } = 
   await page.fill('#reg-name', name); await page.fill('#reg-email', email); await page.fill('#reg-password', 'secreto123');
   await page.click('#tab-register .auth-btn');
   await page.waitForSelector('#screen-app.active');
+  await page.waitForFunction(() => !appBooting); // the app finished entering (it may still switch panels until then)
 }
 const shot = async (page, n) => { if (SHOTS) await page.screenshot({ path: `${SHOTS}/fix-${n}.png` }); };
 

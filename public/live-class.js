@@ -188,7 +188,7 @@ Cierre y ticket de salida (5 min)
       this._screens = [{ id: 'sim-t', name: o.teacherName || tr('Teacher (sample)') }];
       this.emit('screens', this._screens);
     }
-    attachScreen(id, el) { if (id === 'sim-t' && this._screenStream) { el.srcObject = this._screenStream; return true; } return false; }
+    attachScreen(id, el) { if (id === 'sim-t' && this._screenStream) { if (el.srcObject !== this._screenStream) el.srcObject = this._screenStream; return true; } return false; }
     _setHand(id, up) { const p = this._list.find(x => x.id === id); if (!p) return; p.hand = up; this.emit('hand', { id, up }); this.emit('participants', this._list); }
     _tick() {
       if (this._hold-- > 0 && this._speaker) { this.emit('speaking', new Set([this._speaker])); return; }
@@ -307,14 +307,14 @@ Cierre y ticket de salida (5 min)
       if (!this.room) return false;
       const p = this.room.remoteParticipants.get(id);
       const pub = p && p.getTrackPublication(this.LK.Track.Source.ScreenShare);
-      if (pub && pub.track) { pub.track.attach(el); return true; }
+      if (pub && pub.track) { if (!(pub.track.attachedElements || []).includes(el)) pub.track.attach(el); return true; }
       return false;
     }
     attachVideo(id, el) {
       if (!this.room || id === 'local') return false;
       const p = this.room.remoteParticipants.get(id);
       const pub = p && p.getTrackPublication(this.LK.Track.Source.Camera);
-      if (pub && pub.track) { pub.track.attach(el); return true; }
+      if (pub && pub.track) { if (!(pub.track.attachedElements || []).includes(el)) pub.track.attach(el); return true; }
       return false;
     }
     _send(obj) {
@@ -447,6 +447,7 @@ Cierre y ticket de salida (5 min)
     else if (S.view === 'room') { el.innerHTML = roomHtml(); afterRoomRender(); }
     else if (S.view === 'processing') el.innerHTML = processingHtml();
     else if (S.view === 'insights') el.innerHTML = insightsHtml();
+    syncRoomBg();
     const h = el.querySelector('h1'); if (h && S.view !== 'room') { h.setAttribute('tabindex', '-1'); try { h.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
     el.scrollTop = 0;
   }
@@ -990,12 +991,14 @@ Cierre y ticket de salida (5 min)
       <div class="lc-room-body">
         <div class="lc-stage"><div class="lc-grid" id="lc-grid"></div></div>
         <aside class="lc-side" id="lc-side" aria-label="${esc(tr('Side panel'))}">
+          <div class="lc-side-grip" id="lc-side-grip" role="separator" aria-orientation="vertical" tabindex="0" aria-valuemin="${SIDE_MIN}" aria-valuemax="${SIDE_MAX}" aria-valuenow="${SIDE_DEF}" aria-label="${esc(tr('Drag to resize the panel'))}" hidden></div>
           <div class="lc-side-tabs" role="tablist">
             <button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="plan" id="lc-tab-plan">Class plan</button>
             <button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="chat" id="lc-tab-chat">Chat</button>
             <button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="people" id="lc-tab-people">People</button>
             ${S.sessionId && window.TCClassDoc ? '<button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="doc" id="lc-tab-doc">Document</button>' : ''}
             ${S.sessionId && window.TCClassBoard ? '<button type="button" role="tab" class="lc-side-tab" data-lc="side" data-side="board" id="lc-tab-board">Board</button>' : ''}
+            <button type="button" class="lc-side-size" id="lc-side-size" data-lc="side-size" aria-pressed="false" hidden><span aria-hidden="true">⤢</span> <span class="lc-side-size-lb">Bigger</span></button>
             <button type="button" class="lc-side-close" data-lc="side-close" aria-label="${esc(tr('Close panel'))}">✕</button>
           </div>
           <div class="lc-side-body" id="lc-side-plan" role="tabpanel" aria-labelledby="lc-tab-plan">${planPanelHtml()}</div>
@@ -1046,6 +1049,7 @@ Cierre y ticket de salida (5 min)
 
   function afterRoomRender() {
     renderGrid(); renderPeople(); renderChat(); updateRoomUi();
+    if (S.room) watchStage(S.room);
   }
 
   function consentBadge(p) {
@@ -1068,18 +1072,233 @@ Cierre y ticket de salida (5 min)
       </div>
     </div>`;
   }
+  // what a tile shows (anything else is updated in place by updateTiles): same signature → the element (and its video) is kept
+  const tileSig = p => [p.name, p.role, p.isLocal ? 1 : 0, p.recorded ? 1 : 0, p.minor ? 1 : 0, recorderOn() && recActive(p) ? 1 : 0, S.room.kind].join('|');
+  // students see the teacher first, then themselves, then classmates; the teacher sees the students first and their own tile last
+  function orderedPeople(R) {
+    const list = R.participants.length ? R.participants : [{ id: 'local', isLocal: true, name: R.name, role: R.role, mic: R.mic, cam: R.cam, recorded: R.recorded, minor: R.minor }];
+    const t = list.filter(p => p.role === 'teacher' && !p.isLocal), me = list.filter(p => p.isLocal), rest = list.filter(p => !p.isLocal && p.role !== 'teacher');
+    return R.role === 'teacher' ? [...t, ...rest, ...me] : [...t, ...me, ...rest];
+  }
+  // 2026-10-29: the grid is rebuilt by KEY (participant id / screen): unchanged tiles keep their element and their video, so
+  // a participants event (mic, hand, someone joining) never re-attaches every track. Layout = absolute rectangles (layoutStage).
   function renderGrid() {
     const R = S.room; const g = document.getElementById('lc-grid'); if (!R || !g) return;
-    const list = R.participants.length ? R.participants : [{ id: 'local', isLocal: true, name: R.name, role: R.role, mic: R.mic, cam: R.cam, recorded: R.recorded, minor: R.minor }];
-    const share = R.screen ? `<div class="lc-tile lc-share-tile" data-pid="screen"><video class="lc-video" id="lc-share-video" autoplay muted playsinline></video><div class="lc-tile-bar"><span aria-hidden="true">🖥️</span> <span>You are presenting</span> <button type="button" class="lc-btn lc-sm" data-lc="share">Stop sharing</button></div></div>` : '';
-    const remoteShares = (R.remoteScreens || []).map(sc => `<div class="lc-tile lc-share-tile remote" data-pid="screen-${esc(sc.id)}" role="group" aria-label="${esc(sc.name)}"><video class="lc-video" data-screen="${esc(sc.id)}" autoplay muted playsinline></video><div class="lc-tile-bar"><span aria-hidden="true">🖥️</span> <span data-no-i18n>${esc(sc.name)}</span> <span>is presenting</span></div></div>`).join('');
-    g.innerHTML = remoteShares + share + list.map(tileHtml).join('');
-    g.dataset.count = String(list.length + (R.screen ? 1 : 0) + (R.remoteScreens || []).length);
+    const items = (R.remoteScreens || []).map(sc => ({ key: 'screen-' + sc.id, sig: 'rs|' + sc.name,
+      html: () => `<div class="lc-tile lc-share-tile remote" data-pid="screen-${esc(sc.id)}" role="group" aria-label="${esc(sc.name)}"><video class="lc-video" data-screen="${esc(sc.id)}" autoplay muted playsinline></video><div class="lc-tile-bar"><span aria-hidden="true">🖥️</span> <span data-no-i18n>${esc(sc.name)}</span> <span>is presenting</span></div></div>` }));
+    if (R.screen) items.push({ key: 'screen', sig: 'ls', html: () => `<div class="lc-tile lc-share-tile" data-pid="screen"><video class="lc-video" id="lc-share-video" autoplay muted playsinline></video><div class="lc-tile-bar"><span aria-hidden="true">🖥️</span> <span>You are presenting</span> <button type="button" class="lc-btn lc-sm" data-lc="share">Stop sharing</button></div></div>` });
+    const people = orderedPeople(R);
+    people.forEach(p => items.push({ key: p.id, sig: tileSig(p), html: () => tileHtml(p) }));
+    const old = new Map($$(':scope > .lc-tile', g).map(el => [el.dataset.pid, el]));
+    let prev = null;
+    items.forEach(it => {
+      let el = old.get(it.key);
+      if (el && el.dataset.sig === it.sig) old.delete(it.key);
+      else {
+        if (el) { el.remove(); old.delete(it.key); }
+        const t = document.createElement('div'); t.innerHTML = it.html().trim(); el = t.firstElementChild;
+        el.dataset.sig = it.sig; el.classList.add('lc-new');
+      }
+      const want = prev ? prev.nextElementSibling : g.firstElementChild;
+      if (want !== el) g.insertBefore(el, want);
+      prev = el;
+    });
+    old.forEach(el => el.remove());
+    g.dataset.count = String(people.length + (R.screen ? 1 : 0) + (R.remoteScreens || []).length);
     $$('video[data-screen]', g).forEach(v => { try { R.provider?.attachScreen(v.dataset.screen, v); } catch (e) { /* ignore */ } });
-    const lv = document.getElementById('lc-local-video'); if (lv && R.stream && R.stream.getVideoTracks().length) lv.srcObject = R.stream;
-    const sv = document.getElementById('lc-share-video'); if (sv && R.screen) sv.srcObject = R.screen;
+    const lv = document.getElementById('lc-local-video'); if (lv && R.stream && R.stream.getVideoTracks().length && lv.srcObject !== R.stream) lv.srcObject = R.stream;
+    const sv = document.getElementById('lc-share-video'); if (sv && R.screen && sv.srcObject !== R.screen) sv.srcObject = R.screen;
     if (R.kind === 'livekit') $$('.lc-tile[data-pid] video.lc-video', g).forEach(v => { const id = v.closest('.lc-tile').dataset.pid; if (id !== 'local' && !id.startsWith('screen')) R.provider?.attachVideo(id, v); });
+    layoutStage();
     updateTiles();
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  // STAGE LAYOUT (2026-10-29). Every tile is placed in an absolute rectangle computed from the stage size:
+  //   • 1 person: one large tile.  • 2 people: "speaker focus": the OTHER person fills the stage, me in a picture-in-picture
+  //     (bottom-right; drag it to another corner).  • 3+: the grid that gives the biggest tiles without scrolling (columns ×
+  //     rows from the count and the stage shape); phones: 1–2 columns and scrolling.  • A shared screen: large, people in a
+  //     strip beside it (or below it on narrow stages).  Board / Document open on a desktop: the panel is wide and the videos
+  //     become a column (same grid rule on the narrow stage). A ResizeObserver on the stage recomputes; nothing is re-attached.
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  const GAP = 10, TILE_AR = 16 / 10, SHARE_AR = 16 / 9;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private mode: not remembered */ } };
+  const PIP_CORNERS = ['br', 'bl', 'tr', 'tl'];
+  const pipCorner = () => { const c = lsGet('tc_lc_pip'); return PIP_CORNERS.includes(c) ? c : 'br'; };
+  // the biggest tile width for n tiles of aspect ar in W×H (cols 1..maxCols)
+  function fitGrid(n, W, H, ar, maxCols) {
+    let best = { cols: 1, w: 0 };
+    for (let c = 1; c <= Math.min(n, maxCols || n); c++) {
+      const r = Math.ceil(n / c);
+      const w = Math.min((W - (c - 1) * GAP) / c, ((H - (r - 1) * GAP) / r) * ar);
+      if (w > best.w + 0.5) best = { cols: c, w };
+    }
+    return best;
+  }
+  // places list in a centered grid inside (x0,y0,W,H); returns the height used (can exceed H → the stage scrolls)
+  function placeGrid(rects, list, x0, y0, W, H, ar, opt = {}) {
+    const n = list.length; if (!n) return 0;
+    let { cols, w } = fitGrid(n, W, H, ar, opt.maxCols);
+    if (opt.minW && w < opt.minW) { cols = clamp(Math.floor((W + GAP) / (opt.minW + GAP)), 1, Math.min(n, opt.maxCols || n)); w = (W - (cols - 1) * GAP) / cols; }
+    if (opt.maxW) w = Math.min(w, opt.maxW);
+    const h = w / ar, rows = Math.ceil(n / cols), gridH = rows * h + (rows - 1) * GAP;
+    const top = y0 + Math.max(0, (H - gridH) / 2);
+    list.forEach((el, i) => {
+      const r = Math.floor(i / cols), c = i % cols, inRow = r === rows - 1 ? n - r * cols : cols;
+      const left = x0 + (W - (inRow * w + (inRow - 1) * GAP)) / 2 + c * (w + GAP);
+      rects.set(el, { x: left, y: top + r * (h + GAP), w, h });
+    });
+    return Math.max(0, top - y0) + gridH;
+  }
+  function layoutStage() {
+    const R = S.room; const g = document.getElementById('lc-grid'); const st = g && g.parentElement; const room = document.getElementById('lc-room');
+    if (!R || !g || !st || !room) return;
+    const cs = getComputedStyle(st);
+    const W = Math.floor(st.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight));
+    const H = Math.floor(st.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom));
+    if (W <= 0 || H <= 0) return; // hidden (board full screen) or not laid out yet
+    const tiles = $$(':scope > .lc-tile', g);
+    const shares = tiles.filter(t => t.classList.contains('lc-share-tile'));
+    const people = tiles.filter(t => !t.classList.contains('lc-share-tile'));
+    const phone = W < 600, wide = room.classList.contains('side-wide');
+    const rects = new Map(); let used = H; let layout;
+    if (shares.length) {
+      layout = 'share';
+      if (!people.length) used = placeGrid(rects, shares, 0, 0, W, H, SHARE_AR);
+      else if (wide || phone || W / H < 1.3) { // the screen on top, people in rows below
+        const sh = phone ? 84 : clamp(H * 0.2, 96, 150); const pw = sh * TILE_AR;
+        placeGrid(rects, shares, 0, 0, W, H - sh - GAP, SHARE_AR);
+        const per = Math.max(1, Math.floor((W + GAP) / (pw + GAP)));
+        people.forEach((el, i) => {
+          const r = Math.floor(i / per), c = i % per, inRow = Math.min(per, people.length - r * per);
+          rects.set(el, { x: (W - (inRow * pw + (inRow - 1) * GAP)) / 2 + c * (pw + GAP), y: H - sh + r * (sh + GAP), w: pw, h: sh });
+        });
+        used = H + (Math.ceil(people.length / per) - 1) * (sh + GAP);
+      } else { // the screen on the left, people in a column on the right
+        const sw = clamp(W * 0.17, 150, 240), sh = sw / TILE_AR;
+        placeGrid(rects, shares, 0, 0, W - sw - GAP, H, SHARE_AR);
+        const colH = people.length * sh + (people.length - 1) * GAP, top = Math.max(0, (H - colH) / 2);
+        people.forEach((el, i) => rects.set(el, { x: W - sw, y: top + i * (sh + GAP), w: sw, h: sh }));
+        used = Math.max(H, colH);
+      }
+    } else if (people.length === 2 && !wide) {
+      layout = 'duo';
+      const me = people.find(t => t.dataset.pid === 'local') || people[1];
+      const other = people.find(t => t !== me);
+      rects.set(other, { x: 0, y: 0, w: W, h: H });
+      const pw = Math.round(clamp(W * (phone ? 0.3 : 0.21), 96, 320)), ph = Math.round(pw / TILE_AR), m = phone ? 10 : 14;
+      const c = pipCorner();
+      rects.set(me, { x: c[1] === 'r' ? W - pw - m : m, y: c[0] === 'b' ? H - ph - m : m, w: pw, h: ph });
+      other.classList.add('lc-main'); me.classList.add('lc-pip');
+    } else {
+      layout = people.length === 1 ? 'solo' : 'grid';
+      used = placeGrid(rects, people, 0, 0, W, H, TILE_AR, phone ? { maxCols: 2, minW: 140 } : { minW: 150 });
+    }
+    if (layout !== 'duo') people.forEach(t => t.classList.remove('lc-main', 'lc-pip'));
+    g.dataset.layout = layout;
+    g.style.height = Math.ceil(Math.max(H, used)) + 'px';
+    st.classList.toggle('lc-scroll', used > H + 1);
+    tiles.forEach(t => {
+      const r = rects.get(t); if (!r) return;
+      const set = (k, v) => { const px = Math.round(v) + 'px'; if (t.style[k] !== px) t.style[k] = px; };
+      set('left', r.x); set('top', r.y); set('width', r.w); set('height', r.h);
+    });
+    // new tiles appear in place (no slide from the corner); later moves are animated
+    const fresh = tiles.filter(t => t.classList.contains('lc-new'));
+    if (fresh.length) requestAnimationFrame(() => requestAnimationFrame(() => fresh.forEach(t => t.classList.remove('lc-new'))));
+  }
+  // the stage changes size (window, side panel, phone rotation) → recompute rectangles only
+  function watchStage(R) {
+    const st = document.querySelector('#lc-room .lc-stage'); if (!st || !window.ResizeObserver) return;
+    let raf = 0;
+    R.ro = new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { if (S.room === R) { syncSideWide(); layoutStage(); } }); });
+    R.ro.observe(st);
+  }
+  // picture-in-picture: drag it to another corner (remembered in this browser)
+  function onPipDown(e) {
+    const t = e.target.closest('.lc-tile.lc-pip'); if (!t || e.button > 0 || e.target.closest('button')) return;
+    const g = t.parentElement; const x0 = e.clientX, y0 = e.clientY; let moved = false;
+    try { t.setPointerCapture(e.pointerId); } catch (er) { /* ignore */ }
+    t.classList.add('dragging');
+    const move = ev => { const dx = ev.clientX - x0, dy = ev.clientY - y0; if (Math.abs(dx) + Math.abs(dy) > 4) moved = true; t.style.transform = `translate(${dx}px,${dy}px)`; };
+    const up = ev => {
+      t.removeEventListener('pointermove', move); t.removeEventListener('pointerup', up); t.removeEventListener('pointercancel', up);
+      t.classList.remove('dragging'); t.style.transform = '';
+      if (!moved) return;
+      const gr = g.getBoundingClientRect(), tr = t.getBoundingClientRect();
+      const cx = tr.left + tr.width / 2 + (ev.clientX - x0), cy = tr.top + tr.height / 2 + (ev.clientY - y0);
+      lsSet('tc_lc_pip', (cy > gr.top + gr.height / 2 ? 'b' : 't') + (cx > gr.left + gr.width / 2 ? 'r' : 'l'));
+      layoutStage();
+    };
+    t.addEventListener('pointermove', move); t.addEventListener('pointerup', up); t.addEventListener('pointercancel', up);
+  }
+  // Board / Document on a desktop: a wide side panel (58% by default, up to 75%), remembered in this browser
+  const SIDE_MIN = 40, SIDE_DEF = 58, SIDE_MAX = 75;
+  const sideWidth = () => { const v = parseFloat(lsGet('tc_lc_side_w')); return Number.isFinite(v) ? clamp(v, SIDE_MIN, SIDE_MAX) : SIDE_DEF; };
+  function syncSideWide() {
+    const R = S.room; const room = document.getElementById('lc-room'); if (!R || !room) return false;
+    const wide = (R.side === 'board' || R.side === 'doc') && !isNarrow();
+    const was = room.classList.contains('side-wide');
+    room.classList.toggle('side-wide', wide);
+    const w = sideWidth(); room.style.setProperty('--lc-side-w', w + '%');
+    const b = document.getElementById('lc-side-size');
+    if (b) {
+      b.hidden = !wide;
+      const big = w >= SIDE_MAX - 1; const k = big ? 'Smaller' : 'Bigger';
+      const lb = b.querySelector('.lc-side-size-lb'); if (lb && lb.dataset.k !== k) { lb.dataset.k = k; lb.textContent = k; }
+      b.setAttribute('aria-pressed', String(big));
+      b.title = tr(big ? 'Make the panel smaller' : 'Make the panel bigger');
+    }
+    const grip = document.getElementById('lc-side-grip'); if (grip) { grip.hidden = !wide; grip.setAttribute('aria-valuenow', String(Math.round(w))); }
+    return was !== wide;
+  }
+  function setSideWidth(v) { lsSet('tc_lc_side_w', String(Math.round(clamp(v, SIDE_MIN, SIDE_MAX)))); syncSideWide(); layoutStage(); }
+  function onGripDown(e) {
+    const grip = e.target.closest('#lc-side-grip'); if (!grip || e.button > 0) return;
+    const body = document.querySelector('#lc-room .lc-room-body'); if (!body) return;
+    e.preventDefault(); try { grip.setPointerCapture(e.pointerId); } catch (er) { /* ignore */ }
+    const room = document.getElementById('lc-room'); room.classList.add('resizing');
+    const pct = ev => { const r = body.getBoundingClientRect(); return clamp((r.right - ev.clientX) / r.width * 100, SIDE_MIN, SIDE_MAX); };
+    const move = ev => room.style.setProperty('--lc-side-w', pct(ev) + '%');
+    const up = ev => { grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up); room.classList.remove('resizing'); setSideWidth(pct(ev)); };
+    grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up); grip.addEventListener('pointercancel', up);
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  // ROOM BACKGROUND set by the institution (Branding → "Classroom"; 001_base.sql "ROOM BRANDING"): a color, an uploaded
+  // image (our storage bucket only) or the default light one, inherited by branches. Lobby + room, for everyone in the class.
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  const ROOM_BG_URL_RE = /^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?\/storage\/v1\/object\/public\/room-backgrounds\/[0-9a-f-]{36}\/[A-Za-z0-9._-]{1,120}\.(jpe?g|png|webp)$/i;
+  function cleanRoomBg(b) {
+    if (b && b.kind === 'color' && /^#[0-9a-f]{6}$/i.test(b.color || '')) return { kind: 'color', color: b.color.toLowerCase() };
+    if (b && b.kind === 'image' && ROOM_BG_URL_RE.test(b.image_url || '')) return { kind: 'image', url: b.image_url };
+    return { kind: 'default' };
+  }
+  let roomBgSeq = 0;
+  async function loadRoomBg(key) {
+    const seq = ++roomBgSeq;
+    let b = null;
+    try {
+      if (typeof sb !== 'undefined' && currentUser) {
+        const { data, error } = await sb.rpc('get_room_background', S.sessionId ? { p_session: S.sessionId } : {});
+        if (!error) b = data;
+      }
+    } catch (e) { /* the default background */ }
+    if (seq !== roomBgSeq) return;
+    S.roomBg = { key, ...cleanRoomBg(b) }; S.roomBgLoading = null;
+    syncRoomBg();
+  }
+  function syncRoomBg() {
+    const el = root(); if (!el) return;
+    const on = S.view === 'lobby' || S.view === 'room';
+    const key = (currentUser?.id || '-') + ':' + (S.sessionId || '-');
+    if (on && S.roomBg?.key !== key && S.roomBgLoading !== key) { S.roomBgLoading = key; loadRoomBg(key); }
+    const b = on && S.roomBg ? S.roomBg : { kind: 'default' };
+    if (el.dataset.roombg !== b.kind) el.dataset.roombg = b.kind;
+    el.style.setProperty('--lc-room-color', b.kind === 'color' ? b.color : '');
+    el.style.setProperty('--lc-room-img', b.kind === 'image' ? `url("${b.url}")` : '');
   }
   function updateTiles() {
     const R = S.room; const g = document.getElementById('lc-grid'); if (!R || !g) return;
@@ -1147,6 +1366,8 @@ Cierre y ticket de salida (5 min)
     room.classList.toggle('doc-open', R.side === 'doc');
     room.classList.toggle('board-open', R.side === 'board');
     room.classList.toggle('board-full', R.side === 'board' && !!R.boardFull);
+    const sideKey = (R.side || '') + '|' + !!R.boardFull;
+    if (syncSideWide() | (R._sideKey !== sideKey)) { R._sideKey = sideKey; layoutStage(); }
     // side panel tabs
     ['plan', 'chat', 'people', 'doc', 'board'].forEach(k => {
       const tab = document.getElementById('lc-tab-' + k); const body = document.getElementById('lc-side-' + k); const c = document.getElementById('lc-ctl-' + k);
@@ -1349,6 +1570,7 @@ Cierre y ticket de salida (5 min)
     if (R.doc && R.doc !== 'loading') { try { R.doc.close(); } catch (e) { /* ignore */ } }
     if (R.board && R.board !== 'loading') { try { R.board.close(); } catch (e) { /* ignore */ } }
     if (window.TCAttendance && R.attendance) window.TCAttendance.roomLeave();
+    if (R.ro) { try { R.ro.disconnect(); } catch (e) { /* ignore */ } R.ro = null; }
     clearViewTimers();
     stopStream(R.stream); stopStream(R.screen);
     try { R.provider && R.provider.disconnect(); } catch (e) { /* ignore */ }
@@ -1672,6 +1894,7 @@ Cierre y ticket de salida (5 min)
       case 'hand': if (R) { R.hand = !R.hand; await R.provider.setHandRaised(R.hand); updateRoomUi(); } break;
       case 'side': if (R) setSide(el.dataset.side); break;
       case 'side-close': if (R) { R.side = null; updateRoomUi(); } break;
+      case 'side-size': if (R) setSideWidth(sideWidth() >= SIDE_MAX - 1 ? SIDE_DEF : SIDE_MAX); break;
       case 'rec-pause': if (R) togglePause(); break;
       case 'decline-back': closeDecline(true); break;
       case 'decline-send': sendDecline(el); break;
@@ -1756,6 +1979,8 @@ Cierre y ticket de salida (5 min)
       }
       return;
     }
+    // the side panel resize handle: ← / → (wider / narrower)
+    if (S.room && e.target && e.target.id === 'lc-side-grip' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); setSideWidth(sideWidth() + (e.key === 'ArrowLeft' ? 5 : -5)); return; }
     if (!S.room || !S.room.endOpen) return;
     if (e.key === 'Escape') { e.preventDefault(); closeEndModal(); return; }
     if (e.key === 'Tab') {
@@ -1771,6 +1996,7 @@ Cierre y ticket de salida (5 min)
     el.addEventListener('input', onInput);
     el.addEventListener('change', onChange);
     el.addEventListener('submit', onSubmit);
+    el.addEventListener('pointerdown', e => { onPipDown(e); onGripDown(e); });
     document.addEventListener('keydown', onKey);
     // Leaving the panel stops the lobby preview (the room keeps running, like any call app).
     const panel = document.getElementById('panel-live');
@@ -1951,6 +2177,8 @@ Cierre y ticket de salida (5 min)
     'Objectives and notes': 'Objetivos y notas', 'Whole class': 'Clase completa', 'Reset timer': 'Reiniciar temporizador', 'Details': 'Detalles',
     '▶ Start': '▶ Iniciar', '⏸ Pause': '⏸ Pausar', '▶ Resume': '▶ Reanudar', 'Next activity ⏭': 'Siguiente actividad ⏭',
     'raised a hand': 'levantó la mano', 'Click here to hear the class': 'Tocá acá para escuchar la clase',
+    'Bigger': 'Más grande', 'Smaller': 'Más chico', 'Make the panel bigger': 'Agrandar el panel', 'Make the panel smaller': 'Achicar el panel',
+    'Drag to resize the panel': 'Arrastrá para cambiar el ancho del panel',
     'Your browser is blocking the microphone. Click the lock next to the address, allow the microphone and join again.': 'El navegador está bloqueando el micrófono. Tocá el candado al lado de la dirección, permití el micrófono y volvé a entrar.',
     'Microphone on': 'Micrófono activado',
     'Could not turn on the microphone. Leave and join the class again.': 'No se pudo activar el micrófono. Salí y volvé a entrar a la clase.', 'Recording started': 'Grabación iniciada', 'participants consented': 'participantes dieron su consentimiento',

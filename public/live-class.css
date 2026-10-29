@@ -308,11 +308,63 @@ dialog.lc-dialog .lc-modal{max-width:none;box-shadow:0 18px 50px rgba(0,0,0,.3)}
 .lc-ctl.lc-end:hover{background:#b91c1c}
 .lc-side{border-left-color:#dde1ea}
 .lc-tile{background:#2b303c}
-.lc-stage{display:flex;align-items:center;justify-content:center}
-.lc-grid{width:100%;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));align-content:center}
-.lc-grid[data-count="1"]{max-width:min(100%,calc((100vh - 190px) * 1.6))}
-.lc-grid[data-count="2"]{max-width:min(100%,calc((100vh - 190px) * 3.2 + 10px));grid-template-columns:1fr 1fr}
-.lc-grid[data-count="3"],.lc-grid[data-count="4"]{max-width:min(100%,calc((100vh - 200px) * 1.6 + 10px));grid-template-columns:1fr 1fr}
-@media (max-width:760px){.lc-grid[data-count="2"]{grid-template-columns:1fr}}
 /* "Click here to hear the class" when the browser blocked the sound */
 .lc-audio-unlock{position:fixed;left:50%;top:72px;transform:translateX(-50%);z-index:1100;background:#16a34a;color:#fff;border:none;border-radius:999px;padding:12px 22px;font:700 15px 'Inter',sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.25);cursor:pointer;animation:lc-blink 1.6s ease-in-out 3}
+
+/* ── 2026-10-29: stage layout (live-class.js layoutStage: every tile gets an absolute rectangle from the stage size) ── */
+.lc-stage{position:relative;overflow:hidden;padding:14px}
+.lc-stage.lc-scroll{overflow-y:auto}
+.lc-grid{display:block;position:relative;width:100%;min-height:100%}
+.lc-grid>.lc-tile{position:absolute;aspect-ratio:auto;margin:0;transition:left .28s ease,top .28s ease,width .28s ease,height .28s ease,box-shadow .2s}
+.lc-grid>.lc-tile.lc-new,.lc-room.resizing .lc-grid>.lc-tile{transition:box-shadow .2s}
+.lc-grid>.lc-share-tile{grid-column:auto;background:#151821}
+.lc-tile-bar{color:#fff}
+.lc-tile{border-radius:14px;box-shadow:0 1px 2px rgba(16,24,40,.12),0 6px 18px rgba(16,24,40,.10)}
+.lc-tile.speaking{box-shadow:0 0 0 3px #22c55e,0 0 18px rgba(34,197,94,.35)}
+.lc-tile.hand{box-shadow:0 0 0 3px #f59e0b,0 6px 18px rgba(16,24,40,.10)}
+/* 1:1 → the other person fills the stage; me in a picture-in-picture (drag it to another corner) */
+.lc-tile.lc-main{border-radius:16px}
+.lc-tile.lc-main .lc-avatar{width:112px;height:112px;font-size:40px}
+.lc-tile.lc-main .lc-tile-bar{left:14px;bottom:14px;font-size:13.5px}
+.lc-tile.lc-pip{z-index:3;border-radius:12px;cursor:grab;touch-action:none;box-shadow:0 0 0 2px rgba(255,255,255,.92),0 12px 30px rgba(10,14,25,.38)}
+.lc-tile.lc-pip.speaking{box-shadow:0 0 0 3px #22c55e,0 12px 30px rgba(10,14,25,.38)}
+.lc-tile.lc-pip.hand{box-shadow:0 0 0 3px #f59e0b,0 12px 30px rgba(10,14,25,.38)}
+.lc-tile.lc-pip.dragging{cursor:grabbing;transition:none;opacity:.92}
+.lc-tile.lc-pip .lc-avatar{width:40px;height:40px;font-size:14px}
+.lc-tile.lc-pip .lc-tile-top{left:6px;top:6px}
+.lc-tile.lc-pip .lc-tile-top .lc-badge{font-size:9.5px;padding:1px 6px}
+.lc-tile.lc-pip .lc-tile-bar{left:6px;right:6px;bottom:6px;font-size:11px}
+.lc-tile.lc-pip .lc-chip-t,.lc-tile.lc-pip .lc-you{display:none}
+.lc-tile.lc-pip .lc-hand-badge{font-size:18px;right:6px;top:4px}
+/* small tiles (big classes, strips beside a shared screen) */
+.lc-grid[data-layout="share"]>.lc-tile:not(.lc-share-tile) .lc-tile-top{display:none}
+.lc-grid[data-layout="share"]>.lc-tile:not(.lc-share-tile) .lc-avatar{width:38px;height:38px;font-size:13px}
+
+/* Board / Document open on a desktop: a wide panel (58% by default, up to 75%), the videos become a column beside it */
+@media (min-width:901px){
+  .lc-room.side-wide.side-open:not(.board-full) .lc-side{width:var(--lc-side-w,58%);max-width:calc(100% - 220px);position:relative}
+  .lc-room.side-wide .lc-stage{padding:10px}
+  .lc-side{position:relative}
+}
+.lc-side-grip{position:absolute;left:-5px;top:0;bottom:0;width:10px;cursor:col-resize;z-index:5;touch-action:none}
+.lc-side-grip::after{content:"";position:absolute;left:3px;top:50%;width:4px;height:44px;margin-top:-22px;border-radius:4px;background:#c9cfdb;transition:background .15s,height .15s}
+.lc-side-grip:hover::after,.lc-side-grip:focus-visible::after,.lc-room.resizing .lc-side-grip::after{background:var(--brand-primary,#7c5cbf);height:64px;margin-top:-32px}
+.lc-side-grip[hidden]{display:none}
+.lc-room.resizing{cursor:col-resize;user-select:none}
+.lc-room.resizing iframe,.lc-room.resizing .lc-side-body{pointer-events:none}
+.lc-side-size{display:inline-flex;align-items:center;gap:5px;background:#f3f4f8;border:1px solid #dde1ea;border-radius:8px;padding:5px 10px;margin:0 4px;font:600 12px 'Inter',sans-serif;color:var(--ink);cursor:pointer;white-space:nowrap}
+.lc-side-size:hover{background:#e9ecf2}
+.lc-side-size[aria-pressed="true"]{background:var(--purple-light,#ede7fb);border-color:var(--brand-primary,#7c5cbf);color:var(--brand-primary,#7c5cbf)}
+.lc-side-size[hidden]{display:none}
+
+/* ── 2026-10-29: the institution's room background (Branding → Classroom): stage + lobby. Tiles keep their own frame;
+   images get a soft shade so names and the lobby stay readable. ── */
+.lc-root[data-view="room"] .lc-stage{background:#eef0f5}
+.lc-root[data-view="room"][data-roombg="color"] .lc-stage,.lc-root[data-view="lobby"][data-roombg="color"]{background:radial-gradient(120% 90% at 50% 0%,rgba(255,255,255,.14),rgba(255,255,255,0) 60%),linear-gradient(rgba(0,0,0,0),rgba(0,0,0,.08)),var(--lc-room-color,#eef0f5)}
+.lc-root[data-view="room"][data-roombg="image"] .lc-stage,.lc-root[data-view="lobby"][data-roombg="image"]{background:linear-gradient(rgba(14,17,27,.30),rgba(14,17,27,.30)),var(--lc-room-img,none) center/cover no-repeat,#2b303c}
+.lc-root[data-view="lobby"][data-roombg="image"]{background-attachment:local,local,local}
+.lc-root[data-view="lobby"]:not([data-roombg="default"]) .lc-lobby>.lc-link,
+.lc-root[data-view="lobby"]:not([data-roombg="default"]) .lc-lobby>.lc-head{background:rgba(255,255,255,.92);border-radius:12px;box-shadow:0 4px 18px rgba(10,14,25,.12)}
+.lc-root[data-view="lobby"]:not([data-roombg="default"]) .lc-lobby>.lc-link{padding:6px 12px}
+.lc-root[data-view="lobby"]:not([data-roombg="default"]) .lc-lobby>.lc-head{padding:14px 18px}
+.lc-root[data-view="lobby"]:not([data-roombg="default"]) .lc-card{box-shadow:0 10px 30px rgba(10,14,25,.16);border-color:rgba(255,255,255,.6)}

@@ -51,8 +51,12 @@ AI-powered didactic planning platform for teachers.
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for the recording pipeline
-(2026-10-28, block `RECORDING PIPELINE`, see *Grabación real*): run it again** — tested from git 08ff5fc with data, then twice,
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for the live-room
+background (2026-10-29, block `ROOM BRANDING`: `institutions.room_bg_kind / room_bg_color / room_bg_url`, the public bucket
+`room-backgrounds` (3 MB, jpg / png / webp, written only by that unit's admins), `get_room_background`, `set_room_background`):
+run it again** — tested from git 964d3b0 with data, then twice, then `002_live_class.sql`. Admins set it in Branding → Classroom;
+branches inherit it. Before that it changed for the recording pipeline
+(2026-10-28, block `RECORDING PIPELINE`, see *Grabación real*): run it again — tested from git 08ff5fc with data, then twice,
 then `002_live_class.sql` (unchanged; still optional and still applies after it). Nothing is recorded until the owner sets the
 variables. Before that it changed for the group notebook
 (2026-10-28, see *Group notebook*) — tested from git b0afe36 with data, then twice; `002_live_class.sql` did not

@@ -7748,6 +7748,148 @@ revoke all on function public.update_ai_model_default(jsonb) from public, anon;
 grant execute on function public.update_ai_model_default(jsonb) to authenticated;
 -- ══ END RECORDING PIPELINE ══
 
+-- ══ BEGIN ROOM BRANDING ══
+-- ========== FONDO DEL AULA EN VIVO POR INSTITUCIÓN (2026-10-29) ==========
+-- Marca → "Fondo del aula": cada institución elige el fondo de la sala en vivo (y de la sala de espera) que ven TODOS los
+-- participantes de sus clases: un color, una imagen subida (jpg / png / webp, hasta 3 MB, bucket room-backgrounds con las
+-- mismas reglas que los logos: solo los admins de esa carpeta suben) o el fondo claro por defecto.
+-- Herencia como el resto de la marca: room_bg_kind null = usa el de la unidad de arriba más cercana que tenga uno.
+-- Escriben: los admins de la unidad (o de una superior) y el súper admin (set_room_background, o el update directo que la
+-- política inst_update ya permite: los CHECK validan igual). Leen: get_room_background, que devuelve SOLO el fondo (nunca
+-- otros datos de la institución) a quien da o asiste a esa clase, o a quien pertenece a esa unidad.
+alter table public.institutions add column if not exists room_bg_kind text;
+alter table public.institutions add column if not exists room_bg_color text;
+alter table public.institutions add column if not exists room_bg_url text;
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'institutions_room_bg_kind') then
+    alter table public.institutions add constraint institutions_room_bg_kind
+      check (room_bg_kind is null or room_bg_kind in ('default','color','image'));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'institutions_room_bg_color') then
+    alter table public.institutions add constraint institutions_room_bg_color
+      check (room_bg_color is null or room_bg_color ~ '^#[0-9A-Fa-f]{6}$');
+  end if;
+  -- la imagen: una URL pública de NUESTRO bucket, dentro de la carpeta de esta misma unidad
+  if not exists (select 1 from pg_constraint where conname = 'institutions_room_bg_url') then
+    alter table public.institutions add constraint institutions_room_bg_url
+      check (room_bg_url is null or (length(room_bg_url) <= 400
+             and room_bg_url ~ '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/storage/v1/object/public/room-backgrounds/[0-9a-f-]{36}/[A-Za-z0-9._-]{1,120}\.(jpe?g|png|webp)$'
+             and split_part(split_part(room_bg_url, '/room-backgrounds/', 2), '/', 1) = id::text));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'institutions_room_bg_complete') then
+    alter table public.institutions add constraint institutions_room_bg_complete
+      check ((room_bg_kind is distinct from 'color' or room_bg_color is not null)
+         and (room_bg_kind is distinct from 'image' or room_bg_url is not null));
+  end if;
+end $$;
+
+-- Almacenamiento: bucket público (las URL públicas funcionan para estudiantes sin políticas de lectura), escritura solo
+-- de los admins de la carpeta <institution_id>/, y solo imágenes jpg / png / webp
+insert into storage.buckets (id, name, public)
+values ('room-backgrounds', 'room-backgrounds', true)
+on conflict (id) do nothing;
+do $$
+begin
+  -- Supabase: límite de tamaño y tipos en el propio bucket (el stub de las pruebas no tiene esas columnas)
+  if exists (select 1 from information_schema.columns where table_schema = 'storage' and table_name = 'buckets' and column_name = 'file_size_limit')
+     and exists (select 1 from information_schema.columns where table_schema = 'storage' and table_name = 'buckets' and column_name = 'allowed_mime_types') then
+    execute $q$update storage.buckets set file_size_limit = 3145728, allowed_mime_types = array['image/jpeg','image/png','image/webp']
+               where id = 'room-backgrounds'$q$;
+  end if;
+end $$;
+create or replace function public.can_manage_room_bg(p_name text) returns boolean
+language sql stable security definer set search_path = public, pg_temp as
+$$ select coalesce(p_name ~* '^[0-9a-f-]{36}/[A-Za-z0-9._-]{1,120}\.(jpe?g|png|webp)$', false) and public.can_manage_logo(p_name) $$;
+revoke all on function public.can_manage_room_bg(text) from public, anon;
+grant execute on function public.can_manage_room_bg(text) to authenticated;
+drop policy if exists room_bg_read on storage.objects;
+create policy room_bg_read on storage.objects for select to authenticated
+  using (bucket_id = 'room-backgrounds' and public.can_manage_room_bg(name));
+drop policy if exists room_bg_write on storage.objects;
+create policy room_bg_write on storage.objects for insert to authenticated
+  with check (bucket_id = 'room-backgrounds' and public.can_manage_room_bg(name));
+drop policy if exists room_bg_update on storage.objects;
+create policy room_bg_update on storage.objects for update to authenticated
+  using (bucket_id = 'room-backgrounds' and public.can_manage_room_bg(name))
+  with check (bucket_id = 'room-backgrounds' and public.can_manage_room_bg(name));
+drop policy if exists room_bg_delete on storage.objects;
+create policy room_bg_delete on storage.objects for delete to authenticated
+  using (bucket_id = 'room-backgrounds' and public.can_manage_room_bg(name));
+
+-- Fondo efectivo de una unidad (uso interno): la unidad más cercana de su cadena que eligió uno; si ninguna, el claro
+create or replace function public.room_background(p_inst uuid) returns json
+language sql stable security definer set search_path = public, pg_temp as
+$$ select coalesce(
+     (select json_build_object('kind', i.room_bg_kind,
+                               'color', case when i.room_bg_kind = 'color' then i.room_bg_color end,
+                               'image_url', case when i.room_bg_kind = 'image' then i.room_bg_url end,
+                               'from', i.id)
+        from public.institution_chain(p_inst) c join public.institutions i on i.id = c.id
+       where i.room_bg_kind is not null order by c.depth limit 1),
+     json_build_object('kind', 'default', 'color', null, 'image_url', null, 'from', null)) $$;
+revoke all on function public.room_background(uuid) from public, anon, authenticated;
+
+-- Lectura: p_session = la clase en la que entro (docente, suplente, estudiante del grupo / invitado, o admin de su unidad);
+-- p_inst = una unidad (admins: su fondo propio + el heredado, para la pantalla Marca; miembros: el efectivo);
+-- sin nada = mi unidad (salas rápidas). Sin unidad → el fondo claro.
+create or replace function public.get_room_background(p_session uuid default null, p_inst uuid default null) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_inst uuid; v_parent uuid; i public.institutions%rowtype;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  if p_session is not null then
+    select s.institution_id into v_inst from public.class_sessions s where s.id = p_session;
+    if v_inst is null or not (public.teaches_session(p_session) or public.tc_attends(p_session, auth.uid()) or public.is_admin_of(v_inst)) then
+      raise exception 'No autorizado';
+    end if;
+    return public.room_background(v_inst);
+  end if;
+  if p_inst is not null then
+    if public.is_admin_of(p_inst) then
+      select * into i from public.institutions where id = p_inst;
+      if i.id is null then raise exception 'No autorizado'; end if;
+      return (public.room_background(p_inst)::jsonb || jsonb_build_object(
+        'own', jsonb_build_object('kind', i.room_bg_kind, 'color', i.room_bg_color, 'image_url', i.room_bg_url),
+        'parent', case when i.parent_id is not null then public.room_background(i.parent_id)::jsonb end))::json;
+    end if;
+    if not public.in_my_chain(p_inst) then raise exception 'No autorizado'; end if;
+    return public.room_background(p_inst);
+  end if;
+  v_inst := public.my_institution();
+  if v_inst is null then return public.room_background(null); end if;
+  return public.room_background(v_inst);
+end $$;
+revoke all on function public.get_room_background(uuid, uuid) from public, anon;
+grant execute on function public.get_room_background(uuid, uuid) to authenticated;
+
+-- Escritura (Marca): p_kind 'default' | 'color' | 'image', o null / 'inherit' = igual que la unidad de arriba
+create or replace function public.set_room_background(p_inst uuid, p_kind text, p_color text default null, p_url text default null) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_kind text := nullif(lower(btrim(coalesce(p_kind, ''))), ''); v_color text := nullif(btrim(coalesce(p_color, '')), '');
+        v_url text := nullif(btrim(coalesce(p_url, '')), '');
+begin
+  if auth.uid() is null or p_inst is null or not public.is_admin_of(p_inst) then raise exception 'No autorizado'; end if;
+  if not exists (select 1 from public.institutions where id = p_inst) then raise exception 'No autorizado'; end if;
+  if v_kind = 'inherit' then v_kind := null; end if;
+  if v_kind is not null and v_kind not in ('default','color','image') then raise exception 'Fondo del aula inválido'; end if;
+  if v_kind = 'color' and (v_color is null or v_color !~ '^#[0-9A-Fa-f]{6}$') then raise exception 'Color de fondo inválido (formato #RRGGBB)'; end if;
+  if v_kind = 'image' and (v_url is null or v_url !~ ('^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/storage/v1/object/public/room-backgrounds/' || p_inst::text || '/[A-Za-z0-9._-]{1,120}\.(jpe?g|png|webp)$')) then
+    raise exception 'Imagen de fondo inválida: subila desde Marca (jpg, png o webp, hasta 3 MB)';
+  end if;
+  update public.institutions
+     set room_bg_kind = v_kind,
+         room_bg_color = case when v_kind = 'color' then lower(v_color) end,
+         room_bg_url = case when v_kind = 'image' then v_url end
+   where id = p_inst;
+  return public.get_room_background(null, p_inst);
+end $$;
+revoke all on function public.set_room_background(uuid, text, text, text) from public, anon;
+grant execute on function public.set_room_background(uuid, text, text, text) to authenticated;
+-- ══ END ROOM BRANDING ══
+
 -- Que la API de Supabase vea enseguida las funciones nuevas
 notify pgrst, 'reload schema';
 

@@ -40,6 +40,8 @@
 # Recording pipeline (recording.sql: server-only writes, consent re-checked in the database, idempotent egress / transcript /
 # insights steps, real insights replace demo ones, reads like the insights, retention) runs with the other suites and after an
 # upgrade from git 08ff5fc (before the pipeline) with data (+ the current 001 twice; the data must survive; then 002 applies).
+# Room background per institution (room_branding.sql: CHECKs, inheritance, set / get RPC permissions, storage policies) runs
+# with the other suites and after an upgrade from git 964d3b0 (before room branding) with data (+ the current 001 twice, then 002).
 set -e
 cd "$(dirname "$0")/../.."
 DB=tc_sqltest_$$
@@ -49,7 +51,7 @@ trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null' EXIT
 $PSQL -d $DB -f tests/sql/supabase-stub.sql >/dev/null 2>&1
 for i in 1 2; do $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; done
 fail=0
-for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance consent launch_fixes classboard plans notebook recording; do
+for t in security hierarchy billing insights students csv_schedule class_insights classdoc_attendance consent launch_fixes classboard plans notebook recording room_branding; do
   out=$($PSQL -d $DB -f tests/sql/$t.sql 2>&1)
   echo "$out" | grep -E '\*\*FAIL\*\*' || true
   sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
@@ -340,5 +342,31 @@ if git cat-file -e 08ff5fc:supabase/migrations/001_base.sql 2>/dev/null; then
       if $PSQL -d $UP10 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP10 -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then echo "001 / 002 re-run after the recording suite: ok"; else echo "upgrade: **FAIL** 001 / 002 re-run after recording.sql"; fail=1; fi
     else echo "upgrade: **FAIL** could not upgrade from 08ff5fc"; fail=1; fi
   else echo "upgrade: **FAIL** could not load 08ff5fc + data"; fail=1; fi
+fi
+# Upgrade from 964d3b0 (before the room background) with data, then the current 001 twice, 002 and room_branding.sql
+if git cat-file -e 964d3b0:supabase/migrations/001_base.sql 2>/dev/null; then
+  UP11=${DB}_up11
+  $PSQL -d postgres -c "create database $UP11" >/dev/null
+  trap '$PSQL -d postgres -c "drop database if exists $DB" >/dev/null; for x in _up _up2 _live _up3 _up4 _up5 _up6 _up7 _up8 _up9 _up10 _up11; do $PSQL -d postgres -c "drop database if exists ${DB}$x" >/dev/null; done' EXIT
+  $PSQL -d $UP11 -f tests/sql/supabase-stub.sql >/dev/null 2>&1
+  DATA="select (select count(*) from public.institutions)||'/'||(select count(*) from public.institutions where logo_url is not null or color is not null)||'/'||(select count(*) from public.class_groups)||'/'||(select count(*) from public.class_sessions)||'/'||(select count(*) from public.profiles)"
+  if git show 964d3b0:supabase/migrations/001_base.sql | $PSQL -d $UP11 >/dev/null 2>&1 \
+     && git show 964d3b0:tests/sql/students.sql | $PSQL -d $UP11 >/dev/null 2>&1 && git show 964d3b0:tests/sql/hierarchy.sql | $PSQL -d $UP11 >/dev/null 2>&1; then
+    before=$($PSQL -At -d $UP11 -c "$DATA")
+    if $PSQL -d $UP11 -f supabase/migrations/001_base.sql >/dev/null 2>&1 && $PSQL -d $UP11 -f supabase/migrations/001_base.sql >/dev/null 2>&1 \
+       && $PSQL -d $UP11 -f supabase/migrations/002_live_class.sql >/dev/null 2>&1; then
+      after=$($PSQL -At -d $UP11 -c "$DATA")
+      dflt=$($PSQL -At -d $UP11 -c "select count(*) from public.institutions where room_bg_kind is not null")
+      if [[ "$before" == "$after" && "$before" != "0/"* && "$dflt" == "0" ]]; then echo "upgrade (964d3b0 + data → current 001 ×2 → 002): data kept ($after), every unit on the default room background"; else echo "upgrade: **FAIL** 964d3b0 before=$before after=$after room_bg=$dflt"; fail=1; fi
+      for t in room_branding; do
+        out=$($PSQL -d $UP11 -f tests/sql/$t.sql 2>&1)
+        echo "$out" | grep -E '\*\*FAIL\*\*' || true
+        sum=$(echo "$out" | grep -E '^ +[0-9]+ \| +[0-9]+$' | tail -1)
+        echo "upgrade (964d3b0 → current ×2 → 002) + $t: passed | failed = $sum"
+        [[ "$sum" =~ \|\ +0$ ]] || fail=1
+      done
+      if $PSQL -d $UP11 -f supabase/migrations/001_base.sql >/dev/null 2>&1; then echo "001 re-run after the room_branding suite: ok"; else echo "upgrade: **FAIL** 001 re-run after room_branding.sql"; fail=1; fi
+    else echo "upgrade: **FAIL** could not upgrade from 964d3b0"; fail=1; fi
+  else echo "upgrade: **FAIL** could not load 964d3b0 + data"; fail=1; fi
 fi
 exit $fail
