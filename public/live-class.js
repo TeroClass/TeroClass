@@ -238,7 +238,7 @@ Cierre y ticket de salida (5 min)
       this._rec = 'on'; // auto-recording: on from the start for everyone who consented
       room
         .on(E.ParticipantConnected, () => {
-          sync();
+          sync(); this._ensureRec();
           // someone joined while the teacher had paused: tell them (the default for a newcomer is "on")
           if (o.role === 'teacher' && this._rec !== 'on') this._send({ type: 'rec', state: this._rec }).catch(() => {});
         })
@@ -258,6 +258,7 @@ Cierre y ticket de salida (5 min)
         .on(E.ParticipantMetadataChanged, sync)
         .on(E.ActiveSpeakersChanged, (speakers) => this.emit('speaking', new Set(speakers.map(s => this._id(s)))))
         .on(E.DataReceived, (payload, participant) => this._onData(payload, participant))
+        .on(E.TrackPublished, () => this._ensureRec())
         .on(E.AudioPlaybackStatusChanged, () => this.emit('audioblocked', !room.canPlaybackAudio))
         .on(E.Disconnected, () => this.emit('disconnected'));
       await room.connect(j.url, j.token);
@@ -270,6 +271,15 @@ Cierre y ticket de salida (5 min)
       if (a && !o.mic) await lp.setMicrophoneEnabled(false);
       if (v && !o.cam) await lp.setCameraEnabled(false);
       this._sync();
+      this._ensureRec();
+    }
+    // 2026-10-29: automatic recording must not depend only on the LiveKit webhook: the teacher's browser asks the server to
+    // (re)start every consented microphone when the class starts and whenever someone joins or turns a mic on. The server
+    // re-checks consent in the database and never records the same microphone twice.
+    _ensureRec() {
+      if (this.o?.role !== 'teacher' || this._rec !== 'on') return;
+      clearTimeout(this._ensureT);
+      this._ensureT = setTimeout(() => { if (this.room && this._rec === 'on') this._postRec('on'); }, 2500);
     }
     _id(p) { return p === this.room?.localParticipant ? 'local' : p.identity; }
     _meta(p) { try { return JSON.parse(p.metadata || '{}') || {}; } catch (e) { return {}; } }
@@ -319,7 +329,7 @@ Cierre y ticket de salida (5 min)
     }
     async setMicrophoneEnabled(on) { await this.room.localParticipant.setMicrophoneEnabled(on); this._sync(); }
     // a microphone allowed after joining (it was blocked or missing in the lobby)
-    async publishMic(track) { await this.room.localParticipant.publishTrack(track, { source: this.LK.Track.Source.Microphone }); this._sync(); }
+    async publishMic(track) { await this.room.localParticipant.publishTrack(track, { source: this.LK.Track.Source.Microphone }); this._sync(); this._ensureRec(); }
     async startAudio() {
       try { await this.room.startAudio(); } catch (e) { /* ignore */ }
       document.querySelectorAll('audio.lc-remote-audio').forEach(el => { try { const pr = el.play(); if (pr && pr.catch) pr.catch(() => {}); } catch (e) { /* ignore */ } });
@@ -362,7 +372,7 @@ Cierre y ticket de salida (5 min)
     // The teacher ends a recorded calendar class: the server stops the recordings, closes the room for everyone and starts
     // processing (transcription → insights)
     async endForAll() { return this._postRec('end'); }
-    async disconnect() { try { await this.room?.disconnect(); } catch (e) { /* ignore */ } document.querySelectorAll('audio.lc-remote-audio').forEach(el => el.remove()); this.room = null; this._h = {}; }
+    async disconnect() { clearTimeout(this._ensureT); try { await this.room?.disconnect(); } catch (e) { /* ignore */ } document.querySelectorAll('audio.lc-remote-audio').forEach(el => el.remove()); this.room = null; this._h = {}; }
   }
 
   // Server decides: LiveKit only when the three env vars exist. Any failure → Demo (spends nothing).
