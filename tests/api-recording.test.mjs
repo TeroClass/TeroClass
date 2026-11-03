@@ -459,7 +459,7 @@ test('analysis end to end: teacher report + per-student insights stored (non-dem
   assert.equal(out.state, 'ready');
   assert.equal(aiBodies.length, 2, 'one teacher call + one student batch');
   assert.match(aiBodies[0].u, /deployments\/gpt-4o-mini\/chat\/completions/, 'ai_model_default.insights = mini');
-  assert.deepEqual(aiBodies[0].b.response_format, { type: 'json_object' }); assert.ok(aiBodies[0].b.max_tokens <= 4000);
+  assert.deepEqual(aiBodies[0].b.response_format, { type: 'json_object' }); assert.ok(aiBodies[0].b.max_tokens >= 6000 && aiBodies[0].b.max_tokens <= 16000, 'room for the 13 areas');
   assert.match(aiBodies[0].b.messages[1].content, /CLASS PLAN/); assert.match(aiBodies[0].b.messages[1].content, /\[1:02\] S1 Ana: I am going to visit/);
   assert.doesNotMatch(aiBodies[0].b.messages[1].content, /Caro|@/, 'only recorded people, first names, no emails');
   assert.match(aiBodies[0].b.messages[1].content, /teacher talk 2:22, student talk 0:31/, 'numbers from the timestamps given to the model');
@@ -717,4 +717,14 @@ test('Speech: the job URL from Azure carries ?api-version — /files goes in the
   const f = calls.find(c => c.url.includes('/files'));
   assert.equal(new URL(f.url).searchParams.get('api-version'), '2024-11-15');
   setEnv(false);
+});
+
+test('Azure OpenAI: max_tokens too high for the deployment → same request once more with 4096', async () => {
+  const bodies = [];
+  mockNet([[/openai\.azure\.com/, (u, o, b) => { bodies.push(b);
+    return b.max_tokens > 4096 ? { status: 400, json: { error: { code: 'invalid_request_error', message: 'max_tokens is too large: 8000. This model supports at most 4096 completion tokens' } } }
+      : { json: { choices: [{ message: { content: '{"a":1}' }, finish_reason: 'stop' }], usage: { total_tokens: 10 } } }; }]]);
+  const r = await AN.callAzureJson({ endpoint: 'https://tero-ai.openai.azure.com', key: 'k', apiVersion: 'v', deployment: 'gpt-4o' }, [{ role: 'user', content: 'x' }], 8000, 20000);
+  assert.equal(r.ok, true); assert.deepEqual(bodies.map(b => b.max_tokens), [8000, 4096]);
+  assert.equal(envMod.recordingEnv(ENV).sessionTokenCap, 400000);
 });

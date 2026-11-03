@@ -13,8 +13,11 @@ export const AREAS = ['Purpose & Alignment', 'Rapport', 'STT & Participation', '
   'Monitoring & Feedback', 'Error Correction', 'Questions & Interaction', 'Pacing & Transitions', 'Materials & Tech', 'Personalization',
   'Evidence of Learning'];
 export const RATINGS = ['strength', 'developing', 'focus'];
-export const TEACHER_MAX_TOKENS = 3200;
-export const STUDENT_MAX_TOKENS = 3200;
+// The full report (13 areas × evidence / impact / next + recap + form) does not fit in 3200 tokens: the answer was cut and
+// retried again and again until the class token cap (bug of 2026-11-03). 8000; deployments limited to 4096 → retried with 4096.
+export const TEACHER_MAX_TOKENS = 8000;
+export const STUDENT_MAX_TOKENS = 8000;
+export const FALLBACK_MAX_TOKENS = 4096;
 export const STUDENT_BATCH = 3;
 const TRANSCRIPT_CHARS_TEACHER = 60000;
 const TRANSCRIPT_CHARS_STUDENTS = 30000;
@@ -175,7 +178,7 @@ Return this JSON object:
  "focus": {"title", "text"} (priority area, with evidence),
  "action": {"title", "text"} (one concrete next step for the next class),
  "areas": exactly 13 objects, one per area IN THIS ORDER: ${AREAS.map(a => JSON.stringify(a)).join(', ')};
-   each {"area", "rating": "strength" | "developing" | "focus", "evidence" (minutes, quotes, counts), "impact", "next"},
+   each {"area", "rating": "strength" | "developing" | "focus", "evidence" (minutes, quotes, counts), "impact", "next"} (each of these three under 200 characters),
  "planVsActual": [{"section", "planned" (minutes), "actual" (minutes, estimated from the transcript), "note"}],
  "form": {"evidence", "worked", "priority", "next"} (one or two sentences each)}
 ${langRule(info.lang, info.locale)} Keep every text under 300 characters.`;
@@ -329,7 +332,15 @@ export { Invalid };
 // ════════════════════════════════════════════════════════════════════════════════════════
 // AZURE OPENAI (JSON mode, one request; the caller bounds the time)
 // ════════════════════════════════════════════════════════════════════════════════════════
-export async function callAzureJson({ endpoint, key, apiVersion, deployment }, messages, maxTokens, timeoutMs) {
+// max_tokens above what the deployment allows (older gpt-4o: 4096) → the same request once more with FALLBACK_MAX_TOKENS
+export async function callAzureJson(cfg, messages, maxTokens, timeoutMs) {
+  const t0 = Date.now();
+  const r = await callAzureJsonOnce(cfg, messages, maxTokens, timeoutMs);
+  if (r.status === 400 && maxTokens > FALLBACK_MAX_TOKENS && /max_tokens|max tokens|maximum/i.test(`${r.error} ${r.message || ''}`))
+    return callAzureJsonOnce(cfg, messages, FALLBACK_MAX_TOKENS, timeoutMs - (Date.now() - t0));
+  return r;
+}
+async function callAzureJsonOnce({ endpoint, key, apiVersion, deployment }, messages, maxTokens, timeoutMs) {
   const url = `${String(endpoint).replace(/\/+$/, '')}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs));
   try {
@@ -338,7 +349,7 @@ export async function callAzureJson({ endpoint, key, apiVersion, deployment }, m
     const text = await r.text(); let data = null; try { data = text ? JSON.parse(text) : null; } catch { data = null; }
     const c = Array.isArray(data?.choices) ? data.choices[0] : null;
     return { ok: r.ok && !!c?.message?.content, status: r.status, content: c?.message?.content || '', finish: c?.finish_reason || '',
-      usage: data?.usage || null, error: data?.error?.code || data?.error?.message || '' };
+      usage: data?.usage || null, error: data?.error?.code || data?.error?.message || '', message: data?.error?.message || '' };
   } catch (e) {
     return { ok: false, status: 0, content: '', usage: null, error: e?.name === 'AbortError' ? 'timeout' : 'network' };
   } finally { clearTimeout(timer); }

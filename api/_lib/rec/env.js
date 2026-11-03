@@ -37,7 +37,7 @@ export function recordingEnv(env = process.env) {
     // the Azure OpenAI deployments (same variables as api/generate.js)
     deployment: t('AZURE_OPENAI_DEPLOYMENT') || 'gpt-4o', deploymentMini: t('AZURE_OPENAI_DEPLOYMENT_MINI'),
     // token cap per class (all AI calls of one class: teacher report + every student batch)
-    sessionTokenCap: Math.max(20000, parseInt(env.INSIGHTS_SESSION_TOKEN_CAP || '', 10) || 150000),
+    sessionTokenCap: Math.max(20000, parseInt(env.INSIGHTS_SESSION_TOKEN_CAP || '', 10) || 400000),
     // Spanish of the transcription when the class says only "Spanish": es-UY (Uruguay) unless RECORDING_SPANISH_LOCALE=es-ES
     spanishLocale: t('RECORDING_SPANISH_LOCALE') === 'es-ES' ? 'es-ES' : 'es-UY',
     // FAST transcription (minutes instead of hours; falls back to batch). On unless RECORDING_FAST_TRANSCRIPTION=false

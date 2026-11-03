@@ -326,7 +326,7 @@ async function analyze(env, s, locale, dl) {
       if (res.capped) return fail('token cap');
       if (!res.ok) { warn('teacher analysis failed', res.status, res.error); return { state: 'processing', step: 'analysis_retry' }; }
       const v = AN.validateTeacherAi(res.content);
-      if (!v.ok) { warn('teacher analysis invalid:', v.error); return { state: 'processing', step: 'analysis_retry' }; }
+      if (!v.ok) { warn('teacher analysis invalid:', v.error, res.finish === 'length' ? '(answer cut: max_tokens)' : ''); return { state: 'processing', step: 'analysis_retry' }; }
       base = { kind: v.value.kind, lang, subject: v.value.subject || ctx.session.group_name || '', title: ctx.session.title || '', recap: v.value.recap };
       const data = AN.teacherData(v.value, AN.teacherMetrics(metrics, lang, ctx.session.duration_min), base);
       const st = await svc('rec_store_teacher_insights', { p_live: s.id, p_data: data, p_model: deployment });
@@ -345,7 +345,7 @@ async function analyze(env, s, locale, dl) {
       if (res.capped) { await svc('rec_finish', { p_live: s.id, p_status: 'ready' }); return { state: 'ready', step: 'token_cap', students_missing: left }; }
       if (!res.ok) { warn('student analysis failed', res.status, res.error); break; }
       const v = AN.validateStudentsAi(res.content, batch.map(b => sp.get(b.participant_id).ref));
-      if (v.errors.length) warn('student analysis invalid:', v.errors.slice(0, 3).join('; '));
+      if (v.errors.length) warn('student analysis invalid:', v.errors.slice(0, 3).join('; '), res.finish === 'length' ? '(answer cut: max_tokens)' : '');
       for (const b of batch) {
         const one = v.value.get(sp.get(b.participant_id).ref); if (!one) continue;
         let data;
