@@ -227,12 +227,24 @@ async function fastStep(env, s, recs, base, locale, dl) {
   } finally { await svc('rec_release_analysis', { p_live: s.id }); }
   return skip;
 }
+// Leaves the reason of a failed fast attempt in recordings.error (visible from the SQL Editor; Hobby keeps 1 h of logs).
+// rec_speech_failed with retry keeps the recording as it is while it has attempts left (speech_status stays null).
+async function noteFast(rec, msg) {
+  if ((Number(rec.speech_attempts) || 0) >= 3) return;
+  await svc('rec_speech_failed', { p_recording: rec.id, p_error: String(msg).replace(/\s+/g, ' ').trim().slice(0, 300), p_retry: true });
+}
 async function fastRecording(env, rec, base, locale, dl) {
   const d = await AZ.downloadBlob(env.storage, rec.storage_path, Math.min(30000, dl.left() - 25000));
-  if (!d.ok) { warn('fast: audio download failed', d.status, d.error || ''); return false; }
+  if (!d.ok) { warn('fast: audio download failed', d.status, d.error || ''); await noteFast(rec, `fast download ${d.status} ${d.error || ''}`); return false; }
   const t0 = Date.now();
   const f = await AZ.fastTranscribe(env.speech, { audio: d.buf, filename: String(rec.storage_path).split('/').pop(), locale }, dl.left() - 12000);
-  if (!f.ok) { warn('fast transcription failed', f.status, f.data?.error?.code || f.data?.code || f.data?.error || ''); return false; }
+  if (!f.ok) {
+    const why = f.data?.error?.code || f.data?.code || f.data?.error || '';
+    const msg = f.data?.error?.message || f.data?.message || '';
+    warn('fast transcription failed', f.status, why, msg);
+    await noteFast(rec, `fast ${f.status} ${typeof why === 'string' ? why : JSON.stringify(why)} ${typeof msg === 'string' ? msg : ''} [${locale}]`);
+    return false;
+  }
   const offset = Math.max(0, (Date.parse(rec.started_at) || base) - base);
   const segs = AZ.parseFastTranscript(f.data, offset);
   const st = await svc('rec_store_transcript', { p_recording: rec.id, p_segments: segs }, { timeoutMs: 15000 });

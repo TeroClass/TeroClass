@@ -632,12 +632,13 @@ test('fast transcription fails → batch job in the same call; lock busy → not
     ['fast off', { RECORDING_FAST_TRANSCRIPTION: 'false' }, [], { submit: 2, transcribe: 0 }],
   ]) {
     setEnv(true, extra);
-    const calls = mockNet([freshWork(), rpc('rec_release_analysis', () => ({ json: null })), rpc('rec_speech_submitted', () => ({ json: true })),
+    const calls = mockNet([freshWork(), rpc('rec_release_analysis', () => ({ json: null })), rpc('rec_speech_submitted', () => ({ json: true })), rpc('rec_speech_failed', () => ({ json: { ok: true, status: 'uploaded', speech_status: null } })),
       [BLOB, () => new Response(Buffer.from('OggS'), { status: 200 })],
       [`${SPEECH}/speechtotext/transcriptions:submit`, () => ({ status: 201, json: { self: `${SPEECH}/speechtotext/transcriptions/j?api-version=2024-11-15` } })], ...routes]);
     await quiet(() => pipeline.processSession(envMod.recordingEnv(), { live: LIVE, dl: pipeline.deadline(280000), analysis: false }));
     assert.equal(calls.filter(c => c.url.includes(':submit')).length, expect.submit, label + ': batch jobs');
     assert.equal(calls.filter(c => c.url.includes(':transcribe')).length, expect.transcribe, label + ': fast calls');
+    if (label === 'speech 500') assert.match(calls.rpc('rec_speech_failed')[0].body.p_error, /^fast 500 .*\[en-US\]$/, 'reason kept in recordings.error');
   }
   setEnv(false);
 });
