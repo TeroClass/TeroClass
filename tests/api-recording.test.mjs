@@ -409,10 +409,13 @@ test('analysis JSON validation: exactly the 13 TEC areas, ratings, required text
   assert.equal(AN.validateTeacherAi(JSON.stringify(TEACHER_AI())).ok, true, 'from the model text');
   assert.equal(AN.validateTeacherAi('```json\n' + JSON.stringify(TEACHER_AI()) + '\n```').ok, true);
   const bad = [
-    x => { x.areas.pop(); }, x => { x.areas[3].rating = 'excellent'; }, x => { x.areas[1].area = 'Charisma'; }, x => { x.areas[2] = { ...x.areas[0] }; },
-    x => { x.areas[0].evidence = ''; }, x => { x.kind = 'poetry'; }, x => { delete x.recap; }, x => { x.recap.topics = []; }, x => { delete x.form; }, x => { x.highlights = []; },
+    x => { x.areas = x.areas.slice(0, 7); }, x => { x.kind = 'poetry'; }, x => { delete x.recap; }, x => { x.recap.topics = []; }, x => { x.highlights = []; },
   ];
   for (const f of bad) { const x = TEACHER_AI(); f(x); assert.equal(AN.validateTeacherAi(x).ok, false, f.toString()); }
+  // tolerated since 2026-11-03 (the model rarely writes them exactly): one area missing, other rating words, unknown name in position, no form
+  for (const f of [x => { x.areas.pop(); }, x => { x.areas[3].rating = 'excellent'; }, x => { x.areas[1].area = 'Charisma'; }, x => { x.areas[0].evidence = ''; }, x => { delete x.form; }]) {
+    const x = TEACHER_AI(); f(x); const v = AN.validateTeacherAi(x); assert.equal(v.ok, true, f.toString()); assert.equal(v.value.areas.length, 13);
+  }
   assert.equal(AN.validateTeacherAi('not json').ok, false);
   const shuffled = TEACHER_AI(); shuffled.areas.reverse(); shuffled.areas[0].area = 'evidence of learning';
   assert.deepEqual(AN.validateTeacherAi(shuffled).value.areas.map(a => a.area), AN.AREAS, 'canonical order and names');
@@ -483,7 +486,7 @@ test('analysis end to end: teacher report + per-student insights stored (non-dem
   calls = mockNet([
     rpc('rec_work', () => ({ json: work })), rpc('rec_claim_analysis', () => ({ json: true })), rpc('rec_release_analysis', () => ({ json: null })),
     rpc('rec_session_context', () => ({ json: ctx })), rpc('rec_record_ai', () => ({ json: { session_tokens: 4500 } })),
-    [/openai\.azure\.com/, () => ({ json: { choices: [{ message: { content: JSON.stringify({ ...TEACHER_AI(), areas: AREA_OBJ().slice(0, 12) }) } }], usage: { prompt_tokens: 3000, completion_tokens: 1500 } } })],
+    [/openai\.azure\.com/, () => ({ json: { choices: [{ message: { content: JSON.stringify({ ...TEACHER_AI(), areas: AREA_OBJ().slice(0, 5) }) } }], usage: { prompt_tokens: 3000, completion_tokens: 1500 } } })],
   ]);
   out = await quiet(() => pipeline.processSession(envMod.recordingEnv(), { live: LIVE }));
   assert.equal(out.step, 'analysis_retry'); assert.equal(calls.rpc('rec_store_teacher_insights').length, 0); assert.equal(calls.rpc('rec_record_ai')[0].body.p_ok, true);
@@ -733,4 +736,24 @@ test('the AI reads the whole class: a 40-minute transcript (800 lines) is not tr
   const ls = Array.from({ length: 800 }, (_, i) => `[${String(Math.floor(i / 20)).padStart(2, '0')}:${String((i * 3) % 60).padStart(2, '0')}] ${i % 2 ? 'S1 Antonella' : 'T Ignacio'}: ${'word '.repeat(14)}`);
   assert.doesNotMatch(AN.capLines(ls, AN.TRANSCRIPT_CHARS_TEACHER), /lines omitted/);
   assert.doesNotMatch(AN.capLines(ls, AN.TRANSCRIPT_CHARS_STUDENTS), /lines omitted/);
+});
+
+test('teacher report validation is tolerant to how the model really writes (full TEC names, capitalised ratings, "10 min", 12 areas)', () => {
+  const FULL = ['Purpose & Alignment', 'Rapport & Learning Environment', 'Student Talking Time & Participation', 'Instructions & Task Setup', 'Scaffolding & Support',
+    'Language Input & Usefulness', 'Monitoring & Feedback', 'Error Correction', 'Questions & Interaction', 'Pacing & Transitions', 'Materials & Tech', 'Personalization & Relevance'];
+  const raw = { kind: 'language', subject: 'English', objective: 'Talk about plans', observation_focus: 'STT',
+    recap: { summary: 'We practised going to.', topics: [{ title: 'Plans', bullets: ['a', 'b'] }] },
+    highlights: [{ title: 'h1', text: 't' }, { title: 'h2', text: 't' }, { title: 'h3', text: 't' }], focus: { title: 'f', text: 't' }, action: { title: 'a', text: 't' },
+    areas: FULL.map((a, i) => ({ area: a, rating: i % 2 ? 'Strength' : 'Needs improvement', evidence: `At 03:1${i} …`, impact: 'i', next: 'n' })),
+    planVsActual: [{ section: 'Warm-up', planned: '10 min', actual: '12 minutes', note: '' }, { section: 'Bad', planned: 'n/a', actual: 'x' }] };
+  const v = AN.validateTeacherAi(JSON.stringify(raw));
+  assert.equal(v.ok, true, v.error);
+  assert.equal(v.value.areas.length, 13);
+  assert.deepEqual(v.value.areas.map(a => a.area), AN.AREAS);
+  assert.equal(v.value.areas[1].rating, 'strength'); assert.equal(v.value.areas[0].rating, 'focus');
+  assert.match(v.value.areas[12].evidence, /No clear evidence/, 'missing area filled');
+  assert.deepEqual(v.value.planVsActual, [{ section: 'Warm-up', planned: 10, actual: 12, note: '' }]);
+  assert.equal(v.value.highlights.length, 2);
+  assert.ok(v.value.form.next, 'form built from focus / action when missing');
+  assert.equal(AN.validateTeacherAi(JSON.stringify({ ...raw, areas: raw.areas.slice(0, 5) })).ok, false, 'still refuses a report with few areas');
 });

@@ -28,7 +28,9 @@ class Invalid extends Error {}
 const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
 const clean = (v, max) => String(v ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').replace(/[ \t]+/g, ' ').trim().slice(0, max);
 const reqStr = (v, max, what) => { const s = clean(v, max); if (!s) throw new Invalid(`missing ${what}`); return s; };
-const int = (v, lo, hi, what) => { const n = Number(v); if (!Number.isFinite(n)) throw new Invalid(`bad ${what}`); return Math.min(hi, Math.max(lo, Math.round(n))); };
+// numbers as the model writes them: 85, "85", "85%", "10 min", "5-10" (→ 5)
+const num = v => { if (typeof v === 'number') return v; const m = /-?\d+(?:[.,]\d+)?/.exec(String(v ?? '')); return m ? Number(m[0].replace(',', '.')) : NaN; };
+const int = (v, lo, hi, what) => { const n = num(v); if (!Number.isFinite(n)) throw new Invalid(`bad ${what}`); return Math.min(hi, Math.max(lo, Math.round(n))); };
 const arrOf = (v, lo, hi, what) => { if (!Array.isArray(v) || v.length < lo) throw new Invalid(`bad ${what}`); return v.slice(0, hi); };
 const r1 = x => Math.round(x * 10) / 10;
 const dec = (v, lang) => String(r1(v)).replace('.', lang === 'es' ? ',' : '.');
@@ -239,23 +241,34 @@ export function validateTeacherAi(raw) {
     const recap = { summary: reqStr(x.recap.summary, 900, 'recap.summary'),
       topics: arrOf(x.recap.topics, 1, 6, 'recap.topics').map(t => { if (!isObj(t)) throw new Invalid('bad topic');
         return { title: reqStr(t.title, 120, 'topic.title'), bullets: arrOf(t.bullets, 1, 6, 'topic.bullets').map(b => reqStr(b, 300, 'bullet')) }; }) };
-    const byName = new Map(AREAS.map(a => [norm(a), a]));
+    // Tolerant (the model rarely follows the exact names: "Rapport & Learning Environment", "Strength", 12 areas…): every
+    // area is matched by name, by its first word or by its position; unknown ratings → "developing"; missing areas are
+    // filled with "no clear evidence" as long as most of them came back. Before, any of these retried the whole report.
+    const areasIn = arrOf(x.areas, 8, 20, 'areas');
     const got = new Map();
-    for (const a of arrOf(x.areas, 13, 20, 'areas')) {
-      if (!isObj(a)) throw new Invalid('bad area');
-      const name = byName.get(norm(a.area)); if (!name || got.has(name)) throw new Invalid('bad area name');
-      if (!RATINGS.includes(a.rating)) throw new Invalid('bad rating');
-      got.set(name, { area: name, rating: a.rating, evidence: reqStr(a.evidence, 600, 'evidence'), impact: reqStr(a.impact, 600, 'impact'), next: reqStr(a.next, 600, 'next') });
-    }
-    if (got.size !== 13) throw new Invalid('need 13 areas');
+    areasIn.forEach((a, i) => {
+      if (!isObj(a)) return;
+      const n = norm(a.area || a.name || a.title);
+      const name = AREAS.find(A => norm(A) === n) || AREAS.find(A => n && (n.startsWith(norm(A)) || norm(A).startsWith(n)))
+        || AREAS.find(A => n && n.startsWith(norm(A.split(/[ &]/)[0]))) || (areasIn.length === 13 ? AREAS[i] : null);
+      if (!name || got.has(name)) return;
+      const r = String(a.rating || '').toLowerCase().trim();
+      const evidence = clean(a.evidence, 600); if (!evidence) return;
+      got.set(name, { area: name, rating: RATINGS.includes(r) ? r : /strong|good|excel/.test(r) ? 'strength' : /focus|priority|weak|improv/.test(r) ? 'focus' : 'developing',
+        evidence, impact: clean(a.impact, 600) || '—', next: clean(a.next, 600) || '—' });
+    });
+    if (got.size < 8) throw new Invalid(`only ${got.size} areas`);
+    const noEvidence = x.lang === 'es' || /[áéíóúñ]/i.test(JSON.stringify(x.recap)) ? 'Sin evidencia clara en esta clase.' : 'No clear evidence in this class.';
+    for (const A of AREAS) if (!got.has(A)) got.set(A, { area: A, rating: 'developing', evidence: noEvidence, impact: '—', next: '—' });
     const pva = Array.isArray(x.planVsActual) ? x.planVsActual.slice(0, 12) : [];
-    if (!isObj(x.form)) throw new Invalid('bad form');
+    const focus0 = isObj(x.focus) ? x.focus : {}; const action0 = isObj(x.action) ? x.action : {};
+    if (!isObj(x.form)) x.form = { evidence: clean(focus0.text, 600), worked: clean(Array.isArray(x.highlights) && x.highlights[0]?.text, 600), priority: clean(focus0.text, 600), next: clean(action0.text, 600) };
     return { ok: true, value: {
       kind, subject: clean(x.subject, 60), objective: reqStr(x.objective, 400, 'objective'), observation_focus: reqStr(x.observation_focus, 200, 'observation_focus'),
       recap, highlights: arrOf(x.highlights, 1, 2, 'highlights').map(h => tt(h, 'highlight')), focus: tt(x.focus, 'focus'), action: tt(x.action, 'action'),
       areas: AREAS.map(a => got.get(a)),
-      planVsActual: pva.map(r => { if (!isObj(r)) throw new Invalid('bad planVsActual');
-        return { section: reqStr(r.section, 120, 'section'), planned: int(r.planned, 0, 600, 'planned'), actual: int(r.actual, 0, 600, 'actual'), note: clean(r.note, 300) }; }),
+      planVsActual: pva.filter(r => isObj(r) && clean(r.section, 120) && Number.isFinite(num(r.planned)) && Number.isFinite(num(r.actual)))
+        .map(r => ({ section: clean(r.section, 120), planned: int(r.planned, 0, 600, 'planned'), actual: int(r.actual, 0, 600, 'actual'), note: clean(r.note, 300) })),
       form: { evidence: reqStr(x.form.evidence, 600, 'form.evidence'), worked: reqStr(x.form.worked, 600, 'form.worked'),
         priority: reqStr(x.form.priority, 600, 'form.priority'), next: reqStr(x.form.next, 600, 'form.next') },
     } };
