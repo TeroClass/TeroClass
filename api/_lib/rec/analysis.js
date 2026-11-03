@@ -19,8 +19,10 @@ export const TEACHER_MAX_TOKENS = 8000;
 export const STUDENT_MAX_TOKENS = 8000;
 export const FALLBACK_MAX_TOKENS = 4096;
 export const STUDENT_BATCH = 3;
-const TRANSCRIPT_CHARS_TEACHER = 60000;
-const TRANSCRIPT_CHARS_STUDENTS = 30000;
+// The WHOLE class goes to the AI (gpt-4o: 128k tokens of context). Before: 60k / 30k characters → in a 40-minute class the
+// middle was cut out ("[… n lines omitted …]"). Only classes of several hours are trimmed now.
+export const TRANSCRIPT_CHARS_TEACHER = 240000;
+export const TRANSCRIPT_CHARS_STUDENTS = 160000;
 
 class Invalid extends Error {}
 const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);

@@ -728,3 +728,9 @@ test('Azure OpenAI: max_tokens too high for the deployment → same request once
   assert.equal(r.ok, true); assert.deepEqual(bodies.map(b => b.max_tokens), [8000, 4096]);
   assert.equal(envMod.recordingEnv(ENV).sessionTokenCap, 400000);
 });
+
+test('the AI reads the whole class: a 40-minute transcript (800 lines) is not trimmed', () => {
+  const ls = Array.from({ length: 800 }, (_, i) => `[${String(Math.floor(i / 20)).padStart(2, '0')}:${String((i * 3) % 60).padStart(2, '0')}] ${i % 2 ? 'S1 Antonella' : 'T Ignacio'}: ${'word '.repeat(14)}`);
+  assert.doesNotMatch(AN.capLines(ls, AN.TRANSCRIPT_CHARS_TEACHER), /lines omitted/);
+  assert.doesNotMatch(AN.capLines(ls, AN.TRANSCRIPT_CHARS_STUDENTS), /lines omitted/);
+});
