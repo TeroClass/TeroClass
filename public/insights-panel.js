@@ -188,8 +188,9 @@
     if (seq !== IP.dseq || IP.view !== 'session') return;
     if (error) { IP.view = 'list'; toast(errMsg(error), 'err'); paintList(); loadList(); return; }
     IP.detail = data || {};
-    // a recorded class still being processed: say so and keep it moving (no real report yet)
-    if (recOn() && !inViewAs() && !(IP.detail.teacher && !IP.detail.teacher.is_demo)) {
+    // a recorded class still being processed: say so and keep it moving. Also when the teacher report is already real: the
+    // students come in a later step (before 2026-11-03 the page stopped polling there and the students never arrived).
+    if (recOn() && !inViewAs()) {
       const st = await rpc('rec_session_status', { p_session: id });
       if (seq !== IP.dseq || IP.view !== 'session') return;
       if (!st.error && st.data && ['processing', 'live'].includes(st.data.state)) { IP.rec = st.data; paintDetail(); startPoll(id); return; }
