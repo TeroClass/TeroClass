@@ -698,3 +698,22 @@ test('fast transcript parser: phrases → segments, junk ignored', () => {
     [{ start_ms: 3000, end_ms: 3500, text: 'Hi there', words: 2 }]);
   assert.deepEqual(az.parseFastTranscript(null), []);
 });
+
+test('Speech: the job URL from Azure carries ?api-version — /files goes in the path (bug of 2026-10-29: stuck in "submitted")', async () => {
+  setEnv(true);
+  const JOB = `${SPEECH}/speechtotext/transcriptions/Q1?api-version=2024-11-15`;
+  const calls = mockNet([
+    rpc('rec_work', () => ({ json: [{ id: LIVE, status: 'processing', started_at: new Date(T0).toISOString(),
+      recordings: [{ id: 'q1', status: 'uploaded', speech_status: 'submitted', speech_job: JOB, started_at: new Date(T0).toISOString() }] }] })),
+    rpc('rec_store_transcript', () => ({ json: { ok: true } })),
+    [u => u.startsWith(`${SPEECH}/speechtotext/transcriptions/Q1/files?`), () => ({ json: { values: [{ kind: 'Transcription', links: { contentUrl: 'https://spsvc.blob.core.windows.net/q.json?sig=1' } }] } })],
+    [u => u.startsWith(`${SPEECH}/speechtotext/transcriptions/Q1?`), (u, o) => (o.method === 'DELETE' ? { status: 204 } : { json: { status: 'Succeeded' } })],
+    ['https://spsvc.blob.core.windows.net/q.json', () => ({ json: transcriptJson([[0, 1000, 'Hi.']]) })],
+  ]);
+  const out = await quiet(() => pipeline.processSession(envMod.recordingEnv(), { live: LIVE, analysis: false }));
+  assert.equal(calls.rpc('rec_store_transcript').length, 1, 'transcript stored');
+  assert.equal(out.transcribed, 1);
+  const f = calls.find(c => c.url.includes('/files'));
+  assert.equal(new URL(f.url).searchParams.get('api-version'), '2024-11-15');
+  setEnv(false);
+});

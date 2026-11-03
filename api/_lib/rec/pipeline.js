@@ -193,10 +193,10 @@ async function stepRecording(env, s, rec, base, locale, dl) {
   }
   if (rec.speech_status !== 'submitted' || !rec.speech_job) return;
   const g = await AZ.getTranscription(env.speech, rec.speech_job, Math.min(8000, dl.left()));
-  if (!g.ok) return; // transient: next call
+  if (!g.ok) { warn('Speech job status failed', g.status, g.data?.code || g.data?.message || ''); return; } // transient: next call
   if (g.state === 'Succeeded') {
     const res = await AZ.getTranscriptionResult(env.speech, rec.speech_job, Math.min(15000, dl.left()));
-    if (!res.ok) return;
+    if (!res.ok) { warn('Speech result failed', res.status, res.error || ''); return; }
     const offset = Math.max(0, (Date.parse(rec.started_at) || base) - base);
     const segs = AZ.parseTranscript(res.data, offset);
     const st = await svc('rec_store_transcript', { p_recording: rec.id, p_segments: segs }, { timeoutMs: 15000 });

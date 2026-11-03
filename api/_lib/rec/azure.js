@@ -71,7 +71,9 @@ export async function getTranscription(sp, job, timeoutMs = 8000) {
 // The transcription JSON of a finished job (the result link is a SAS URL from Azure: fetched WITHOUT our key)
 export async function getTranscriptionResult(sp, job, timeoutMs = 15000) {
   if (!isOwnSpeechUrl(sp, job)) return { ok: false, error: 'bad job url' };
-  const files = await call(withVersion(`${job.replace(/\/+$/, '')}/files`, sp.apiVersion), { headers: { 'Ocp-Apim-Subscription-Key': sp.key } }, timeoutMs);
+  // the job URL from Azure carries "?api-version=…": add /files to the PATH, not after the query
+  const fu = new URL(job); fu.pathname = fu.pathname.replace(/\/+$/, '') + '/files';
+  const files = await call(withVersion(fu.toString(), sp.apiVersion), { headers: { 'Ocp-Apim-Subscription-Key': sp.key } }, timeoutMs);
   if (!files.ok) return { ok: false, status: files.status, error: 'files' };
   const f = (files.data?.values || []).find(v => v && v.kind === 'Transcription' && v.links?.contentUrl);
   if (!f) return { ok: false, error: 'no transcription file' };
