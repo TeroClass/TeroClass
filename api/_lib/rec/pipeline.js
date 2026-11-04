@@ -19,7 +19,8 @@ export const FAST_MIN_MS = 60000;          // a call needs at least this much ti
 export const FAST_LOCK_S = 300;            // one fast attempt per class at a time (rec_claim_analysis as the lock)
 export const FAST_GRACE_MS = 5 * 60000;    // short calls leave new recordings to a long call for this long, then use batch
 export const FAST_MAX_S = 2 * 3600;        // Speech fast transcription: audio under 2 hours
-export const MAX_KICKS = 60;               // self-calls in a row while a class is still processing (then the app / daily cron)
+export const MAX_KICKS = 60;
+export const STUDENT_RESERVE_TOKENS = 60000; // per student, on top of the class cap (see analyze)               // self-calls in a row while a class is still processing (then the app / daily cron)
 
 export const deadline = ms => { const end = Date.now() + ms; return { left: () => end - Date.now(), end }; };
 const log = (...a) => console.log('rec:', ...a);
@@ -312,8 +313,10 @@ async function analyze(env, s, locale, dl) {
     let used = Number(ctx.live?.insights_tokens) || 0;
     const info = { lang, locale, metrics, kind: null, subject: '' };
     let base = ctx.done?.teacher ? ctx.done.teacher_base : null;
-    const ai = async (messages, maxTokens) => {
-      if (used + AN.estimateTokens(messages, maxTokens) > env.sessionTokenCap) return { capped: true };
+    // The students get their own reserve on top of the class cap: retries of the teacher report must never leave them out
+    // (29/10: the teacher report used the whole cap and the class was closed "ready" without the student's insights).
+    const ai = async (messages, maxTokens, reserve = 0) => {
+      if (used + AN.estimateTokens(messages, maxTokens) > env.sessionTokenCap + reserve) return { capped: true };
       const res = await AN.callAzureJson(cfg, messages, maxTokens, Math.min(50000, dl.left() - 2500));
       if (res.usage) {
         const rr = await svc('rec_record_ai', { p_live: s.id, p_prompt: res.usage.prompt_tokens || 0, p_completion: res.usage.completion_tokens || 0, p_ok: res.ok, p_lang: locale });
@@ -341,8 +344,8 @@ async function analyze(env, s, locale, dl) {
     let left = todo.length;
     while (todo.length && dl.left() >= MIN_AI_MS) {
       const batch = todo.splice(0, AN.STUDENT_BATCH);
-      const res = await ai(AN.studentMessages(ctx, info, batch), AN.STUDENT_MAX_TOKENS);
-      if (res.capped) { await svc('rec_finish', { p_live: s.id, p_status: 'ready' }); return { state: 'ready', step: 'token_cap', students_missing: left }; }
+      const res = await ai(AN.studentMessages(ctx, info, batch), AN.STUDENT_MAX_TOKENS, STUDENT_RESERVE_TOKENS * batch.length);
+      if (res.capped) { warn('token cap with students missing', s.id, left); await svc('rec_finish', { p_live: s.id, p_status: 'ready' }); return { state: 'ready', step: 'token_cap', students_missing: left }; }
       if (!res.ok) { warn('student analysis failed', res.status, res.error); break; }
       const v = AN.validateStudentsAi(res.content, batch.map(b => sp.get(b.participant_id).ref));
       if (v.errors.length) warn('student analysis invalid:', v.errors.slice(0, 3).join('; '), res.finish === 'length' ? '(answer cut: max_tokens)' : '');

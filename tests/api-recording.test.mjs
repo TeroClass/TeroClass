@@ -490,6 +490,11 @@ test('analysis end to end: teacher report + per-student insights stored (non-dem
   ]);
   out = await quiet(() => pipeline.processSession(envMod.recordingEnv(), { live: LIVE }));
   assert.equal(out.step, 'analysis_retry'); assert.equal(calls.rpc('rec_store_teacher_insights').length, 0); assert.equal(calls.rpc('rec_record_ai')[0].body.p_ok, true);
+  // teacher retries used the whole class cap: the students still get written (their own reserve) — bug of 29/10
+  aiBodies.length = 0;
+  calls = net({ ctx: { ...ctx, live: { ...ctx.live, insights_tokens: 19500 }, done: { teacher: true, students: [], teacher_base: { kind: 'language', lang: 'en', subject: 'English', title: 'x', recap: TEACHER_AI().recap } } } });
+  out = await quiet(() => pipeline.processSession(envMod.recordingEnv({ ...process.env, INSIGHTS_SESSION_TOKEN_CAP: '20000' }), { live: LIVE }));
+  assert.equal(out.state, 'ready'); assert.ok(calls.rpc('rec_store_student_insights').length >= 1, 'student written despite the class cap');
   // token cap per class
   calls = net({ ctx: { ...ctx, live: { ...ctx.live, insights_tokens: 19000 } } });
   out = await quiet(() => pipeline.processSession(envMod.recordingEnv({ ...process.env, INSIGHTS_SESSION_TOKEN_CAP: '20000' }), { live: LIVE }));
