@@ -420,8 +420,14 @@ test('analysis JSON validation: exactly the 13 TEC areas, ratings, required text
   const shuffled = TEACHER_AI(); shuffled.areas.reverse(); shuffled.areas[0].area = 'evidence of learning';
   assert.deepEqual(AN.validateTeacherAi(shuffled).value.areas.map(a => a.area), AN.AREAS, 'canonical order and names');
   const long = TEACHER_AI(); long.objective = 'x'.repeat(5000); assert.equal(AN.validateTeacherAi(long).value.objective.length, 400, 'lengths capped');
-  const v = AN.validateStudentsAi({ students: [STUDENT_AI('S1'), STUDENT_AI('S9'), { ...STUDENT_AI('S2'), highlight: '' }] }, ['S1', 'S2']);
-  assert.equal(v.ok, true); assert.deepEqual([...v.value.keys()], ['S1'], 'unknown and invalid ones dropped (retried later)'); assert.equal(v.errors.length, 1);
+  const v = AN.validateStudentsAi({ students: [STUDENT_AI('S1'), STUDENT_AI('S9'), 'junk'] }, ['S1', 'S2']);
+  assert.equal(v.ok, true); assert.deepEqual([...v.value.keys()], ['S1'], 'unknown and invalid ones dropped (retried later)'); assert.equal(v.errors.length, 2);
+  // tolerant (2026-11-04): ref "S1 Antonella", one bad item dropped (not the whole student), no highlight → "—", single answer without ref
+  const messy = { ...STUDENT_AI('S1 Antonella'), highlight: '', improve: [{ original: 'I go yesterday', corrected: '', explanation: 'x' }, { original: 'he have', corrected: 'he has', explanation: 'agreement' }], score: '80%' };
+  const m1 = AN.validateStudentsAi({ students: [messy] }, ['S1']);
+  assert.equal(m1.ok, true); const s1 = m1.value.get('S1'); assert.equal(s1.improve.length, 1); assert.equal(s1.score, 80); assert.equal(s1.highlight, '—');
+  assert.equal(AN.validateStudentsAi({ students: [{ ...STUDENT_AI(''), ref: undefined }] }, ['S1']).value.has('S1'), true, 'one asked, one answered');
+  assert.equal(AN.validateStudentsAi({ student: STUDENT_AI('S1') }, ['S1']).ok, true, '"student" instead of "students"');
   assert.equal(AN.validateStudentsAi('{"students": "x"}', ['S1']).ok, false);
   // final data = exactly what public/insights-view.js renders
   const m = AN.computeMetrics({ participants: PARTS, segments: SEGS });
@@ -761,4 +767,19 @@ test('teacher report validation is tolerant to how the model really writes (full
   assert.equal(v.value.highlights.length, 2);
   assert.ok(v.value.form.next, 'form built from focus / action when missing');
   assert.equal(AN.validateTeacherAi(JSON.stringify({ ...raw, areas: raw.areas.slice(0, 5) })).ok, false, 'still refuses a report with few areas');
+});
+
+test('class segments: a rehearsal hours earlier in the same call is left out and the class starts at minute 0', () => {
+  const H = 3600e3; const off = 19 * H;
+  const segs = [{ participant_id: 't', start_ms: 1000, end_ms: 20000, text: 'test' },
+    { participant_id: 't', start_ms: off + 5000, end_ms: off + 9000, text: 'Hi' }, { participant_id: 's', start_ms: off + 10000, end_ms: off + 12000, text: 'Hello' }];
+  assert.deepEqual(AN.classSegments(segs).map(s => [s.start_ms, s.end_ms, s.text]), [[0, 4000, 'Hi'], [5000, 7000, 'Hello']]);
+  assert.equal(AN.classSegments([]).length, 0);
+});
+
+test('a phrase transcribed twice (stereo channels) counts once', () => {
+  const dup = [{ participant_id: 's', start_ms: 1000, end_ms: 3000, text: 'Hello there' }, { participant_id: 's', start_ms: 1100, end_ms: 3000, text: 'hello there' }];
+  assert.equal(AN.classSegments(dup).length, 1);
+  const j = { recognizedPhrases: [0, 1].map(ch => ({ channel: ch, recognitionStatus: 'Success', offsetInTicks: 0, durationInTicks: 10000000, nBest: [{ display: 'Hi', confidence: 0.9 }] })) };
+  assert.equal(az.parseTranscript(j).length, 1);
 });

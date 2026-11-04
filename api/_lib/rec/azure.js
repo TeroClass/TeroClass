@@ -138,6 +138,7 @@ export function parseTranscript(json, offsetMs = 0) {
   const out = [];
   for (const p of Array.isArray(json?.recognizedPhrases) ? json.recognizedPhrases : []) {
     if (!p || (p.recognitionStatus && p.recognitionStatus !== 'Success')) continue;
+    if (Number(p.channel) > 0) continue; // one microphone per track: channel 1 of a stereo file is the same voice again
     const best = Array.isArray(p.nBest) ? p.nBest[0] : null;
     const text = String(best?.display || best?.lexical || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
     if (!text) continue;

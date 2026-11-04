@@ -48,6 +48,22 @@ export function questionsIn(text) {
 }
 const vocabOf = texts => new Set(texts.join(' ').toLowerCase().split(/[^\p{L}']+/u).filter(w => w.length >= 2));
 
+// Segments → the class itself: a call left open (rehearsal the day before, class the next day) leaves hours between pieces of
+// audio; only the LAST block (no gap over 2 h) is the class, re-based to minute 0. Before (29/10): "min 1170", a 33 s rehearsal
+// mixed in, wrong talk times.
+export const SESSION_GAP_MS = 2 * 3600 * 1000;
+export function classSegments(segments) {
+  // the same phrase twice (stereo audio → Azure transcribes channel 0 and 1) counts once
+  const seen = new Set();
+  const segs = (segments || []).filter(s => Number.isFinite(s.start_ms)).slice().sort((a, b) => a.start_ms - b.start_ms)
+    .filter(s => { const k = `${s.participant_id}|${Math.round(s.start_ms / 500)}|${String(s.text || '').trim().toLowerCase()}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  if (!segs.length) return [];
+  let from = 0; let end = segs[0].end_ms;
+  for (let i = 1; i < segs.length; i++) { if (segs[i].start_ms - end > SESSION_GAP_MS) from = i; end = Math.max(end, segs[i].end_ms); }
+  const base = segs[from].start_ms;
+  return segs.slice(from).map(s => ({ ...s, start_ms: s.start_ms - base, end_ms: s.end_ms - base }));
+}
+
 // ctx: {participants[{participant_id, role, recorded}], segments[{participant_id, start_ms, end_ms, text, words}]}
 export function computeMetrics(ctx) {
   const parts = new Map((ctx.participants || []).map(p => [p.participant_id, p]));
@@ -277,10 +293,13 @@ export function validateTeacherAi(raw) {
 
 function oneStudent(s) {
   if (!isObj(s)) throw new Invalid('bad student');
-  const items = (v, hi, f, what) => (Array.isArray(v) ? v : (v == null ? [] : (() => { throw new Invalid(`bad ${what}`); })())).slice(0, hi).map(o => { if (!isObj(o)) throw new Invalid(`bad ${what}`); return f(o); });
+  // Tolerant like the teacher report: a bad item is dropped, never the whole student (one missing "corrected" used to
+  // throw away all of Antonella's feedback and retry forever — 2026-11-04)
+  const items = (v, hi, f) => (Array.isArray(v) ? v : isObj(v) ? [v] : []).map(o => { if (!isObj(o)) return null; try { return f(o); } catch (e) { if (e instanceof Invalid) return null; throw e; } })
+    .filter(Boolean).slice(0, hi);
   return {
-    ref: String(s.ref || ''), highlight: reqStr(s.highlight, 300, 'highlight'), level: clean(s.level, 40), score: int(s.score ?? 0, 0, 100, 'score'),
-    ...(s.terms_used != null ? { terms_used: int(s.terms_used, 0, 1000, 'terms_used') } : {}),
+    ref: String(s.ref || '').trim(), highlight: clean(s.highlight, 300) || '—', level: clean(s.level, 40) || '—', score: (() => { try { return int(s.score ?? 0, 0, 100, 'score'); } catch { return 0; } })(),
+    ...(Number.isFinite(num(s.terms_used)) ? { terms_used: int(s.terms_used, 0, 1000, 'terms_used') } : {}),
     tracker: items(s.tracker, 6, o => ({ concept: reqStr(o.concept, 120, 'concept'), difficulty: clean(o.difficulty, 30), used: int(o.used ?? 0, 0, 999, 'used'), mastery: int(o.mastery ?? 0, 0, 100, 'mastery') }), 'tracker'),
     pron: items(s.pron, 4, o => ({ item: reqStr(o.item, 160, 'pron.item'), score: int(o.score ?? 0, 0, 100, 'pron.score'), tip: clean(o.tip, 300) }), 'pron'),
     didWell: items(s.didWell, 3, o => ({ text: reqStr(o.text, 300, 'didWell.text'), note: clean(o.note, 300) }), 'didWell'),
@@ -292,10 +311,17 @@ function oneStudent(s) {
 export function validateStudentsAi(raw, refs) {
   let x; try { x = isObj(raw) ? raw : parseModelJson(raw); } catch (e) { if (e instanceof Invalid) return { ok: false, value: new Map(), errors: [e.message] }; throw e; }
   const want = new Set(refs); const out = new Map(); const errors = [];
-  for (const s of Array.isArray(x.students) ? x.students : []) {
-    try { const v = oneStudent(s); if (want.has(v.ref) && !out.has(v.ref)) out.set(v.ref, v); }
-    catch (e) { if (e instanceof Invalid) errors.push(e.message); else throw e; }
-  }
+  const list = Array.isArray(x.students) ? x.students : isObj(x.student) ? [x.student] : (isObj(x) && x.highlight ? [x] : []);
+  // the ref as the model writes it: "S1", "S1 Antonella", "s1"…; one student asked + one answer → that one
+  const refOf = r => { const m = /^\s*(S\d+)\b/i.exec(String(r || '')); return m ? m[1].toUpperCase() : ''; };
+  list.forEach((s, i) => {
+    try {
+      const v = oneStudent(s); let ref = refOf(v.ref);
+      if (!want.has(ref) && refs.length === list.length) ref = refs[i];
+      if (want.has(ref) && !out.has(ref)) out.set(ref, { ...v, ref }); else errors.push(`unknown ref ${String(v.ref).slice(0, 20)}`);
+    } catch (e) { if (e instanceof Invalid) errors.push(e.message); else throw e; }
+  });
+  if (!list.length) errors.push(`no students in the answer (keys: ${Object.keys(x).slice(0, 5).join(',')})`);
   return { ok: out.size > 0, value: out, errors };
 }
 

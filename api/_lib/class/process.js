@@ -63,5 +63,5 @@ export default async function handler(req, res) {
   if (before.data.state !== 'processing') return res.status(200).json(before.data);
   const out = await processSession(env, { cls: sid.toLowerCase(), dl: deadline(BUDGET_MS) });
   const after = await sessionStatus(token, sid);
-  return res.status(200).json({ ...(after.allowed ? after.data : before.data), step: out.step || null });
+  return res.status(200).json({ ...(after.allowed ? after.data : before.data), step: out.step || null, ...(out.why ? { why: out.why } : {}) });
 }

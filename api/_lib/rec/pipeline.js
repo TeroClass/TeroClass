@@ -306,6 +306,7 @@ async function analyze(env, s, locale, dl) {
     if (!ctx.session) return fail('no calendar class');
     if ((ctx.live?.analysis_attempts || 0) > MAX_ANALYSIS_ATTEMPTS) return fail('too many attempts');
     if (!Array.isArray(ctx.segments) || !ctx.segments.length) return fail('no speech');
+    ctx.segments = AN.classSegments(ctx.segments);
     const lang = locale.slice(0, 2);
     const metrics = AN.computeMetrics(ctx);
     const deployment = pickModel(env, ctx.model);
@@ -341,25 +342,25 @@ async function analyze(env, s, locale, dl) {
     const sp = AN.speakers(ctx);
     const doneSet = new Set(Array.isArray(ctx.done?.students) ? ctx.done.students : []);
     const todo = (ctx.participants || []).filter(p => p.role === 'student' && p.recorded && p.enrollment_id && !doneSet.has(p.enrollment_id));
-    let left = todo.length;
+    let left = todo.length; let why = '';
     while (todo.length && dl.left() >= MIN_AI_MS) {
       const batch = todo.splice(0, AN.STUDENT_BATCH);
       const res = await ai(AN.studentMessages(ctx, info, batch), AN.STUDENT_MAX_TOKENS, STUDENT_RESERVE_TOKENS * batch.length);
       if (res.capped) { warn('token cap with students missing', s.id, left); await svc('rec_finish', { p_live: s.id, p_status: 'ready' }); return { state: 'ready', step: 'token_cap', students_missing: left }; }
-      if (!res.ok) { warn('student analysis failed', res.status, res.error); break; }
+      if (!res.ok) { warn('student analysis failed', res.status, res.error); why = `ai ${res.status} ${String(res.error || '').slice(0, 120)}`; break; }
       const v = AN.validateStudentsAi(res.content, batch.map(b => sp.get(b.participant_id).ref));
-      if (v.errors.length) warn('student analysis invalid:', v.errors.slice(0, 3).join('; '), res.finish === 'length' ? '(answer cut: max_tokens)' : '');
+      if (v.errors.length) { warn('student analysis invalid:', v.errors.slice(0, 3).join('; '), res.finish === 'length' ? '(answer cut: max_tokens)' : ''); why = `invalid: ${v.errors.slice(0, 3).join('; ')}${res.finish === 'length' ? ' (cut)' : ''}`.slice(0, 200); }
       for (const b of batch) {
         const one = v.value.get(sp.get(b.participant_id).ref); if (!one) continue;
         let data;
         try { data = AN.studentData(one, AN.studentProgress(metrics, b.participant_id, one, ctx.previous?.[b.enrollment_id], info.kind), studentBase, studentBase.lang); }
-        catch (e) { warn('student data invalid', e?.message); continue; }
+        catch (e) { warn('student data invalid', e?.message); why = `data: ${e?.message}`; continue; }
         const st = await svc('rec_store_student_insights', { p_live: s.id, p_enrollment: b.enrollment_id, p_participant: b.participant_id, p_data: data, p_model: deployment });
-        if (st.ok) left--;
+        if (st.ok) left--; else why = `store ${st.status} ${String(st.data?.message || '').slice(0, 120)}`;
       }
       if (!v.ok) break;
     }
-    if (left > 0) return { state: 'processing', step: 'students', students_missing: left };
+    if (left > 0) return { state: 'processing', step: 'students', students_missing: left, why };
     await svc('rec_finish', { p_live: s.id, p_status: 'ready' });
     log('insights ready', s.id);
     return { state: 'ready' };
