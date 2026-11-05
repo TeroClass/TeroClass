@@ -193,3 +193,21 @@
 @keyframes ins-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.ins-spinner{animation:none}}
 .ins-proc-btn{white-space:nowrap}
+
+/* student dashboard: search (Enter / Search) + one class on one page + PDF (insights-panel.js, 2026-11-05) */
+.ins-search{align-items:flex-end}
+.ins-search .lc-btn.lc-primary{height:38px}
+.ins-search-info{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:0}
+.ins-search-info:empty{display:none}
+.ins-s-chip{cursor:pointer;border:1px solid var(--border);background:var(--white);font:inherit;font-size:12px}
+.ins-s-chip.active{border-color:var(--brand-primary);background:var(--purple-light,#ede9fe);color:var(--brand-primary,#7c5cbf);font-weight:600}
+.ins-dash-sheet{display:flex;flex-direction:column;gap:14px}
+.ins-dash-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.ins-dash-brand{font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--brand-primary,#7c5cbf)}
+.ins-dash-title{font-size:20px;margin:2px 0 4px;line-height:1.25}
+.ins-dash-head .lc-sub{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center}
+.ins-dash-body{display:flex;flex-direction:column;gap:14px}
+.ins-dash-h{font-size:15px;margin:10px 0 0;display:flex;gap:6px;align-items:center}
+.ins-print .ins-dash-brand{display:block}
+@media print{.no-print{display:none!important}}
+@media (max-width:640px){.ins-search .lc-btn{flex:1 1 100%}}

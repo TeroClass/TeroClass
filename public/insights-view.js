@@ -478,18 +478,24 @@
     </section>`;
   }
   function progressHtml(X, st) {
-    const p = st.progress; const L = LABELS[X.kind];
-    const tot = p.speakingMin + p.teacherMin; const sp = tot ? Math.round(p.speakingMin / tot * 100) : 0;
     return `<div class="lc-metrics">${metricCards(X, st).map(metricHtml).join('')}</div>
-      <section class="lc-card">
+      ${speakingHtml(X, st)}${trackerHtml(X, st)}`;
+  }
+  function speakingHtml(X, st) {
+    const p = st.progress;
+    const tot = p.speakingMin + p.teacherMin; const sp = tot ? Math.round(p.speakingMin / tot * 100) : 0;
+    return `<section class="lc-card">
         <h3>Speaking time</h3>
         <div class="lc-split" role="img" aria-label="${E(`${tr('Student')} ${sp}% · ${tr('Teacher')} ${100 - sp}%`)}">
           <span class="lc-split-a" style="width:${sp}%"></span><span class="lc-split-b" style="width:${100 - sp}%"></span>
         </div>
         <div class="lc-split-legend"><span><i class="lc-dot a"></i> <span data-no-i18n>${E(firstName(st.name) || tr('Student'))}</span> · <b data-no-i18n>${dec(p.speakingMin, X.lang)} min (${sp}%)</b></span>
           <span><i class="lc-dot b"></i> <span>Teacher</span> · <b data-no-i18n>${dec(p.teacherMin, X.lang)} min (${100 - sp}%)</b></span></div>
-      </section>
-      <section class="lc-card">
+      </section>`;
+  }
+  function trackerHtml(X, st) {
+    const L = LABELS[X.kind];
+    return `<section class="lc-card">
         <h3>${L.tracker}</h3>
         ${st.tracker.length ? `<div class="lc-table-wrap"><table class="lc-table">
           <thead><tr><th scope="col">Concept</th><th scope="col">Difficulty</th><th scope="col">Used</th><th scope="col">Updated</th><th scope="col">Mastery</th></tr></thead>
@@ -530,6 +536,21 @@
           <dt>${C[5]}</dt><dd data-no-i18n>${E(v.example)}</dd>
         </dl></article>`).join('') || '<p class="lc-empty">—</p>'}</div>
     </section>`;
+  }
+  // 2026-11-05: the student's DASHBOARD — every part of one class on one page (also what the PDF prints). o = {P, msg}
+  function studentDashboardHtml(X, o) {
+    o = o || {}; const P = o.P || 'ins';
+    const st = X.students[0]; if (!st) return '<p class="lc-empty">No student insights for this class.</p>';
+    const h = (icon, t) => `<h2 class="ins-dash-h"><span aria-hidden="true">${icon}</span> <span>${t}</span></h2>`;
+    return `<div class="ins-dash-body">
+      <div class="lc-metrics">${metricCards(X, st).map(metricHtml).join('')}</div>
+      <div class="lc-grid-2">${msgBoxHtml(X, st, 0, { ...o, P })}
+        <section class="lc-card"><h3>Highlight</h3>${st.highlight ? `<p class="lc-quote" data-no-i18n>${E(st.highlight)}</p>` : '<p class="lc-empty">—</p>'}</section></div>
+      ${h('📝', 'Recap')}${recapHtml(X, st)}
+      ${h('📈', 'Progress')}${speakingHtml(X, st)}${trackerHtml(X, st)}
+      ${h('🎯', 'Feedback')}${feedbackHtml(X, st)}
+      ${h('📚', LABELS[X.kind].vocab)}${vocabHtml(X, st)}
+    </div>`;
   }
   // Student view: optional picker + sub-tabs + body. o = {P, picker, msg}
   function studentTabsHtml(X, idx, sub, o) {
@@ -762,7 +783,7 @@
   window.TCInsightsView = {
     DEMO_BANNER, SAMPLES, LABELS, SUBTABS, banner, demoChip, pickSampleKey, initials, colorFor,
     model, sampleModel, modelFromSession, modelFromStudent, planOutline, samplesFit,
-    studentPickerHtml, subtabsHtml, studentTabsHtml, teacherReportHtml, draftMessage, buildDemoPayload, fmtWhen,
+    studentPickerHtml, subtabsHtml, studentTabsHtml, studentDashboardHtml, teacherReportHtml, draftMessage, buildDemoPayload, fmtWhen,
   };
 
   // ════════════════════════════════════════════════════════════════════════════════════════

@@ -207,12 +207,11 @@ async function realRows(t) {
     await page.waitForSelector('.gs-ins-item');
     if (await page.locator('.gs-ins-item').count() !== 1) throw new Error('own insights only');
     await page.click('.gs-ins-item');
-    await page.waitForSelector('#panel-insights.active .ins-detail');
-    if (await page.$('.ins-detail .lc-chip-demo') || await page.$('.ins-detail .lc-banner')) throw new Error('real insight shown as demo');
-    if (!/REAL: Ana answered/.test(await text(page, '#ins-body'))) throw new Error('highlight');
-    if (/Bruno/.test(await text(page, '#ins-body'))) throw new Error('classmate visible');
-    await page.click('#ins-sub-vocab'); await page.waitForSelector('#ins-sub-vocab.active');
-    if (!/grandmother/.test(await text(page, '#ins-body'))) throw new Error('vocabulary');
+    await page.waitForSelector('#panel-insights.active #ins-dash-sheet');
+    if (await page.$('#ins-dash .lc-chip-demo') || await page.$('#panel-insights .lc-banner')) throw new Error('real insight shown as demo');
+    if (!/REAL: Ana answered/.test(await text(page, '#ins-dash'))) throw new Error('highlight');
+    if (/Bruno/.test(await text(page, '#ins-dash'))) throw new Error('classmate visible');
+    if (!/grandmother/.test(await text(page, '#ins-dash'))) throw new Error('vocabulary');
     const o = await hscroll(page); if (o > 1) throw new Error('overflow ' + o);
     await shot(page, 'student-real-es');
   }, { viewport: { width: 390, height: 800 }, mobile: true });

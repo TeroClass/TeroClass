@@ -329,7 +329,11 @@ Cierre y ticket de salida (5 min)
     }
     async setMicrophoneEnabled(on) { await this.room.localParticipant.setMicrophoneEnabled(on); this._sync(); }
     // a microphone allowed after joining (it was blocked or missing in the lobby)
-    async publishMic(track) { await this.room.localParticipant.publishTrack(track, { source: this.LK.Track.Source.Microphone }); this._sync(); this._ensureRec(); }
+    async publishMic(track) {
+      const lp = this.room.localParticipant; const old = lp.getTrackPublication(this.LK.Track.Source.Microphone);
+      if (old && old.track) { try { await lp.unpublishTrack(old.track, true); } catch (e) { /* ignore */ } }
+      await lp.publishTrack(track, { source: this.LK.Track.Source.Microphone }); this._sync(); this._ensureRec();
+    }
     async startAudio() {
       try { await this.room.startAudio(); } catch (e) { /* ignore */ }
       document.querySelectorAll('audio.lc-remote-audio').forEach(el => { try { const pr = el.play(); if (pr && pr.catch) pr.catch(() => {}); } catch (e) { /* ignore */ } });
@@ -742,8 +746,17 @@ Cierre y ticket de salida (5 min)
     return 'Could not start the camera or microphone.';
   }
 
-  async function startPreview() {
-    const L = S.lobby; if (!L) return;
+  // 2026-11-05 (mic dead on the first join, fine after leaving and joining again): the lobby asked for the microphone
+  // again on EVERY repaint and stopped the previous stream, and "Join" did not wait for the browser's permission prompt →
+  // the class started with no microphone or with a stopped one. Now: one request at a time (L.mediaP), a repaint reuses
+  // the stream, and enterRoom waits for the pending request.
+  function startPreview() {
+    const L = S.lobby; if (!L) return Promise.resolve();
+    const seq = L.pseq = (L.pseq || 0) + 1;
+    const p = L.mediaP = startPreviewNow(L, seq).finally(() => { if (L.mediaP === p) L.mediaP = null; });
+    return p;
+  }
+  async function startPreviewNow(L, seq) {
     stopStream(L.stream); L.stream = null; L.mediaError = '';
     stopMeter();
     const md = navigator.mediaDevices;
@@ -754,7 +767,7 @@ Cierre y ticket de salida (5 min)
     for (const c of [{ video: v, audio: a }, { audio: a }, { video: v }]) {
       try { stream = await md.getUserMedia(c); break; } catch (e) { firstErr = firstErr || e; if (e && e.name === 'NotAllowedError') break; }
     }
-    if (S.view !== 'lobby' || S.lobby !== L) { stopStream(stream); return; }
+    if (S.view !== 'lobby' || S.lobby !== L || L.pseq !== seq) { stopStream(stream); return; }
     L.stream = stream;
     if (!stream) L.mediaError = mediaErrorText(firstErr);
     else if (!stream.getVideoTracks().length) L.mediaError = 'No camera available — you will join with audio only.';
@@ -823,7 +836,24 @@ Cierre y ticket de salida (5 min)
   }
   function stopMeter() { if (meter) { cancelAnimationFrame(meter.raf); try { meter.ctx.close(); } catch (e) { /* ignore */ } meter = null; } }
 
-  function afterLobbyRender() { startPreview(); if (S.lobby && S.lobby.cstate === 'loading') initLobbyConsent(S.lobby); }
+  function afterLobbyRender() {
+    const L = S.lobby;
+    if (L && (L.mediaP || liveAudio(L.stream) || (L.stream && L.stream.getVideoTracks().some(t => t.readyState === 'live')))) {
+      // repaint only: show the same stream again (asking again stopped the one about to be used in the class)
+      if (!L.mediaP) { updatePreviewUi(); fillDeviceSelects(); startMeter(L.stream); }
+    } else startPreview();
+    if (L && L.cstate === 'loading') initLobbyConsent(L);
+  }
+  const liveAudio = s => !!s && s.getAudioTracks().some(t => t.readyState === 'live');
+  // before joining: wait for the browser's permission prompt (max. 30 s) and replace a microphone that was stopped
+  async function lobbyMediaReady(L) {
+    if (L.mediaP) {
+      const j = document.getElementById('lc-join'); if (j) j.textContent = tr('Allow the microphone in your browser…');
+      await Promise.race([L.mediaP.catch(() => {}), new Promise(r => setTimeout(r, 30000))]);
+      if (j) j.textContent = tr('Connecting…');
+    }
+    if (L.stream && L.stream.getAudioTracks().length && !liveAudio(L.stream)) await startPreview().catch(() => {});
+  }
 
   function syncConsentUi() {
     const L = S.lobby; if (!L) return;
@@ -881,6 +911,9 @@ Cierre y ticket de salida (5 min)
 
   async function enterRoom() {
     const L = S.lobby;
+    await lobbyMediaReady(L);
+    if (S.lobby !== L) return;
+    stopMeter();
     let kind = await detectProviderKind();
     // P-06: the plan attached to this calendar class; a calendar class without a plan shows none (no invented sample);
     // only the free "Start live class" with "Sample plan (demo)" uses a sample
@@ -928,6 +961,8 @@ Cierre y ticket de salida (5 min)
     S.view = 'room';
     render();
     S.timers.push(setInterval(roomTick, 1000));
+    watchMic(R);
+    if (L.mic && !liveAudio(R.stream) && (L.stream || !L.mediaError)) enableMicLate(R, { quiet: true });
     if (!R.recorded) toast('You joined without being recorded.', 'ok');
     // Attendance (public/attendance.js): a calendar class records who entered (students: present / late; the teacher too).
     // TODO(live): with real LiveKit, its webhook (participant_joined / left) also feeds attendance_record_external.
@@ -1237,10 +1272,23 @@ Cierre y ticket de salida (5 min)
     document.body.appendChild(b);
   }
   // the microphone was blocked or missing in the lobby → ask for it now instead of a dead button
-  async function enableMicLate(R) {
+  // a microphone that stops in the middle of the class (unplugged, taken by another app, the OS) → get a new one
+  function watchMic(R) {
+    (R.stream ? R.stream.getAudioTracks() : []).forEach(t => {
+      if (t._tcWatched) return; t._tcWatched = true;
+      t.addEventListener('ended', () => { if (S.room === R && R.mic) { toast('Your microphone stopped — reconnecting it…', 'err'); enableMicLate(R, { quiet: false }); } });
+    });
+  }
+  async function enableMicLate(R, opt) {
+    opt = opt || {};
+    if (R.micBusy) return; R.micBusy = true;
+    try { await enableMicLateNow(R, opt); } finally { R.micBusy = false; }
+  }
+  async function enableMicLateNow(R, opt) {
     let s = null;
     try { s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
     catch (e) {
+      if (opt.quiet) { console.warn('microphone after joining', e); return; }
       toast(e && e.name === 'NotAllowedError'
         ? 'Your browser is blocking the microphone. Click the lock next to the address, allow the microphone and join again.'
         : mediaErrorText(e), 'err');
@@ -1249,15 +1297,16 @@ Cierre y ticket de salida (5 min)
     if (S.room !== R) { stopStream(s); return; }
     const [t] = s.getAudioTracks();
     if (!R.stream) R.stream = new MediaStream();
+    R.stream.getAudioTracks().forEach(old => { R.stream.removeTrack(old); try { old.stop(); } catch (e) { /* ignore */ } });
     R.stream.addTrack(t);
-    try { await R.provider.publishMic(t); R.mic = true; toast('Microphone on', 'ok'); } catch (e) { console.warn(e); toast('Could not turn on the microphone. Leave and join the class again.', 'err'); }
+    try { await R.provider.publishMic(t); R.mic = true; watchMic(R); if (!opt.quiet) toast('Microphone on', 'ok'); } catch (e) { console.warn(e); toast('Could not turn on the microphone. Leave and join the class again.', 'err'); }
     updateRoomUi(); updateTiles();
   }
 
   async function toggleMic() {
     const R = S.room;
     if (R.provider && R.provider.startAudio) R.provider.startAudio().catch(() => {});
-    if (!R.stream?.getAudioTracks().length) { await enableMicLate(R); return; }
+    if (!liveAudio(R.stream)) { await enableMicLate(R); return; }
     R.mic = !R.mic; R.stream.getAudioTracks().forEach(t => { t.enabled = R.mic; });
     try { await R.provider.setMicrophoneEnabled(R.mic); } catch (e) { console.warn(e); }
     updateRoomUi(); updateTiles();
@@ -1930,6 +1979,7 @@ Cierre y ticket de salida (5 min)
     'Demo: kept only in this browser tab, never sent.': 'Demo: se guarda solo en esta pestaña, no se envía.',
     '● You will be recorded': '● Vas a ser grabado/a', 'AI analysis ✓': 'Análisis con IA ✓', 'No AI analysis': 'Sin análisis con IA',
     'Results stored ✓': 'Resultados guardados ✓', 'Results not stored': 'Resultados sin guardar', 'Waiting for guardian consent': 'Falta el consentimiento del tutor/a',
+    'Allow the microphone in your browser…': 'Permití el micrófono en tu navegador…', 'Your microphone stopped — reconnecting it…': 'Tu micrófono se cortó: lo estamos reconectando…',
     'You will join without being recorded': 'Vas a entrar sin ser grabado/a', 'Join class': 'Entrar a la clase', 'Connecting…': 'Conectando…',
     'No emotion detection. Speakers are identified by their own microphone, never by voiceprint. You can stop being recorded at any time.': 'Sin detección de emociones. Cada persona se identifica por su propio micrófono, nunca por huella de voz. Podés dejar de ser grabado/a en cualquier momento.',
     'Please write your name.': 'Escribí tu nombre.', "Please write the guardian's name.": 'Escribí el nombre del tutor/a.',

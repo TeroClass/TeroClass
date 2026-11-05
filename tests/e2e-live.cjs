@@ -365,6 +365,28 @@ const SAVED = 'Reacciones químicas 3°B <script>\nObjetivos de hoy:\n- Balancea
     await page.evaluate(() => { navigator.mediaDevices.getUserMedia = window.__gum; });
   });
 
+  // 2026-11-05 (Anto): the mic did not work on the first join (fine after leaving and joining again)
+  await step('Micrófono al primer ingreso: "Entrar" espera el permiso del navegador y un repintado no apaga el micrófono', async () => {
+    await page.click('[data-lc="back-home"]');
+    // the browser's permission prompt takes 1.5 s; the student clicks "Join" right away
+    await page.evaluate(() => { window.__gum = navigator.mediaDevices.getUserMedia; window.__gumCalls = 0; navigator.mediaDevices.getUserMedia = c => { window.__gumCalls++; return new Promise(r => setTimeout(r, 1500)).then(() => window.__gum.call(navigator.mediaDevices, c)); }; });
+    await page.click('#lc-try-demo');
+    await page.waitForSelector('#lc-join');
+    // a repaint of the lobby (language switch, panel reopened…) must not ask again nor stop the stream
+    await page.evaluate(() => window.openLiveClass());
+    await page.click('#lc-join');
+    await page.waitForSelector('#lc-room', { timeout: 15000 });
+    const st = await page.evaluate(() => { const R = LiveClass.state.room; const a = R.stream ? R.stream.getAudioTracks() : []; return { mic: R.mic, live: a.filter(t => t.readyState === 'live' && t.enabled).length, calls: window.__gumCalls }; });
+    if (!st.mic || st.live !== 1) throw new Error('micrófono muerto al entrar: ' + JSON.stringify(st));
+    if (st.calls > 2) throw new Error('pidió el micrófono demasiadas veces: ' + st.calls);
+    // the microphone stops in the middle of the class → it comes back by itself
+    await page.evaluate(() => { navigator.mediaDevices.getUserMedia = window.__gum; LiveClass.state.room.stream.getAudioTracks()[0].stop(); LiveClass.state.room.stream.getAudioTracks()[0].dispatchEvent(new Event('ended')); });
+    await page.waitForFunction(() => { const a = LiveClass.state.room.stream.getAudioTracks(); return a.length === 1 && a[0].readyState === 'live'; }, null, { timeout: 8000 });
+    await page.click('#lc-ctl-end'); await page.click('#lc-end-confirm');
+    await page.click('[data-lc="skip-processing"]');
+    await page.waitForSelector('.lc-insights');
+  });
+
   await step('Accesibilidad: controles son botones/inputs enfocables; teclado pausa y reanuda la grabación', async () => {
     await page.click('[data-lc="back-home"]');
     await page.click('#lc-start-btn');

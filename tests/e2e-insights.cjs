@@ -250,29 +250,38 @@ function generateAs(user, s) {
     if (!/Mensaje de tu docente/.test(await text(page, '.gs-ins-item'))) throw new Error('message chip on the dashboard');
     await shot(page, 'x-student-dashboard-es');
     await page.click('.gs-ins-item');
-    await page.waitForSelector('#panel-insights.active .ins-detail');
+    await page.waitForSelector('#panel-insights.active #ins-dash-sheet');
     const body = await text(page, '#panel-insights');
     if (!/¡Muy buen trabajo, Ana!/.test(body)) throw new Error('published message not shown');
     for (const bad of ['NO PUBLICADO', 'BORRADOR-BRUNO', 'SECRET-REFLECTION', 'Bruno', 'Carla', 'Observación', 'Informe de observación']) if (body.includes(bad)) throw new Error('student sees: ' + bad);
     if (await page.$('#panel-insights textarea') || await page.$('#panel-insights .lc-student-pick') || await page.$('#ins-tab-report')) throw new Error('editing / other students / report visible to a student');
-    const tabs = await page.$$eval('#panel-insights .lc-subtab', b => b.map(x => x.textContent.trim()));
-    if (JSON.stringify(tabs) !== '["Resumen","Repaso","Progreso","Devolución","Vocabulario"]') throw new Error('tabs ES: ' + JSON.stringify(tabs));
-    let u = await untranslated(page, '#ins-root'); if (u.length) throw new Error('resumen sin traducir: ' + JSON.stringify(u));
-    await page.click('#ins-sub-recap');
-    await page.waitForSelector('#ins-body .lc-topic');
-    if (!/Temas tratados/.test(await text(page, '#ins-body'))) throw new Error('recap ES');
-    u = await untranslated(page, '#ins-root'); if (u.length) throw new Error('repaso sin traducir: ' + JSON.stringify(u));
-    await shot(page, 'student-recap-es');
-    await page.click('#ins-sub-progress');
-    await page.waitForSelector('#ins-body .lc-metric');
-    if (!/Nivel oral \(MCER\)/.test(await text(page, '#ins-body')) || !/Tiempo de habla/.test(await text(page, '#ins-body'))) throw new Error('progress ES');
-    u = await untranslated(page, '#ins-root'); if (u.length) throw new Error('progreso sin traducir: ' + JSON.stringify(u));
-    await shot(page, 'student-progress-es');
-    for (const k of ['feedback', 'vocab']) { await page.click('#ins-sub-' + k); u = await untranslated(page, '#ins-root'); if (u.length) throw new Error(k + ' sin traducir: ' + JSON.stringify(u)); }
-    // list, then back to the dashboard
-    await page.click('[data-lc="ins-mine-back"]');
-    await page.waitForSelector('#ins-list');
-    if (await page.locator('#ins-list .ins-item').count() !== 1) throw new Error('my insights list');
+    // 2026-11-05: one-page DASHBOARD (every part of the class) instead of sub-tabs
+    const heads = await page.$$eval('#ins-dash .ins-dash-h span:last-child', b => b.map(x => x.textContent.trim()));
+    if (JSON.stringify(heads) !== '["Repaso","Progreso","Devolución","Vocabulario"]') throw new Error('dashboard sections ES: ' + JSON.stringify(heads));
+    const dash = await text(page, '#ins-dash');
+    if (!/Temas tratados/.test(dash) || !/Nivel oral \(MCER\)/.test(dash) || !/Tiempo de habla/.test(dash)) throw new Error('dashboard content ES');
+    let u = await untranslated(page, '#ins-root'); if (u.length) throw new Error('dashboard sin traducir: ' + JSON.stringify(u));
+    await shot(page, 'student-dashboard-es');
+    // search: Enter in a date field with a range that has no classes → empty; clear → back to the latest class
+    await page.fill('#ins-s-from', '2001-01-01'); await page.fill('#ins-s-to', '2001-01-31');
+    await page.press('#ins-s-to', 'Enter');
+    await page.waitForSelector('#ins-dash .ins-empty');
+    if (!/Ninguna clase coincide/.test(await text(page, '#ins-dash'))) throw new Error('empty search ES');
+    await page.click('[data-lc="ins-s-clear"]');
+    await page.waitForSelector('#ins-dash-sheet');
+    // Enter on the class selector also searches
+    await page.selectOption('#ins-s-class', { index: 1 });
+    await page.focus('#ins-s-class'); await page.keyboard.press('Enter');
+    await page.waitForSelector('#ins-dash-sheet');
+    // PDF: a print frame with only the dashboard (no search bar, no buttons)
+    await page.evaluate(() => { window.__printed = 0; const o = HTMLIFrameElement.prototype; });
+    await page.click('#ins-pdf');
+    await page.waitForFunction(() => { const f = document.getElementById('ins-print-frame'); return f && f.contentDocument && f.contentDocument.querySelector('#ins-dash-sheet'); });
+    const pdf = await page.evaluate(() => { const d = document.getElementById('ins-print-frame').contentDocument; return { search: !!d.querySelector('#ins-search'), txt: d.body.innerText, title: d.title }; });
+    if (SHOTS) { const html = await page.evaluate(() => document.getElementById('ins-print-frame').contentDocument.documentElement.outerHTML);
+      const pp = await page.context().newPage(); await pp.goto('http://teroclass.test/'); await pp.setContent(html, { waitUntil: 'load' }); await pp.emulateMedia({ media: 'print' });
+      await pp.pdf({ path: SHOTS + '/ins-student-dashboard.pdf', format: 'A4', printBackground: true }); await pp.close(); }
+    if (pdf.search || !/Generado con TeroClass|Generated with TeroClass/.test(pdf.txt) || !/TeroClass - /.test(pdf.title)) throw new Error('pdf frame: ' + JSON.stringify({ search: pdf.search, title: pdf.title }));
     await page.click('[data-lc="ins-student-home"]');
     await page.waitForSelector('#panel-student.active');
     // the database refuses anything else
@@ -404,11 +413,7 @@ function generateAs(user, s) {
     await page.waitForSelector('.gs-ins-item');
     await page.click('.gs-ins-item');
     await page.waitForSelector('#panel-insights.active .ins-msg-student');
-    for (const k of ['overview', 'recap', 'progress', 'feedback', 'vocab']) {
-      await page.click('#ins-sub-' + k); await page.waitForSelector(`#ins-sub-${k}.active`);
-      const o = await hscroll(page); if (o > 1) throw new Error(k + ' overflows by ' + o);
-    }
-    await page.click('#ins-sub-overview');
+    { await page.waitForSelector('#ins-dash-sheet'); const o = await hscroll(page); if (o > 1) throw new Error('student dashboard overflows by ' + o); }
     await shot(page, 'student-mobile');
     await logout(page);
     await login(page, 'tc@c.com');
