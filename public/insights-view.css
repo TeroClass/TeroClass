@@ -211,3 +211,35 @@
 .ins-print .ins-dash-brand{display:block}
 @media print{.no-print{display:none!important}}
 @media (max-width:640px){.ins-search .lc-btn{flex:1 1 100%}}
+
+/* 2026-11-11: grammar by type, synonyms, expressions, pronunciation guide, My insights timeline, monthly report */
+.ins-gtype{font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--brand-primary,#7c5cbf);margin:10px 0 2px}
+.ins-gtype:first-of-type{margin-top:0}
+.ins-practice{color:#0e6b80}
+.ins-said{color:var(--ink-soft)}
+.ins-syn{color:var(--brand-primary,#7c5cbf);font-weight:600;font-size:12px}
+.ins-ph{display:inline-block;font:500 12px ui-monospace,Menlo,Consolas,monospace;background:#e3f4f8;color:#075e73;padding:1px 6px;border-radius:5px;margin-left:4px}
+.ins-grammar-grid{align-items:start}
+.ins-focus{background:#e6f4ea;color:#1f6b3a;border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.45;margin-top:10px}
+.ins-words{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.ins-word{background:var(--bg);border-radius:10px;padding:10px;min-width:0}
+.ins-month-table td{vertical-align:middle}
+.ins-layout{display:grid;grid-template-columns:300px minmax(0,1fr);gap:18px;align-items:start}
+.ins-rail{display:flex;flex-direction:column;gap:8px;position:sticky;top:0}
+.ins-month-h{font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--ink-muted);margin:8px 0 0}
+.ins-cls{display:flex;flex-direction:column;gap:4px;text-align:left;width:100%;background:var(--white);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font:inherit;color:var(--ink);cursor:pointer}
+.ins-cls:hover{border-color:var(--ink-muted)}
+.ins-cls.active{border:2px solid var(--brand-primary,#7c5cbf);padding:9px 11px}
+.ins-cls-top{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-muted)}
+.ins-cls-t{font-weight:600;font-size:13.5px;line-height:1.3}
+.ins-cls-k{font-size:12px;color:var(--ink-soft)}
+.ins-new{margin-left:auto;background:var(--purple-light,#ede8f8);color:var(--brand-primary,#7c5cbf);font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:99px}
+.ins-report-card{display:flex;flex-direction:column;gap:3px;text-align:left;width:100%;border:none;border-radius:12px;padding:12px 14px;cursor:pointer;font:inherit;color:#fff;background:linear-gradient(135deg,var(--brand-primary,#7c5cbf),#4c3591)}
+.ins-report-card small{font-size:10.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;opacity:.85}
+.ins-report-card b{font-size:14.5px}
+.ins-report-card span{font-size:12px;opacity:.92}
+.ins-report-card.active{outline:3px solid var(--ink);outline-offset:1px}
+.ins-mr-list{display:flex;flex-direction:column;gap:8px}
+@media (max-width:860px){.ins-layout{grid-template-columns:minmax(0,1fr)}.ins-rail{position:static}}
+@media print{.ins-rail{display:none!important}.ins-layout{display:block}}
+.ins-nowrap{white-space:nowrap}

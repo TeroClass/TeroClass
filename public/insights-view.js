@@ -341,7 +341,7 @@
       ...s, name: str(s.name), highlight: str(s.highlight), recap: s.recap ? normRecap(s.recap) : null,
       progress: { speakingMin: num(p.speakingMin), teacherMin: num(p.teacherMin), vocab: num(p.vocab), vocabDelta: num(p.vocabDelta),
         level: str(p.level), levelPrev: str(p.levelPrev), wpm: num(p.wpm), wpmDelta: num(p.wpmDelta), score: num(p.score), scoreDelta: num(p.scoreDelta) },
-      tracker: arr(s.tracker).map(obj), pron: arr(s.pron).map(obj), didWell: arr(s.didWell).map(obj), improve: arr(s.improve).map(obj), vocab: arr(s.vocab).map(obj),
+      tracker: arr(s.tracker).map(obj), pron: arr(s.pron).map(obj), didWell: arr(s.didWell).map(obj), improve: arr(s.improve).map(obj), vocab: arr(s.vocab).map(obj), expressions: arr(s.expressions).map(obj),
     };
   }
   function normTeacher(t) {
@@ -504,25 +504,45 @@
         </table></div>` : '<p class="lc-empty">—</p>'}
       </section>`;
   }
-  function feedbackHtml(X, st) {
+  // 2026-11-11 (Ignacio): more focus on grammar (wrong → right, grouped by type, rule + an example to practise), vocabulary
+  // with synonyms, natural expressions and pronunciation (a GUIDE from the transcript; the % ring only for older insights).
+  function pronHtml(X, st) {
     const L = LABELS[X.kind];
     return `<section class="lc-card">
         <h3>${L.feedbackA}</h3>
-        <div class="lc-pron">${st.pron.map(p => { const sc = Math.max(0, Math.min(100, num(p.score))); return `<div class="lc-pron-card">
-          <div class="lc-ring" style="--p:${sc}" role="img" aria-label="${sc}%"><span data-no-i18n>${sc}%</span></div>
-          <div><div class="lc-pron-item" data-no-i18n>${E(p.item)}</div><div class="lc-pron-tip" data-no-i18n>${E(p.tip)}</div></div></div>`; }).join('')}</div>
+        ${st.pron.length ? `<div class="lc-pron">${st.pron.map(p => {
+          const hasScore = p.score !== undefined && p.score !== null && p.score !== '' && !p.guide;
+          const sc = Math.max(0, Math.min(100, num(p.score)));
+          return `<div class="lc-pron-card">
+          ${hasScore ? `<div class="lc-ring" style="--p:${sc}" role="img" aria-label="${sc}%"><span data-no-i18n>${sc}%</span></div>` : ''}
+          <div><div class="lc-pron-item"><span data-no-i18n>${E(p.item)}</span>${p.guide ? ` <span class="ins-ph" data-no-i18n>${E(p.guide)}</span>` : ''}</div><div class="lc-pron-tip" data-no-i18n>${E(p.tip)}</div></div></div>`; }).join('')}</div>` : '<p class="lc-empty">—</p>'}
+        ${X.kind === 'language' && st.pron.some(p => p.guide) ? '<p class="lc-fine">A guide based on the words of the class. Pronunciation scored from your voice is coming soon.</p>' : ''}
+      </section>`;
+  }
+  function grammarHtml(X, st) {
+    const groups = []; const byType = new Map();
+    st.improve.forEach(d => { const k = str(d.type).trim(); if (!byType.has(k)) { byType.set(k, []); groups.push(k); } byType.get(k).push(d); });
+    const fix = d => `<div class="lc-fb"><div class="lc-fix"><span class="lc-wrong" data-no-i18n>${E(d.original)}</span> <span aria-hidden="true">→</span><span class="lc-sr">corrected:</span> <span class="lc-right" data-no-i18n>${E(d.corrected)}</span></div>
+        ${d.explanation ? `<div class="lc-fb-note"><b>Rule:</b> <span data-no-i18n>${E(d.explanation)}</span></div>` : ''}
+        ${d.practice ? `<div class="lc-fb-note ins-practice"><b>Practice:</b> <span data-no-i18n>${E(d.practice)}</span></div>` : ''}</div>`;
+    return `<section class="lc-card lc-improve">
+        <h3>🎯 <span>${X.kind === 'language' ? 'What you said → how to say it' : 'What you can improve'}</span></h3>
+        ${st.improve.length ? groups.map(k => `${k ? `<div class="ins-gtype" data-no-i18n>${E(k)}</div>` : ''}${byType.get(k).map(fix).join('')}`).join('') : '<p class="lc-empty">No corrections in this class.</p>'}
       </section>
-      <div class="lc-grid-2">
-        <section class="lc-card lc-good">
-          <h3>✅ <span>What you did well</span></h3>
-          ${st.didWell.map(d => `<div class="lc-fb"><div class="lc-fb-quote" data-no-i18n>“${E(d.text)}”</div><div class="lc-fb-note" data-no-i18n>${E(d.note)}</div></div>`).join('') || '<p class="lc-empty">—</p>'}
-        </section>
-        <section class="lc-card lc-improve">
-          <h3>🎯 <span>What you can improve</span></h3>
-          ${st.improve.map(d => `<div class="lc-fb"><div class="lc-fix"><span class="lc-wrong" data-no-i18n>${E(d.original)}</span> <span aria-hidden="true">→</span><span class="lc-sr">corrected:</span> <span class="lc-right" data-no-i18n>${E(d.corrected)}</span></div><div class="lc-fb-note" data-no-i18n>${E(d.explanation)}</div></div>`).join('') || '<p class="lc-empty">—</p>'}
-        </section>
-      </div>
-      <p class="lc-fine"><span>${L.feedbackB}</span>: <span>based on the student’s own microphone track.</span></p>`;
+      <section class="lc-card lc-good">
+        <h3>✅ <span>What you did well</span></h3>
+        ${st.didWell.map(d => `<div class="lc-fb"><div class="lc-fb-quote" data-no-i18n>“${E(d.text)}”</div><div class="lc-fb-note" data-no-i18n>${E(d.note)}</div></div>`).join('') || '<p class="lc-empty">—</p>'}
+      </section>`;
+  }
+  function expressionsHtml(X, st) {
+    if (X.kind !== 'language' || !st.expressions || !st.expressions.length) return '';
+    return `<section class="lc-card">
+        <h3>💬 <span>Sound more natural</span></h3>
+        ${st.expressions.map(x => `<div class="lc-fb"><div class="lc-fix"><span class="ins-said" data-no-i18n>${E(x.said)}</span> <span aria-hidden="true">→</span><span class="lc-sr">more natural:</span> <span class="lc-right" data-no-i18n>${E(x.natural)}</span></div>${x.why ? `<div class="lc-fb-note" data-no-i18n>${E(x.why)}</div>` : ''}</div>`).join('')}
+      </section>`;
+  }
+  function feedbackHtml(X, st) {
+    return `${pronHtml(X, st)}<div class="lc-grid-2 ins-grammar-grid">${grammarHtml(X, st)}</div>`;
   }
   function vocabHtml(X, st) {
     const C = LABELS[X.kind].vocabCols;
@@ -532,26 +552,88 @@
         <header><b class="lc-vocab-word" data-no-i18n>${E(v.word)}</b> <span class="lc-chip" title="${E(tr(C[1]))}" data-no-i18n>${E(v.pos)}</span> <span class="lc-chip lc-chip-lvl" title="${E(tr(C[2]))}" data-no-i18n>${E(v.level)}</span></header>
         <dl>
           <dt>${C[3]}</dt><dd data-no-i18n>${E(v.def)}</dd>
+          ${arr(v.synonyms).length ? `<dt>Synonyms</dt><dd class="ins-syn" data-no-i18n>${E(arr(v.synonyms).join(', '))}</dd>` : ''}
           <dt>${C[4]}</dt><dd class="lc-quote" data-no-i18n>“${E(v.quote)}”</dd>
           <dt>${C[5]}</dt><dd data-no-i18n>${E(v.example)}</dd>
         </dl></article>`).join('') || '<p class="lc-empty">—</p>'}</div>
-    </section>`;
+    </section>${expressionsHtml(X, st)}`;
   }
   // 2026-11-05: the student's DASHBOARD — every part of one class on one page (also what the PDF prints). o = {P, msg}
   function studentDashboardHtml(X, o) {
     o = o || {}; const P = o.P || 'ins';
     const st = X.students[0]; if (!st) return '<p class="lc-empty">No student insights for this class.</p>';
     const h = (icon, t) => `<h2 class="ins-dash-h"><span aria-hidden="true">${icon}</span> <span>${t}</span></h2>`;
+    // 2026-11-11: grammar, vocabulary + expressions and pronunciation first; then the recap and the progress
     return `<div class="ins-dash-body">
       <div class="lc-metrics">${metricCards(X, st).map(metricHtml).join('')}</div>
       <div class="lc-grid-2">${msgBoxHtml(X, st, 0, { ...o, P })}
         <section class="lc-card"><h3>Highlight</h3>${st.highlight ? `<p class="lc-quote" data-no-i18n>${E(st.highlight)}</p>` : '<p class="lc-empty">—</p>'}</section></div>
+      ${h('🎯', X.kind === 'language' ? 'Grammar' : 'Feedback')}<div class="lc-grid-2 ins-grammar-grid">${grammarHtml(X, st)}</div>
+      ${h('📚', LABELS[X.kind].vocab)}${vocabHtml(X, st)}
+      ${h('🗣️', LABELS[X.kind].feedbackA)}${pronHtml(X, st)}
       ${h('📝', 'Recap')}${recapHtml(X, st)}
       ${h('📈', 'Progress')}${speakingHtml(X, st)}${trackerHtml(X, st)}
-      ${h('🎯', 'Feedback')}${feedbackHtml(X, st)}
-      ${h('📚', LABELS[X.kind].vocab)}${vocabHtml(X, st)}
     </div>`;
   }
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  // MONTHLY REPORT (2026-11-11): monthly_report(...) → one page; o.mode: 'student' | 'edit' (teacher) | 'read'
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  function monthName(m) {
+    const [y, mo] = str(m).slice(0, 7).split('-').map(Number); if (!y || !mo) return str(m);
+    try { const t = new Date(Date.UTC(y, mo - 1, 15)).toLocaleString(typeof uiLocale === 'function' ? uiLocale() : undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }); return t.charAt(0).toUpperCase() + t.slice(1); } catch (e) { return str(m); }
+  }
+  function monthlyReportHtml(d, o) {
+    d = obj(d); o = o || {}; const R = obj(d.data); const P = o.P || 'mr'; const lang = R.kind === 'discipline' ? 'discipline' : 'language';
+    const series = arr(R.series).map(obj); const one = num(R.classes) === 1;
+    const lvl = R.levelStart && R.levelEnd && R.levelStart !== R.levelEnd ? `${R.levelStart} → ${R.levelEnd}` : (R.levelEnd || R.levelStart || '—');
+    const stat = (v, l) => `<div class="lc-metric"><div class="lc-metric-lb">${l}</div><div class="lc-metric-v" data-no-i18n>${E(v)}</div></div>`;
+    const h = (icon, t) => `<h2 class="ins-dash-h"><span aria-hidden="true">${icon}</span> <span>${t}</span></h2>`;
+    const msg = o.mode === 'edit'
+      ? `<section class="lc-card lc-msgbox"><h3>Message to <span data-no-i18n>${E(firstName(d.student_name))}</span></h3>
+          <label class="lc-sr" for="${P}-msg">Message to the student</label>
+          <textarea id="${P}-msg" rows="4" maxlength="4000" placeholder="Optional: a personal note about this month…">${E(d.message || '')}</textarea>
+          <div class="lc-row"><button type="button" class="lc-btn lc-primary" data-lc="mr-save" id="${P}-save">${d.message ? 'Save changes' : 'Save message'}</button></div>
+          <p class="lc-fine">The student sees it as soon as you save it. Leave it empty to remove it.</p></section>`
+      : `<section class="lc-card lc-msgbox ins-msg-student"><h3><span aria-hidden="true">💬</span> <span>Message from your teacher</span></h3>
+          ${d.message ? `<p class="ins-msg-text" data-no-i18n>${E(d.message)}</p><p class="lc-fine" data-no-i18n>${E(d.message_by || '')}${d.message_at ? ' · ' + E(fmtWhen(d.message_at)) : ''}</p>` : '<p class="lc-empty">Your teacher hasn’t added a message to this report.</p>'}</section>`;
+    const maxMin = Math.max(1, ...series.map(s => num(s.speakingMin)));
+    const ul = typeof uiLang !== 'undefined' ? uiLang : R.lang;
+    const dshort = d => { try { const [y, m, dd] = str(d).split('-').map(Number); return new Date(y, m - 1, dd).toLocaleDateString(typeof uiLocale === 'function' ? uiLocale() : undefined, { day: 'numeric', month: 'short' }); } catch (e) { return str(d); } };
+    return `<div class="ins-dash-body ins-month">
+      <div class="lc-metrics">
+        ${stat(`${num(R.attended)} / ${num(R.scheduled) || num(R.classes)}`, tr('Classes attended'))}
+        ${stat(lvl, lang === 'language' ? tr('Level') : tr('Explanation level'))}
+        ${stat(`${R.scoreStart ?? '—'} → ${R.scoreEnd ?? '—'}`, lang === 'language' ? tr('Grammar') : tr('Concept accuracy'))}
+        ${stat(`${dec(R.speakingMin, ul)} min`, tr('You spoke'))}
+        ${stat(String(arr(R.vocab).length), lang === 'language' ? tr('New words') : tr('Key terms'))}
+      </div>
+      <div class="lc-grid-2">
+        <section class="lc-card"><h3>Summary of the month</h3><p class="lc-lead" data-no-i18n>${E(R.summary || '')}</p>
+          ${R.focus ? `<div class="ins-focus"><b>Focus for next month:</b> <span data-no-i18n>${E(R.focus)}</span></div>` : ''}
+          ${one ? '<p class="lc-fine">Only one class with insights this month: there is no trend yet.</p>' : ''}</section>
+        ${msg}
+      </div>
+      ${series.length ? `${h('📈', 'Class by class')}<section class="lc-card"><div class="lc-table-wrap"><table class="lc-table ins-month-table">
+        <thead><tr><th scope="col">Date</th><th scope="col">Class</th><th scope="col">${lang === 'language' ? 'Level' : 'Explanation level'}</th><th scope="col">${lang === 'language' ? 'Grammar' : 'Accuracy'}</th><th scope="col">You spoke</th></tr></thead>
+        <tbody>${series.map(s => { const sc = Math.max(0, Math.min(100, num(s.score))); const mw = Math.round(num(s.speakingMin) / maxMin * 100);
+          return `<tr><td data-no-i18n>${E(dshort(s.date))}</td><td data-no-i18n>${E(s.title)}</td><td data-no-i18n>${E(s.level || '—')}</td>
+            <td><div class="lc-mastery"><div class="lc-progress"><span style="width:${sc}%" class="${sc >= 80 ? 'good' : sc >= 60 ? 'mid' : 'low'}"></span></div><b data-no-i18n>${sc}</b></div></td>
+            <td><div class="lc-mastery"><div class="lc-progress"><span style="width:${mw}%" class="good"></span></div><b data-no-i18n class="ins-nowrap">${E(dec(s.speakingMin, ul))} min</b></div></td></tr>`; }).join('')}</tbody>
+      </table></div></section>` : ''}
+      ${arr(R.topErrors).length ? `${h('🎯', lang === 'language' ? 'Mistakes that repeated the most' : 'What to review')}<section class="lc-card lc-improve">
+        ${arr(R.topErrors).map(obj).map(e => `<div class="lc-fb">${e.type ? `<div class="ins-gtype" data-no-i18n>${E(e.type)}${num(e.times) > 1 ? ` · ${num(e.times)}×` : ''}</div>` : ''}
+          <div class="lc-fix"><span class="lc-wrong" data-no-i18n>${E(e.original)}</span> <span aria-hidden="true">→</span><span class="lc-sr">corrected:</span> <span class="lc-right" data-no-i18n>${E(e.corrected)}</span></div>
+          ${e.rule ? `<div class="lc-fb-note"><b>Rule:</b> <span data-no-i18n>${E(e.rule)}</span></div>` : ''}</div>`).join('')}</section>` : ''}
+      ${arr(R.vocab).length ? `${h('📚', lang === 'language' ? 'Words of the month' : 'Key terms of the month')}<section class="lc-card"><div class="ins-words">
+        ${arr(R.vocab).map(obj).map(v => `<div class="ins-word"><b data-no-i18n>${E(v.word)}</b>${v.level ? ` <span class="lc-chip lc-chip-lvl" data-no-i18n>${E(v.level)}</span>` : ''}
+          ${v.def ? `<div class="lc-fb-note" data-no-i18n>${E(v.def)}</div>` : ''}${arr(v.synonyms).length ? `<div class="ins-syn" data-no-i18n>≈ ${E(arr(v.synonyms).join(', '))}</div>` : ''}</div>`).join('')}</div></section>` : ''}
+      ${arr(R.expressions).length ? `${h('💬', 'Expressions to sound more natural')}<section class="lc-card">
+        ${arr(R.expressions).map(obj).map(x => `<div class="lc-fb"><div class="lc-fix"><span class="ins-said" data-no-i18n>${E(x.said)}</span> <span aria-hidden="true">→</span> <span class="lc-right" data-no-i18n>${E(x.natural)}</span></div>${x.why ? `<div class="lc-fb-note" data-no-i18n>${E(x.why)}</div>` : ''}</div>`).join('')}</section>` : ''}
+      ${arr(R.pron).length ? `${h('🗣️', lang === 'language' ? 'Words to practise saying' : 'Concepts to review')}<section class="lc-card"><div class="lc-pron">
+        ${arr(R.pron).map(obj).map(p => `<div class="lc-pron-card"><div><div class="lc-pron-item"><span data-no-i18n>${E(p.item)}</span>${p.guide ? ` <span class="ins-ph" data-no-i18n>${E(p.guide)}</span>` : ''}</div><div class="lc-pron-tip" data-no-i18n>${E(p.tip)}</div></div></div>`).join('')}</div></section>` : ''}
+    </div>`;
+  }
+
   // Student view: optional picker + sub-tabs + body. o = {P, picker, msg}
   function studentTabsHtml(X, idx, sub, o) {
     o = o || {}; const P = o.P || 'lc';
@@ -784,6 +866,7 @@
     DEMO_BANNER, SAMPLES, LABELS, SUBTABS, banner, demoChip, pickSampleKey, initials, colorFor,
     model, sampleModel, modelFromSession, modelFromStudent, planOutline, samplesFit,
     studentPickerHtml, subtabsHtml, studentTabsHtml, studentDashboardHtml, teacherReportHtml, draftMessage, buildDemoPayload, fmtWhen,
+    monthlyReportHtml, monthName,
   };
 
   // ════════════════════════════════════════════════════════════════════════════════════════
@@ -814,6 +897,18 @@
     'Word': 'Palabra', 'Part of speech': 'Categoría gramatical', 'CEFR': 'MCER', 'Definition': 'Definición', 'From the lesson': 'En la clase', 'Example': 'Ejemplo',
     'Term': 'Término', 'Type': 'Tipo', 'Level': 'Nivel', 'Student': 'Estudiante', 'Teacher': 'Docente', 'Students': 'Estudiantes',
     'No student insights for this class.': 'Esta clase no tiene insights de estudiantes.',
+    // 2026-11-11: grammar / vocabulary / expressions / pronunciation + monthly report
+    'What you said → how to say it': 'Así lo dijiste → así se dice', 'No corrections in this class.': 'No hubo correcciones en esta clase.',
+    'Rule:': 'Regla:', 'Practice:': 'Para practicar:', 'Synonyms': 'Sinónimos', 'Sound more natural': 'Para sonar más natural', 'more natural:': 'más natural:',
+    'A guide based on the words of the class. Pronunciation scored from your voice is coming soon.': 'Guía basada en las palabras de la clase. La evaluación con tu voz llega pronto.',
+    'Classes attended': 'Clases asistidas', 'You spoke': 'Hablaste', 'New words': 'Palabras nuevas', 'Summary of the month': 'Resumen del mes',
+    'Focus for next month:': 'Foco para el mes que viene:', 'Only one class with insights this month: there is no trend yet.': 'Este mes hubo una sola clase con insights: todavía no hay una tendencia.',
+    'Class by class': 'Clase por clase', 'Class': 'Clase', 'Accuracy': 'Precisión', 'Mistakes that repeated the most': 'Los errores que más se repitieron', 'What to review': 'Para repasar',
+    'Words of the month': 'Palabras del mes', 'Key terms of the month': 'Términos del mes', 'Expressions to sound more natural': 'Expresiones para sonar más natural',
+    'Words to practise saying': 'Palabras para practicar cómo se dicen', 'Concepts to review': 'Conceptos para repasar',
+    'PH:Optional: a personal note about this month…': 'Opcional: una nota personal sobre este mes…', 'Save message': 'Guardar mensaje', 'Save changes': 'Guardar cambios',
+    'The student sees it as soon as you save it. Leave it empty to remove it.': 'El alumno lo ve apenas lo guardás. Dejalo vacío para quitarlo.',
+    'Your teacher hasn’t added a message to this report.': 'Tu docente todavía no agregó un mensaje a este reporte.',
     // teacher report
     'Observation report': 'Informe de observación', 'TEC Observation Guide': 'Guía de observación TEC', 'Group / level': 'Grupo / nivel', 'Date': 'Fecha',
     'Students present': 'Estudiantes presentes', 'Class length': 'Duración de la clase', 'Class objective': 'Objetivo de la clase', 'Observation focus': 'Foco de la observación',

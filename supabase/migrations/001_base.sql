@@ -3531,7 +3531,9 @@ $$ select coalesce(json_agg(x order by x.starts_at desc, x.id), '[]'::json) from
      select si.id, si.session_id, coalesce(nullif(s.title, ''), g.name, '') as title, s.starts_at, s.ends_at, s.timezone,
             g.name as group_name, public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)) as teacher_name,
             left(coalesce(si.data #>> '{recap,summary}', ''), 280) as summary, coalesce(si.data->>'kind', '') as kind,
-            si.published_at is not null as has_message, si.is_demo
+            si.published_at is not null as has_message, si.is_demo,
+            coalesce(si.data #>> '{progress,level}', '') as level, si.data #>> '{progress,score}' as score,
+            si.data #>> '{progress,speakingMin}' as speaking_min
        from public.student_insights si
        join public.class_sessions s on s.id = si.session_id
        left join public.class_groups g on g.id = s.group_id
@@ -7747,6 +7749,211 @@ end $$;
 revoke all on function public.update_ai_model_default(jsonb) from public, anon;
 grant execute on function public.update_ai_model_default(jsonb) to authenticated;
 -- ══ END RECORDING PIPELINE ══
+
+-- ══ 2026-11-11: ALUMNOS (rol automático) + REPORTE MENSUAL DE INSIGHTS ══
+-- 1) Quien se registró solo (docente "personal": sin institución) pero en realidad es ALUMNO (tiene inscripciones
+--    vinculadas a su cuenta y nunca dio clases ni generó una planificación) pasa a ser alumno al entrar. Así no ve
+--    el generador, la prueba gratis ni los planes. Nunca toca a docentes de una institución, a quien tiene un plan
+--    individual, a quien da o suplió clases ni a quien tiene una invitación de staff pendiente.
+create or replace function public.tc_should_be_student(p_uid uuid) returns boolean
+language sql stable security definer set search_path = public, pg_temp as
+$$ select p_uid is not null
+      and exists (select 1 from public.profiles p where p.id = p_uid and p.role = 'teacher' and p.institution_id is null)
+      and exists (select 1 from public.student_enrollments e where e.user_id = p_uid)
+      and not exists (select 1 from public.plannings x where x.owner_id = p_uid)
+      and not exists (select 1 from public.class_groups g where g.teacher_id = p_uid or g.substitute_id = p_uid)
+      and not exists (select 1 from public.class_sessions s where s.teacher_id = p_uid)
+      and not exists (select 1 from public.individual_plans ip where ip.user_id = p_uid)
+      and not exists (select 1 from public.invitations i join auth.users u on u.id = p_uid
+                       where lower(i.email) = lower(u.email) and public.tc_inv_pending(i)) $$;
+revoke all on function public.tc_should_be_student(uuid) from public, anon, authenticated;
+
+create or replace function public.claim_enrollments() returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_uid uuid := auth.uid(); v_email text; v_conf timestamptz; v_n int := 0; v_ok boolean; v_became boolean := false;
+begin
+  if v_uid is null then raise exception 'No autorizado'; end if;
+  select lower(btrim(u.email)), u.email_confirmed_at into v_email, v_conf from auth.users u where u.id = v_uid;
+  v_ok := v_email is not null and v_email <> '' and v_conf is not null and public.tc_session_via_email();
+  if v_ok then
+    update public.student_enrollments set user_id = v_uid, claimed_at = now()
+     where lower(email) = v_email and user_id is null;
+    get diagnostics v_n = row_count;
+  end if;
+  if public.tc_should_be_student(v_uid) then
+    update public.profiles set role = 'student' where id = v_uid and role = 'teacher' and institution_id is null;
+    v_became := found;
+  end if;
+  return json_build_object('linked', v_n, 'verified', v_ok, 'role', public.my_role(), 'became_student', v_became,
+    'enrollments', (select count(*) from public.student_enrollments where user_id = v_uid));
+end $$;
+revoke all on function public.claim_enrollments() from public, anon;
+grant execute on function public.claim_enrollments() to authenticated;
+
+-- 2) Reporte mensual: uno por inscripción y por mes, lo arma el servidor (cron diario, desde el día 1) con los insights
+--    REALES de ese mes (nunca los de demo). Lo ven el alumno y su docente / suplente; el docente puede sumar un mensaje.
+create table if not exists public.student_monthly_reports (
+  id uuid primary key default gen_random_uuid(),
+  enrollment_id uuid not null references public.student_enrollments(id) on delete cascade,
+  month date not null check (month = date_trunc('month', month)::date),
+  data jsonb not null default '{}'::jsonb,
+  teacher_message text not null default '' check (length(teacher_message) <= 4000),
+  message_by uuid references auth.users(id) on delete set null,
+  message_at timestamptz,
+  model text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint student_monthly_reports_enr_month unique (enrollment_id, month)
+);
+create index if not exists student_monthly_reports_month_idx on public.student_monthly_reports (month);
+alter table public.student_monthly_reports enable row level security;
+revoke all on public.student_monthly_reports from anon, authenticated;
+drop trigger if exists student_monthly_reports_touch on public.student_monthly_reports;
+create trigger student_monthly_reports_touch before update on public.student_monthly_reports for each row execute function public.touch_updated_at();
+
+-- ¿p_uid es docente o suplente de ese alumno? (un grupo donde está, o una clase suelta suya con insights del alumno)
+create or replace function public.tc_teaches_enrollment(p_enr uuid, p_uid uuid) returns boolean
+language sql stable security definer set search_path = public, pg_temp as
+$$ select p_uid is not null and (
+     exists (select 1 from public.group_members m join public.class_groups g on g.id = m.group_id
+              where m.enrollment_id = p_enr and (g.teacher_id = p_uid or g.substitute_id = p_uid))
+  or exists (select 1 from public.student_insights si join public.class_sessions s on s.id = si.session_id
+              where si.enrollment_id = p_enr and s.teacher_id = p_uid)) $$;
+revoke all on function public.tc_teaches_enrollment(uuid, uuid) from public, anon, authenticated;
+
+create or replace function public.tc_monthly_summary(r public.student_monthly_reports) returns json
+language sql stable security definer set search_path = public, pg_temp as
+$$ select json_build_object('id', r.id, 'month', r.month, 'enrollment_id', r.enrollment_id,
+     'student_name', (select e.name from public.student_enrollments e where e.id = r.enrollment_id),
+     'summary', left(coalesce(r.data->>'summary', ''), 280),
+     'classes', coalesce((r.data->>'classes')::int, 0), 'attended', coalesce((r.data->>'attended')::int, 0),
+     'scheduled', coalesce((r.data->>'scheduled')::int, 0),
+     'level_start', coalesce(r.data->>'levelStart', ''), 'level_end', coalesce(r.data->>'levelEnd', ''),
+     'speaking_min', coalesce((r.data->>'speakingMin')::numeric, 0), 'words', coalesce(jsonb_array_length(r.data->'vocab'), 0),
+     'has_message', r.message_at is not null and r.teacher_message <> '', 'created_at', r.created_at) $$;
+revoke all on function public.tc_monthly_summary(public.student_monthly_reports) from public, anon, authenticated;
+
+-- Alumno: sus reportes (el más nuevo primero). Súper admin en "Ver como": p_enrollment.
+create or replace function public.my_monthly_reports(p_enrollment uuid default null) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_enr uuid[];
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  if p_enrollment is null then
+    v_enr := array(select id from public.student_enrollments where user_id = auth.uid());
+  else
+    if not public.is_superadmin() then raise exception 'No autorizado'; end if;
+    v_enr := array[p_enrollment];
+  end if;
+  return coalesce((select json_agg(public.tc_monthly_summary(r) order by r.month desc, r.id)
+                     from public.student_monthly_reports r where r.enrollment_id = any(v_enr)), '[]'::json);
+end $$;
+
+-- Un reporte completo: su alumno, su docente / suplente o el súper admin
+create or replace function public.monthly_report(p_id uuid, p_enrollment uuid default null) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare r public.student_monthly_reports%rowtype; e public.student_enrollments%rowtype; v_teacher boolean;
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  select * into r from public.student_monthly_reports where id = p_id;
+  select * into e from public.student_enrollments where id = r.enrollment_id;
+  if r.id is null or e.id is null then raise exception 'No autorizado'; end if;
+  v_teacher := public.tc_teaches_enrollment(e.id, auth.uid());
+  if not (e.user_id = auth.uid() or v_teacher or public.is_superadmin()) then raise exception 'No autorizado'; end if;
+  if p_enrollment is not null and p_enrollment <> e.id then raise exception 'No autorizado'; end if;
+  return json_build_object('id', r.id, 'month', r.month, 'enrollment_id', e.id, 'student_name', e.name, 'data', r.data,
+    'message', r.teacher_message, 'message_at', r.message_at, 'message_by', public.tc_person_name(r.message_by),
+    'can_edit', v_teacher, 'created_at', r.created_at);
+end $$;
+
+-- Docente / suplente: los reportes de sus alumnos (p_month null = todos, el más nuevo primero)
+create or replace function public.teacher_monthly_reports(p_month date default null) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  return coalesce((select json_agg(public.tc_monthly_summary(r) order by r.month desc, lower((select e.name from public.student_enrollments e where e.id = r.enrollment_id)), r.id)
+                     from public.student_monthly_reports r
+                    where (p_month is null or r.month = date_trunc('month', p_month)::date)
+                      and public.tc_teaches_enrollment(r.enrollment_id, auth.uid())), '[]'::json);
+end $$;
+
+-- Mensaje del docente en el reporte (se ve apenas se guarda; vacío = lo quita)
+create or replace function public.save_monthly_message(p_id uuid, p_message text) returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare r public.student_monthly_reports%rowtype; v text := btrim(coalesce(p_message, ''));
+begin
+  if auth.uid() is null then raise exception 'No autorizado'; end if;
+  select * into r from public.student_monthly_reports where id = p_id;
+  if r.id is null or not public.tc_teaches_enrollment(r.enrollment_id, auth.uid()) then raise exception 'No autorizado'; end if;
+  if length(v) > 4000 then raise exception 'El mensaje es demasiado largo'; end if;
+  update public.student_monthly_reports
+     set teacher_message = v, message_by = case when v = '' then null else auth.uid() end,
+         message_at = case when v = '' then null else now() end
+   where id = p_id;
+  return json_build_object('ok', true, 'message', v, 'message_at', case when v = '' then null else now() end);
+end $$;
+
+-- SERVIDOR (solo service_role): alumnos con insights REALES en ese mes y todavía sin reporte, con todo lo necesario
+create or replace function public.monthly_report_work(p_month date, p_limit integer default 20) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare v_m date := date_trunc('month', p_month)::date;
+begin
+  return coalesce((select json_agg(x) from (
+    select e.id as enrollment_id, e.name, e.institution_id,
+      (select json_agg(json_build_object('session_id', s.id, 'starts_at', s.starts_at, 'title', coalesce(nullif(s.title, ''), g.name, ''),
+                 'teacher', public.tc_person_name(coalesce(g.teacher_id, s.teacher_id)), 'data', si.data) order by s.starts_at)
+         from public.student_insights si join public.class_sessions s on s.id = si.session_id left join public.class_groups g on g.id = s.group_id
+        where si.enrollment_id = e.id and not si.is_demo
+          and date_trunc('month', s.starts_at at time zone s.timezone)::date = v_m) as insights,
+      (select count(*) from public.class_sessions s join public.group_members m on m.group_id = s.group_id
+        where m.enrollment_id = e.id and s.status = 'scheduled' and s.ends_at < now()
+          and date_trunc('month', s.starts_at at time zone s.timezone)::date = v_m)::int as scheduled,
+      (select count(distinct s.id) from public.class_sessions s
+        where date_trunc('month', s.starts_at at time zone s.timezone)::date = v_m and s.status = 'scheduled'
+          and (exists (select 1 from public.session_attendance a where a.session_id = s.id and a.enrollment_id = e.id
+                         and coalesce(a.status, a.auto_status) in ('present','late'))
+               or exists (select 1 from public.student_insights si where si.session_id = s.id and si.enrollment_id = e.id and not si.is_demo)))::int as attended
+      from public.student_enrollments e
+     where exists (select 1 from public.student_insights si join public.class_sessions s on s.id = si.session_id
+                    where si.enrollment_id = e.id and not si.is_demo
+                      and date_trunc('month', s.starts_at at time zone s.timezone)::date = v_m)
+       and not exists (select 1 from public.student_monthly_reports r where r.enrollment_id = e.id and r.month = v_m)
+     order by e.id limit greatest(1, least(coalesce(p_limit, 20), 100))) x), '[]'::json);
+end $$;
+
+create or replace function public.monthly_report_store(p_enrollment uuid, p_month date, p_data jsonb, p_model text default '') returns json
+language plpgsql volatile security definer set search_path = public, pg_temp as
+$$
+declare v_m date := date_trunc('month', p_month)::date; v_id uuid;
+begin
+  if p_data is null or jsonb_typeof(p_data) <> 'object' or octet_length(p_data::text) > 131072 then raise exception 'Reporte inválido'; end if;
+  if not exists (select 1 from public.student_enrollments where id = p_enrollment) then raise exception 'No autorizado'; end if;
+  insert into public.student_monthly_reports (enrollment_id, month, data, model)
+  values (p_enrollment, v_m, p_data, left(coalesce(p_model, ''), 64))
+  on conflict (enrollment_id, month) do nothing
+  returning id into v_id;
+  return json_build_object('id', v_id, 'created', v_id is not null);
+end $$;
+
+do $$
+declare f text;
+begin
+  foreach f in array array['my_monthly_reports(uuid)', 'monthly_report(uuid, uuid)', 'teacher_monthly_reports(date)', 'save_monthly_message(uuid, text)'] loop
+    execute format('revoke all on function public.%s from public, anon', f);
+    execute format('grant execute on function public.%s to authenticated', f);
+  end loop;
+  foreach f in array array['monthly_report_work(date, integer)', 'monthly_report_store(uuid, date, jsonb, text)'] loop
+    execute format('revoke all on function public.%s from public, anon, authenticated', f);
+    execute format('grant execute on function public.%s to service_role', f);
+  end loop;
+end $$;
+-- ══ END ALUMNOS + REPORTE MENSUAL ══
 
 -- Que la API de Supabase vea enseguida las funciones nuevas
 notify pgrst, 'reload schema';

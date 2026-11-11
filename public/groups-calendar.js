@@ -216,7 +216,14 @@
     if (!currentUser) return false;
     // Link enrollments loaded with my verified email (the database only links when this session was opened
     // from an email link; it never changes the role).
-    try { await rpc('claim_enrollments'); } catch (e) { /* older database: ignore */ }
+    // 2026-11-11: a self-registered account that only studies (enrollments, never taught or generated) becomes a STUDENT
+    // in the database (tc_should_be_student): from here on it sees only the student screens (no generator, trial or plans)
+    try {
+      const r = await rpc('claim_enrollments');
+      if (currentUser && r && !r.error && r.data && r.data.role === 'student' && !currentUser.isStudent) {
+        currentUser.role = 'student'; currentUser.isStudent = true; currentUser.orgId = null;
+      }
+    } catch (e) { /* older database: ignore */ }
     if (!currentUser) return false;
     if (currentUser.isStudent) { await enterStudentMode(); return true; }
     leaveStudentMode();

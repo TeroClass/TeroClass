@@ -33,7 +33,8 @@ module.exports = function install(ctx) {
     return db.student_insights.filter(si => eids.includes(si.enrollment_id)).map(si => ({ si, s: sess(si.session_id) })).filter(x => x.s)
       .sort((a, b) => Date.parse(b.s.starts_at) - Date.parse(a.s.starts_at)).slice(0, limit)
       .map(({ si, s }) => ({ id: si.id, session_id: s.id, title: title(s), starts_at: s.starts_at, ends_at: s.ends_at, timezone: s.timezone, group_name: group(s.group_id)?.name || null,
-        teacher_name: personName(me, teacherOf(s)), summary: String(si.data?.recap?.summary || '').slice(0, 280), kind: si.data?.kind || '', has_message: !!si.published_at, is_demo: !!si.is_demo }));
+        teacher_name: personName(me, teacherOf(s)), summary: String(si.data?.recap?.summary || '').slice(0, 280), kind: si.data?.kind || '', has_message: !!si.published_at, is_demo: !!si.is_demo,
+        level: si.data?.progress?.level || '', score: si.data?.progress?.score ?? null, speaking_min: si.data?.progress?.speakingMin ?? null }));
   }
 
   function handle(fn, body, me) {
@@ -136,8 +137,46 @@ module.exports = function install(ctx) {
         return ok({ id: si.id, session_id: s.id, session: { title: title(s), starts_at: s.starts_at, ends_at: s.ends_at, timezone: s.timezone, group_name: g?.name || null, teacher_name: personName(me, teacherOf(s)), duration_min: dur(s) },
           student_name: e.name, data: si.data, is_demo: si.is_demo, message: si.published_at ? si.published_message : '', published_at: si.published_at });
       }
+      // 2026-11-11: monthly reports (student + their teacher / substitute)
+      case 'my_monthly_reports': {
+        if (!me) return err('No autorizado');
+        let eids;
+        if (b.p_enrollment) { if (!isSA(me)) return err('No autorizado'); eids = [b.p_enrollment]; }
+        else eids = db.student_enrollments.filter(e => e.user_id === me.id).map(e => e.id);
+        return ok(reports().filter(r => eids.includes(r.enrollment_id)).sort((a, c) => c.month.localeCompare(a.month)).map(mrSummary));
+      }
+      case 'monthly_report': {
+        const r = reports().find(x => x.id === b.p_id); const e = r && enr(r.enrollment_id);
+        if (!me || !r || !e) return err('No autorizado');
+        const teacher = teachesEnr(me, e.id);
+        if (!(e.user_id === me.id || teacher || isSA(me))) return err('No autorizado');
+        return ok({ id: r.id, month: r.month, enrollment_id: e.id, student_name: e.name, data: r.data, message: r.teacher_message || '', message_at: r.message_at || null,
+          message_by: r.message_by ? personName(me, r.message_by) : '', can_edit: teacher, created_at: r.created_at });
+      }
+      case 'teacher_monthly_reports': {
+        if (!me) return err('No autorizado');
+        return ok(reports().filter(r => teachesEnr(me, r.enrollment_id)).sort((a, c) => c.month.localeCompare(a.month)).map(mrSummary));
+      }
+      case 'save_monthly_message': {
+        const r = reports().find(x => x.id === b.p_id);
+        if (!me || !r || !teachesEnr(me, r.enrollment_id)) return err('No autorizado');
+        const v = String(b.p_message || '').trim(); if (v.length > 4000) return err('El mensaje es demasiado largo');
+        r.teacher_message = v; r.message_by = v ? me.id : null; r.message_at = v ? new Date().toISOString() : null;
+        return ok({ ok: true, message: v, message_at: r.message_at });
+      }
       default: return undefined;
     }
+  }
+  function reports() { if (!db.student_monthly_reports) db.student_monthly_reports = []; return db.student_monthly_reports; }
+  function teachesEnr(me, eid) {
+    return db.group_members.some(m => m.enrollment_id === eid && (() => { const g = group(m.group_id); return g && (g.teacher_id === me.id || g.substitute_id === me.id); })())
+      || db.student_insights.some(si => si.enrollment_id === eid && sess(si.session_id)?.teacher_id === me.id);
+  }
+  function mrSummary(r) {
+    const d = r.data || {};
+    return { id: r.id, month: r.month, enrollment_id: r.enrollment_id, student_name: enr(r.enrollment_id)?.name || '', summary: String(d.summary || '').slice(0, 280),
+      classes: d.classes || 0, attended: d.attended || 0, scheduled: d.scheduled || 0, level_start: d.levelStart || '', level_end: d.levelEnd || '',
+      speaking_min: d.speakingMin || 0, words: (d.vocab || []).length, has_message: !!(r.message_at && r.teacher_message), created_at: r.created_at };
   }
   return { handle, summaries, calls };
 };

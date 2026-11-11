@@ -40,7 +40,8 @@
     proc: new Set(), rec: null, recFailed: false, pollTimer: null,
     scope: null, key: '', view: 'list', seq: 0, list: null, err: null, f: EMPTY_F(), qTimer: null,
     sid: null, detail: null, dseq: 0, tab: 'report', si: 0, sub: 'overview', stq: '', drafts: {}, refl: {},
-    mine: null, mid: null, mdetail: null, pendingOpen: null, from: null, mf: { cls: '', from: '', to: '' }, asStudent: false, hasMine: false,
+    mine: null, mid: null, mdetail: null, pendingOpen: null, from: null, asStudent: false, hasMine: false,
+    mreports: null, mrid: null, mrdetail: null, mrs: null, mrErr: null,
   };
 
   const isStudent = () => !!(typeof currentUser !== 'undefined' && currentUser && currentUser.isStudent);
@@ -61,15 +62,19 @@
     const sc = scopeFor(name);
     IP.scope = sc;
     const key = scopeKey();
-    if (key !== IP.key) { IP.key = key; IP.view = 'list'; IP.list = null; IP.mine = null; IP.detail = null; IP.mdetail = null; IP.err = null; IP.f = EMPTY_F(); IP.drafts = {}; IP.refl = {}; IP.mid = null; IP.mf = { cls: '', from: '', to: '' }; }
-    if (IP.pendingOpen) { const p = IP.pendingOpen; IP.pendingOpen = null; if (sc === 'student') { IP.mf = { cls: p.id, from: '', to: '' }; openMine(p.id); } else openSession(p.id, p); return; }
+    if (key !== IP.key) { IP.key = key; IP.view = 'list'; IP.list = null; IP.mine = null; IP.detail = null; IP.mdetail = null; IP.err = null; IP.f = EMPTY_F(); IP.drafts = {}; IP.refl = {}; IP.mid = null; IP.mrid = null; IP.mrdetail = null; IP.mreports = null; IP.mrs = null; }
+    if (IP.pendingOpen) { const p = IP.pendingOpen; IP.pendingOpen = null; if (sc === 'student') { openMine(p.id); if (!IP.mine) loadMine(() => {}); } else openSession(p.id, p); return; }
     if (sc === 'student') { IP.view = 'list'; paintMineList(); loadMine(); return; }
+    if (IP.view === 'mr-list') { openMrList(); return; }
+    if (IP.view === 'mr' && IP.mrdetail) { paintMrTeacher(); return; }
     if (IP.view === 'session' && IP.detail) { paintDetail(); return; }
     IP.view = 'list'; paintList(); loadList();
   }
   function onLang() { if (IP.scope && isActive()) repaint(); }
   function repaint() {
     if (IP.scope === 'student') { paintMineList(); return; }
+    if (IP.view === 'mr-list') { paintMrList(); return; }
+    if (IP.view === 'mr') { paintMrTeacher(); return; }
     if (IP.view === 'session') paintDetail(); else paintList();
   }
 
@@ -105,7 +110,8 @@
     const u = unitId();
     const scope = IP.scope === 'unit' ? `<div class="ins-scope" id="ins-scope"><span aria-hidden="true">📍</span> ${u ? `<span>Scope:</span> <b data-no-i18n>${E(typeof hierPathLabel === 'function' && !inViewAs() ? (hierPathLabel(u) || unitName(u)) : unitName(u))}</b> <span>and everything below it</span>` : '<span>Scope: all institutions</span>'}</div>` : '';
     const mineBtn = IP.scope === 'mine' && !inViewAs() ? `<button type="button" class="lc-btn" data-lc="ins-as-student" id="ins-mine-switch"${IP.hasMine ? '' : ' hidden'}>🎒 <span>My insights as a student</span></button>` : '';
-    return `<header class="lc-head"><div>${title}${sub}</div>${mineBtn}${ro ? `<span class="ins-ro" id="ins-ro"><span aria-hidden="true">👁</span> <span>${inViewAs() ? 'View as: read-only' : 'Read-only'}</span></span>` : ''}</header>${scope}`;
+    const mrBtn = IP.scope === 'mine' && !inViewAs() ? '<button type="button" class="lc-btn" data-lc="ins-mr-list" id="ins-mr-btn">📅 <span>Monthly reports</span></button>' : '';
+    return `<header class="lc-head"><div>${title}${sub}</div><div class="lc-row">${mrBtn}${mineBtn}</div>${ro ? `<span class="ins-ro" id="ins-ro"><span aria-hidden="true">👁</span> <span>${inViewAs() ? 'View as: read-only' : 'Read-only'}</span></span>` : ''}</header>${scope}`;
   }
   function paintList() {
     const root = rootEl(); if (!root) return;
@@ -354,49 +360,48 @@
   // STUDENT: My insights (own only; the teacher's message only once published)
   // ════════════════════════════════════════════════════════════════════════════════════════
   const vaStudent = () => (inViewAs() && viewAs.perspective === 'student' ? { p_group: viewAs.group?.id || null, p_enrollment: viewAs.person?.id || null } : null);
-  // 2026-11-05 (Ignacio: "Anto can't see her insights"): "My insights" is a DASHBOARD. A search bar (class + from/to dates,
-  // Enter or "Search") picks one class and shows all of it on one page; "Download PDF" prints exactly that dashboard.
-  // Accounts that teach AND study (a teacher enrolled in someone else's group) reach it from Teaching → Insights too.
-  const EMPTY_MF = () => ({ cls: '', from: '', to: '' });
+  // 2026-11-11 (Ignacio): "My insights" with NO search. A timeline on the left (the monthly reports pinned on top, then the
+  // classes grouped by month, newest first, "New" until opened) and the chosen class or report on the right; the newest class
+  // opens by itself. Accounts that teach AND study (a teacher enrolled in someone else's group) reach it from Teaching → Insights.
   const dayKey = d => { try { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; } catch (e) { return ''; } };
-  function mineInRange() {
-    const f = IP.mf || EMPTY_MF();
-    return (IP.mine || []).filter(x => { const k = dayKey(x.starts_at); return (!f.from || k >= f.from) && (!f.to || k <= f.to); });
+  const monthKey = d => dayKey(d).slice(0, 7);
+  // "New" = not opened yet on this device (a convenience: never required for anything)
+  const seenKey = () => 'tc-ins-seen:' + (inViewAs() ? 'va' : (currentUser?.id || ''));
+  function seenSet() { try { return new Set(JSON.parse(localStorage.getItem(seenKey()) || '[]')); } catch (e) { return new Set(); } }
+  function markSeen(id) {
+    if (!id || inViewAs()) return;
+    try { const s = seenSet(); if (s.has(id)) return; s.add(id); localStorage.setItem(seenKey(), JSON.stringify([...s].slice(-500))); } catch (e) { /* storage off */ }
   }
   async function loadMine(then) {
     const seq = ++IP.seq; const va = vaStudent();
-    const { data, error } = await rpc('my_insights', va || {});
+    const [ins, rep] = await Promise.all([rpc('my_insights', va || {}),
+      va && !va.p_enrollment ? Promise.resolve({ data: [] }) : rpc('my_monthly_reports', va ? { p_enrollment: va.p_enrollment } : {})]);
     if (seq !== IP.seq || IP.scope !== 'student') return;
-    IP.err = error || null; IP.mine = error ? null : (Array.isArray(data) ? data : []);
+    IP.err = ins.error || null; IP.mine = ins.error ? null : (Array.isArray(ins.data) ? ins.data : []);
+    IP.mreports = rep.error ? [] : (Array.isArray(rep.data) ? rep.data : (typeof rep.data === 'string' ? (() => { try { return JSON.parse(rep.data); } catch (e) { return []; } })() : []));
     paintMineList();
-    if (then) then(); else if (!IP.mid && IP.mine && IP.mine.length) searchMine();
+    if (then) then(); else if (!IP.mid && !IP.mrid && IP.mine && IP.mine.length) openMine(IP.mine[0].id);
   }
-  // Search: the chosen class if it is in the date range, else the newest class of the range
-  function searchMine() {
-    const list = mineInRange(); const f = IP.mf;
-    const pick = list.find(x => x.id === f.cls) || list[0];
-    paintSearchInfo(list);
-    if (!pick) { IP.mid = null; IP.mdetail = null; const d = document.getElementById('ins-dash'); if (d) d.innerHTML = `<div class="lc-card ins-empty"><h2>No classes match this search</h2><p>Try other dates or clear the search.</p></div>`; return; }
-    openMine(pick.id);
-  }
-  function classLabel(x) { return `${fDay(x.starts_at)} · ${x.title || x.group_name || tr('Class')}`; }
-  function searchHtml() {
-    const f = IP.mf; const list = mineInRange();
-    return `<form class="ins-filters ins-search no-print" id="ins-search" role="search" aria-label="${E(tr('Search my insights'))}">
-      <div class="lc-field q"><label for="ins-s-class">Class</label><select id="ins-s-class">
-        <option value="">${E(tr('Latest class'))}</option>
-        ${list.map(x => `<option value="${E(x.id)}"${x.id === f.cls ? ' selected' : ''} data-no-i18n>${E(classLabel(x))}</option>`).join('')}</select></div>
-      <div class="lc-field"><label for="ins-s-from">From</label><input type="date" id="ins-s-from" value="${E(f.from)}"></div>
-      <div class="lc-field"><label for="ins-s-to">To</label><input type="date" id="ins-s-to" value="${E(f.to)}"></div>
-      <button type="submit" class="lc-btn lc-primary" id="ins-s-go">🔎 <span>Search</span></button>
-      ${f.cls || f.from || f.to ? '<button type="button" class="lc-btn lc-sm" data-lc="ins-s-clear">Clear</button>' : ''}
-    </form>
-    <p class="lc-fine ins-search-info no-print" id="ins-search-info" aria-live="polite"></p>`;
-  }
-  function paintSearchInfo(list) {
-    const el = document.getElementById('ins-search-info'); if (!el) return;
-    const n = list.length;
-    el.innerHTML = n > 1 ? `<span data-no-i18n>${n}</span> <span>classes found — choose one:</span> ${list.slice(0, 12).map(x => `<button type="button" class="lc-chip ins-s-chip${x.id === IP.mid ? ' active' : ''}" data-lc="ins-mine-open" data-id="${E(x.id)}" data-no-i18n>${E(fmt(x.starts_at, { day: 'numeric', month: 'short' }))}</button>`).join(' ')}` : '';
+  const fNum = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n.toFixed(d).replace('.', typeof uiLang !== 'undefined' && uiLang === 'es' ? ',' : '.') : ''; };
+  function railHtml() {
+    const seen = seenSet(); const list = IP.mine || []; const reps = IP.mreports || [];
+    const repCards = reps.map(r => `<button type="button" class="ins-report-card${r.id === IP.mrid ? ' active' : ''}" data-lc="ins-mr-open" data-id="${E(r.id)}" aria-pressed="${r.id === IP.mrid}">
+        <small><span>Monthly report</span>${seen.has('mr:' + r.id) || inViewAs() ? '' : ' · <span>new</span>'}</small>
+        <b><span>Report of</span> <span data-no-i18n>${E(V.monthName(r.month))}</span></b>
+        <span><span data-no-i18n>${E(r.classes)}</span> <span>${Number(r.classes) === 1 ? 'class with insights' : 'classes with insights'}</span>${r.level_end ? ` · <span data-no-i18n>${E(r.level_end)}</span>` : ''}</span>
+      </button>`).join('');
+    const months = []; const by = new Map();
+    list.forEach(x => { const k = monthKey(x.starts_at); if (!by.has(k)) { by.set(k, []); months.push(k); } by.get(k).push(x); });
+    const cls = x => { const bits = [x.level, x.speaking_min != null && x.speaking_min !== '' ? `${fNum(x.speaking_min, 1)} min` : '', x.score != null && x.score !== '' ? `${tr('grammar')} ${fNum(x.score)}` : ''].filter(Boolean);
+      return `<button type="button" class="ins-cls${x.id === IP.mid && !IP.mrid ? ' active' : ''}" data-lc="ins-mine-open" data-id="${E(x.id)}" aria-pressed="${x.id === IP.mid && !IP.mrid}">
+        <span class="ins-cls-top"><span data-no-i18n>${E(fmt(x.starts_at, { weekday: 'short', day: 'numeric', month: 'short' }))}${x.teacher_name ? ' · ' + E(x.teacher_name) : ''}</span>${seen.has(x.id) || inViewAs() ? '' : '<span class="ins-new">New</span>'}${x.is_demo ? V.demoChip() : ''}</span>
+        <span class="ins-cls-t" data-no-i18n>${E(x.title || x.group_name || tr('Class'))}</span>
+        ${bits.length ? `<span class="ins-cls-k" data-no-i18n>${E(bits.join(' · '))}</span>` : ''}
+      </button>`; };
+    const nextMonth = (() => { const d = new Date(); const n = new Date(d.getFullYear(), d.getMonth() + 1, 1); return fmt(n, { day: 'numeric', month: 'long' }); })();
+    return `${repCards}
+      ${months.map(k => `<div class="ins-month-h" data-no-i18n>${E(V.monthName(k))}</div>${by.get(k).map(cls).join('')}`).join('')}
+      <p class="lc-fine"><span>Your monthly report appears here on</span> <span data-no-i18n>${E(nextMonth)}</span>.</p>`;
   }
   function paintMineList() {
     const root = rootEl(); if (!root) return;
@@ -404,31 +409,43 @@
     let body;
     if (IP.err) body = `<div class="lc-card ins-empty"><h2>We couldn't load your insights</h2><p>${E(errMsg(IP.err))}</p><button type="button" class="lc-btn" data-lc="ins-reload">Try again</button></div>`;
     else if (!list) body = '<div class="in-loading">Loading…</div>';
-    else if (!list.length) body = `<div class="lc-card ins-empty" id="ins-empty">
+    else if (!list.length && !(IP.mreports || []).length) body = `<div class="lc-card ins-empty" id="ins-empty">
         <div class="ins-empty-art" aria-hidden="true"><span>🗣️</span><span>📚</span><span>💬</span></div>
         <h2>Insights appear after your classes</h2>
         <p>${va && !va.p_enrollment ? 'Pick a student in View as to see their insights.' : 'After each class you’ll see a recap, your progress, feedback and a message from your teacher.'}</p></div>`;
-    else body = `${searchHtml()}<div id="ins-dash" class="ins-dash" aria-live="polite">${IP.mdetail ? dashHtml() : '<div class="in-loading">Loading…</div>'}</div>`;
+    else body = `<div class="ins-layout"><aside class="ins-rail no-print" id="ins-rail" aria-label="${E(tr('Your classes'))}">${railHtml()}</aside>
+        <div id="ins-dash" class="ins-dash" aria-live="polite">${IP.mrid ? (IP.mrdetail ? reportDashHtml() : '<div class="in-loading">Loading…</div>') : IP.mdetail ? dashHtml() : '<div class="in-loading">Loading…</div>'}</div></div>`;
     const back = IP.asStudent ? '<button type="button" class="lc-link no-print" data-lc="ins-as-teacher">← <span>Teaching insights</span></button>'
       : '<button type="button" class="lc-link no-print" data-lc="ins-student-home">← <span>Back to my classes</span></button>';
     root.innerHTML = `<div class="lc-wrap ins-wrap">
       ${back}
-      <header class="lc-head no-print"><div><h1><span aria-hidden="true">💡</span> <span>My insights</span></h1><p class="lc-sub">After each class: a recap, your progress, feedback and a message from your teacher.</p></div>${inViewAs() ? '<span class="ins-ro"><span aria-hidden="true">👁</span> <span>View as: read-only</span></span>' : ''}</header>
+      <header class="lc-head no-print"><div><h1><span aria-hidden="true">💡</span> <span>My insights</span></h1><p class="lc-sub">After each class: your grammar, vocabulary and pronunciation, with a message from your teacher. Every month, a report.</p></div>${inViewAs() ? '<span class="ins-ro"><span aria-hidden="true">👁</span> <span>View as: read-only</span></span>' : ''}</header>
       ${list && list.some(x => x.is_demo) ? V.banner() : ''}
       ${body}
     </div>`;
-    if (list && list.length) paintSearchInfo(mineInRange());
   }
+  function paintRail() { const r = document.getElementById('ins-rail'); if (r) r.innerHTML = railHtml(); else paintMineList(); }
   async function openMine(id) {
-    IP.view = 'list'; IP.mid = id; IP.mdetail = null;
+    IP.view = 'list'; IP.mid = id; IP.mdetail = null; IP.mrid = null; IP.mrdetail = null;
     const box = document.getElementById('ins-dash'); if (box) box.innerHTML = '<div class="in-loading">Loading…</div>';
-    if (!box) paintMineList();
+    if (!box) paintMineList(); else paintRail();
     const seq = ++IP.dseq; const va = vaStudent();
     const { data, error } = await rpc('my_insight', { p_id: id, p_enrollment: va ? va.p_enrollment : null });
     if (seq !== IP.dseq || IP.scope !== 'student') return;
     if (error) { toast(errMsg(error), 'err'); IP.mid = null; const d = document.getElementById('ins-dash'); if (d) d.innerHTML = ''; return; }
-    IP.mdetail = data || {};
+    IP.mdetail = data || {}; markSeen(id);
     if (!IP.mine) { loadMine(() => paintMineDetail()); return; }
+    paintMineDetail();
+  }
+  async function openReport(id) {
+    IP.view = 'list'; IP.mrid = id; IP.mrdetail = null;
+    const box = document.getElementById('ins-dash'); if (box) box.innerHTML = '<div class="in-loading">Loading…</div>';
+    if (!box) paintMineList(); else paintRail();
+    const seq = ++IP.dseq; const va = vaStudent();
+    const { data, error } = await rpc('monthly_report', { p_id: id, p_enrollment: va ? va.p_enrollment : null });
+    if (seq !== IP.dseq || IP.scope !== 'student') return;
+    if (error) { toast(errMsg(error), 'err'); IP.mrid = null; paintMineList(); return; }
+    IP.mrdetail = (typeof data === 'string' ? JSON.parse(data) : data) || {}; markSeen('mr:' + id);
     paintMineDetail();
   }
   function dashHtml() {
@@ -444,18 +461,80 @@
       ${V.studentDashboardHtml(X, { P: 'ins', msg: { mode: 'student', published: d.message || '', publishedAt: d.published_at } })}
     </article>`;
   }
+  function reportDashHtml(mode) {
+    const d = IP.mrdetail; if (!d) return '';
+    return `<article class="ins-dash-sheet" id="ins-dash-sheet">
+      <header class="ins-dash-head">
+        <div><div class="ins-dash-brand" aria-hidden="true"><span data-no-i18n>TeroClass</span> · <span>Monthly report</span></div>
+          <h2 class="ins-dash-title"><span>Report of</span> <span data-no-i18n>${E(V.monthName(d.month))}</span></h2>
+          <p class="lc-sub">${d.student_name ? `<span>Student:</span> <span data-no-i18n>${E(d.student_name)}</span>` : ''}</p></div>
+        <div class="ins-head-actions"><button type="button" class="lc-btn no-print" data-lc="ins-pdf" id="ins-pdf">⬇ <span>Download PDF</span></button></div>
+      </header>
+      ${V.monthlyReportHtml(d, { P: 'mr', mode: mode || 'student' })}
+    </article>`;
+  }
   function paintMineDetail() {
     const box = document.getElementById('ins-dash');
     if (!box) { paintMineList(); return; }
-    box.innerHTML = dashHtml();
-    paintSearchInfo(mineInRange());
+    box.innerHTML = IP.mrid ? reportDashHtml() : dashHtml();
+    paintRail();
+  }
+
+  // ── Teacher / substitute: the monthly reports of their students (they can add a message) ──
+  async function openMrList() {
+    IP.view = 'mr-list'; IP.mrs = null; IP.mrErr = null; paintMrList();
+    const seq = ++IP.seq;
+    const { data, error } = await rpc('teacher_monthly_reports');
+    if (seq !== IP.seq || IP.view !== 'mr-list') return;
+    IP.mrErr = error || null; IP.mrs = error ? [] : (Array.isArray(data) ? data : (typeof data === 'string' ? JSON.parse(data) : []));
+    paintMrList();
+  }
+  function paintMrList() {
+    const root = rootEl(); if (!root) return;
+    const list = IP.mrs; const months = []; const by = new Map();
+    (list || []).forEach(r => { const k = String(r.month).slice(0, 7); if (!by.has(k)) { by.set(k, []); months.push(k); } by.get(k).push(r); });
+    root.innerHTML = `<div class="lc-wrap ins-wrap">
+      <button type="button" class="lc-link" data-lc="ins-back">← <span>All insights</span></button>
+      <header class="lc-head"><div><h1><span aria-hidden="true">📅</span> <span>Monthly reports</span></h1><p class="lc-sub">On the 1st of each month every student with classes gets a report. Add a personal message if you want: they see it right away.</p></div></header>
+      ${IP.mrErr ? `<div class="lc-card ins-empty"><p>${E(errMsg(IP.mrErr))}</p></div>` : !list ? '<div class="in-loading">Loading…</div>'
+        : !list.length ? '<div class="lc-card ins-empty"><h2>No monthly reports yet</h2><p>They are created on the 1st of each month for the students who had classes with insights.</p></div>'
+        : months.map(k => `<h2 class="ins-dash-h" data-no-i18n>${E(V.monthName(k))}</h2><div class="ins-mr-list">${by.get(k).map(r => `<button type="button" class="ins-cls" data-lc="ins-mr-teacher" data-id="${E(r.id)}">
+            <span class="ins-cls-t" data-no-i18n>${E(r.student_name || '')}</span>
+            <span class="ins-cls-k"><span data-no-i18n>${E(r.classes)}</span> <span>${Number(r.classes) === 1 ? 'class with insights' : 'classes with insights'}</span>${r.level_end ? ` · <span data-no-i18n>${E(r.level_end)}</span>` : ''} · ${r.has_message ? '<span>✓ message added</span>' : '<span>no message yet</span>'}</span></button>`).join('')}</div>`).join('')}
+    </div>`;
+  }
+  async function openMrTeacher(id) {
+    IP.view = 'mr'; IP.mrdetail = null; IP.mrid = id;
+    const root = rootEl(); if (root) root.innerHTML = '<div class="lc-wrap ins-wrap"><div class="in-loading">Loading…</div></div>';
+    const seq = ++IP.dseq;
+    const { data, error } = await rpc('monthly_report', { p_id: id });
+    if (seq !== IP.dseq || IP.view !== 'mr') return;
+    if (error) { toast(errMsg(error), 'err'); openMrList(); return; }
+    IP.mrdetail = (typeof data === 'string' ? JSON.parse(data) : data) || {};
+    paintMrTeacher();
+  }
+  function paintMrTeacher() {
+    const root = rootEl(); if (!root) return;
+    root.innerHTML = `<div class="lc-wrap ins-wrap"><button type="button" class="lc-link no-print" data-lc="ins-mr-list">← <span>Monthly reports</span></button>
+      ${reportDashHtml(IP.mrdetail?.can_edit && !inViewAs() ? 'edit' : 'read')}</div>`;
+  }
+  async function saveMr(btn) {
+    const d = IP.mrdetail; const ta = document.getElementById('mr-msg'); if (!d || !ta || blocked()) return;
+    if (btn) btn.disabled = true;
+    const { data, error } = await rpc('save_monthly_message', { p_id: d.id, p_message: ta.value });
+    if (btn) btn.disabled = false;
+    if (error) { toast(errMsg(error), 'err'); return; }
+    const r = typeof data === 'string' ? JSON.parse(data) : (data || {});
+    d.message = r.message || ''; d.message_at = r.message_at || null;
+    toast(d.message ? 'Message saved ✓ The student can see it now.' : 'Message removed', 'ok');
+    paintMrTeacher();
   }
   // PDF: the dashboard printed alone (hidden frame with the app's styles → the browser's "Save as PDF")
   function downloadPdf() {
-    const sheet = document.getElementById('ins-dash-sheet'); const d = IP.mdetail; if (!sheet || !d) return;
-    const s = d.session || {};
+    const sheet = document.getElementById('ins-dash-sheet'); const rep = IP.mrid && IP.mrdetail; const d = rep ? IP.mrdetail : IP.mdetail; if (!sheet || !d) return;
+    const s = rep ? { title: `${tr('Monthly report')} ${V.monthName(d.month)}`, starts_at: d.month } : (d.session || {});
     const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).map(n => n.outerHTML).join('\n');
-    const name = `TeroClass - ${tr('My insights')} - ${s.title || s.group_name || tr('Class')} - ${dayKey(s.starts_at)}`.replace(/[\\/:*?"<>|]+/g, ' ');
+    const name = `TeroClass - ${rep ? (d.student_name || tr('My insights')) : tr('My insights')} - ${s.title || s.group_name || tr('Class')}${rep ? '' : ' - ' + dayKey(s.starts_at)}`.replace(/[\\/:*?"<>|]+/g, ' ');
     const foot = `${tr('Generated with TeroClass')} · ${fDay(new Date())}`;
     const old = document.getElementById('ins-print-frame'); if (old) old.remove();
     const fr = document.createElement('iframe'); fr.id = 'ins-print-frame'; fr.setAttribute('aria-hidden', 'true');
@@ -512,8 +591,11 @@
         if (ok) { if (IP.scope !== 'student') { IP.list = null; openSession(id, { tab: el.dataset.reopen ? IP.tab : 'report' }); } }
         break;
       }
-      case 'ins-mine-open': IP.mf.cls = id; { const sel = document.getElementById('ins-s-class'); if (sel) sel.value = id; } openMine(id); break;
-      case 'ins-s-clear': IP.mf = EMPTY_MF(); IP.mid = null; IP.mdetail = null; paintMineList(); searchMine(); break;
+      case 'ins-mine-open': openMine(id); break;
+      case 'ins-mr-open': openReport(id); break;
+      case 'ins-mr-list': openMrList(); break;
+      case 'ins-mr-teacher': openMrTeacher(id); break;
+      case 'mr-save': saveMr(el); break;
       case 'ins-pdf': downloadPdf(); break;
       case 'ins-as-student': IP.asStudent = true; render('insights'); break;
       case 'ins-as-teacher': IP.asStudent = false; render('insights'); break;
@@ -521,26 +603,8 @@
       default: break;
     }
   });
-  // My insights search: Enter in any field or the "Search" button
-  document.addEventListener('submit', e => {
-    const f = e.target; if (!f || f.id !== 'ins-search' || !inRoot(f)) return;
-    e.preventDefault(); readSearch(); searchMine();
-  });
-  document.addEventListener('keydown', e => {
-    if (e.key !== 'Enter' || e.target?.id !== 'ins-s-class' || !inRoot(e.target)) return;
-    e.preventDefault(); readSearch(); searchMine();
-  });
-  function readSearch() {
-    IP.mf = { cls: document.getElementById('ins-s-class')?.value || '', from: document.getElementById('ins-s-from')?.value || '', to: document.getElementById('ins-s-to')?.value || '' };
-  }
   document.addEventListener('change', e => {
     const t = e.target; if (!inRoot(t)) return;
-    if (t.id === 'ins-s-from' || t.id === 'ins-s-to') {
-      // the class list follows the dates (the dashboard changes with Enter / Search)
-      readSearch(); const sel = document.getElementById('ins-s-class'); const list = mineInRange();
-      if (sel) sel.innerHTML = `<option value="">${E(tr('Latest class'))}</option>` + list.map(x => `<option value="${E(x.id)}"${x.id === IP.mf.cls ? ' selected' : ''} data-no-i18n>${E(classLabel(x))}</option>`).join('');
-      return;
-    }
     const k = { 'ins-f-group': 'group', 'ins-f-teacher': 'teacher', 'ins-f-from': 'from', 'ins-f-to': 'to' }[t.id];
     if (k) { IP.f[k] = t.value || ''; loadList(); }
   });
@@ -602,6 +666,15 @@
     'No classes match this search': 'Ninguna clase coincide con la búsqueda', 'Try other dates or clear the search.': 'Probá con otras fechas o limpiá la búsqueda.',
     'classes found — choose one:': 'clases encontradas. Elegí una:', 'Download PDF': 'Descargar PDF', 'Student:': 'Estudiante:',
     'Choose “Save as PDF” in the window that opens.': 'En la ventana que se abre, elegí “Guardar como PDF”.', 'Could not open the print window.': 'No se pudo abrir la ventana para imprimir.',
+    // 2026-11-11: My insights without search + monthly reports
+    'Monthly report': 'Reporte mensual', 'new': 'nuevo', 'New': 'Nuevo', 'Report of': 'Reporte de', 'grammar': 'gramática', 'Your classes': 'Tus clases',
+    'Your monthly report appears here on': 'Tu reporte mensual aparece acá el',
+    'After each class: your grammar, vocabulary and pronunciation, with a message from your teacher. Every month, a report.': 'Después de cada clase: tu gramática, tu vocabulario y tu pronunciación, con un mensaje de tu docente. Y cada mes, un reporte.',
+    'Monthly reports': 'Reportes mensuales', 'No monthly reports yet': 'Todavía no hay reportes mensuales',
+    'They are created on the 1st of each month for the students who had classes with insights.': 'Se crean el día 1 de cada mes para los alumnos que tuvieron clases con insights.',
+    'On the 1st of each month every student with classes gets a report. Add a personal message if you want: they see it right away.': 'El día 1 de cada mes cada alumno con clases recibe un reporte. Si querés, sumale un mensaje personal: lo ve enseguida.',
+    '✓ message added': '✓ con mensaje', 'no message yet': 'sin mensaje todavía', 'Message saved ✓ The student can see it now.': 'Mensaje guardado ✓ El alumno ya lo puede ver.',
+    'Message removed': 'Mensaje quitado', 'El mensaje es demasiado largo': 'El mensaje es demasiado largo',
     'Generated with TeroClass': 'Generado con TeroClass', 'My insights as a student': 'Mis insights como estudiante', 'Teaching insights': 'Insights de docencia',
     'After each class: a recap, your progress, feedback and a message from your teacher.': 'Después de cada clase: un repaso, tu progreso, una devolución y un mensaje de tu docente.',
     'Demo insights can only be generated for today’s or past classes.': 'Los insights de demo se generan para clases de hoy o anteriores.',

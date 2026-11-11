@@ -1,14 +1,17 @@
 // Vercel serverless (via api/class.js): advance the recording pipeline. Idempotent; bounded work per call (< 50 s).
 //   GET  /api/class/process   Authorization: Bearer <CRON_SECRET>   ← the daily Vercel cron (vercel.json "crons")
-//        → deletes the audio past its 30 days (retention), then advances every class still "processing".
+//        → deletes the audio past its 30 days (retention), then advances every class still "processing", then builds the
+//          monthly reports still missing for the previous month (api/_lib/rec/monthly.js).
 //   POST /api/class/process {session: <class id>}   Authorization: Bearer <Supabase session>
 //        ← the app, while someone who can see that class (its teacher / substitute, its admins, or one of its students) has
 //          its Insights open in "processing" (it polls every ~20 s). Advances ONLY that class.
 //        → 200 {state: none | live | processing | ready | ended, step?, recordings, transcribed}
+//   POST /api/class/process {monthly: true}   (super admin) → builds the missing monthly reports of the previous month now
 // 501 {configured:false} while the pipeline is off (RECORDING_ENABLED + every key: see api/_lib/rec/env.js).
 import { getUser, bearer, SUPABASE_URL, SUPABASE_KEY } from '../livekit.js';
 import { recordingEnv, cronAuthorized } from '../rec/env.js';
 import { processSession, processAll, runRetention, deadline, kick, MAX_KICKS } from '../rec/pipeline.js';
+import { runMonthly } from '../rec/monthly.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const BUDGET_MS = 45000;      // the app's polling call (answers within a minute)
@@ -30,6 +33,16 @@ export async function sessionStatus(token, sessionId) {
   } catch { return { allowed: false, status: 503 }; } finally { clearTimeout(timer); }
 }
 
+export async function isSuperadmin(token) {
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/is_superadmin`, { method: 'POST', signal: controller.signal,
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' });
+    if (!r.ok) return false;
+    return (await r.json()) === true;
+  } catch { return false; } finally { clearTimeout(timer); }
+}
+
 export default async function handler(req, res) {
   res.setHeader?.('Cache-Control', 'no-store');
   const env = recordingEnv();
@@ -41,20 +54,29 @@ export default async function handler(req, res) {
     const dl = deadline(CRON_BUDGET_MS);
     const retention = hop === null ? await runRetention(env, { dl: deadline(12000) }) : null; // retention: only the daily cron
     const work = await processAll(env, { dl });
+    // monthly reports: only the daily cron (not the kicks), with the time that is left
+    let monthly = null;
+    if (hop === null) { try { monthly = await runMonthly(env, { dl }); } catch (e) { console.warn('monthly: failed', e?.message); monthly = { error: true }; } }
     // still processing (e.g. waiting for Azure) → wake up again in a moment, in a new invocation
     let next = null;
     if (work.states.includes('processing') && (hop ?? 0) < MAX_KICKS) {
       await sleep(Math.min(KICK_WAIT_MS, Math.max(0, parseInt(process.env.RECORDING_KICK_WAIT_MS ?? '', 10) || KICK_WAIT_MS)));
       next = (await kick(env, (hop ?? 0) + 1)) ? (hop ?? 0) + 1 : null;
     }
-    console.log('rec: cron', JSON.stringify({ hop, retention, work, next }));
-    return res.status(200).json({ ok: true, hop, retention, work, next });
+    console.log('rec: cron', JSON.stringify({ hop, retention, work, monthly, next }));
+    return res.status(200).json({ ok: true, hop, retention, work, monthly, next });
   }
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const token = bearer(req);
   let user; try { user = await getUser(token); } catch { user = null; }
   if (!user?.id) return res.status(401).json({ error: 'Please sign in again.', code: 'auth' });
   if (!env.configured) return res.status(501).json({ configured: false });
+  // Super admin only: build the missing monthly reports of the previous month now (same as the daily cron)
+  if (req.body?.monthly === true) {
+    if (!(await isSuperadmin(token))) return res.status(403).json({ error: 'Not allowed.', code: 'not_allowed' });
+    const monthly = await runMonthly(env, { dl: deadline(BUDGET_MS) });
+    return res.status(200).json({ ok: true, monthly });
+  }
   const sid = String(req.body?.session || '');
   if (!UUID.test(sid)) return res.status(400).json({ error: 'Invalid request.', code: 'invalid' });
   const before = await sessionStatus(token, sid);

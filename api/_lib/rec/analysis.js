@@ -16,7 +16,8 @@ export const RATINGS = ['strength', 'developing', 'focus'];
 // The full report (13 areas × evidence / impact / next + recap + form) does not fit in 3200 tokens: the answer was cut and
 // retried again and again until the class token cap (bug of 2026-11-03). 8000; deployments limited to 4096 → retried with 4096.
 export const TEACHER_MAX_TOKENS = 8000;
-export const STUDENT_MAX_TOKENS = 8000;
+// 2026-11-11: richer student feedback (8 corrections, synonyms, expressions, pronunciation guide) → room for 3 students
+export const STUDENT_MAX_TOKENS = 12000;
 export const FALLBACK_MAX_TOKENS = 4096;
 export const STUDENT_BATCH = 3;
 // The WHOLE class goes to the AI (gpt-4o: 128k tokens of context). Before: 60k / 30k characters → in a 40-minute class the
@@ -229,10 +230,15 @@ Return {"students": [one object per student above, in the same order]}, each:
  "level": ${lang ? 'CEFR speaking level shown in this class (A1, A2, A2+, B1, B1+, B2, C1)' : 'how they explain the concepts: "Explains with support" | "Explains in their own words" | "Explains and justifies" (in the output language)'},
  "score": 0–100 (${lang ? 'grammar accuracy of what they said' : 'accuracy of the concepts they used'}; 0 if they did not speak),
  ${lang ? '' : '"terms_used": how many subject terms they used correctly, '}"tracker": 1–6 × {"concept", "difficulty": ${lang ? '"Easy" | "Medium" | "Hard"' : '"Básico" | "Intermedio" | "Avanzado" (or Basic | Intermediate | Advanced in English)'}, "used": times used, "mastery": 0–100},
- "pron": 0–4 × {"item", "score": 0–100, "tip"} (${lang ? 'pronunciation points heard' : 'how they used the key concepts'}),
- "didWell": 0–3 × {"text": exact quote, "note"},
- "improve": 0–4 × {"original": exact quote, "corrected", "explanation"},
- "vocab": 0–6 × {"word", "pos", "level", "def", "quote" (from the class), "example"}}
+ ${lang ? `"pron": 0–4 × {"item": a word or short phrase they SAID that learners usually find hard to pronounce, "guide": simple respelling with the stressed syllable in CAPITALS (e.g. "TAY-lerd", "sai-kluh-RAH-muh"), "tip": one practical tip (stress, silent letters, a sound to watch)} — you only have the transcript, not the audio: never claim you heard how they pronounced it and never give a score,`
+   : '"pron": 0–4 × {"item", "score": 0–100, "tip"} (how they used the key concepts),'}
+ "didWell": 0–3 × {"text": exact quote, "note"} (${lang ? 'correct uses of the grammar or language of the class' : 'good use of the concepts'}),
+ "improve": 0–8 × {"type": short error category${lang ? ' (e.g. "Verb agreement", "Word order", "Verb tenses", "Articles", "Prepositions", "Missing subject")' : ''}, "original": exact quote, "corrected", "rule": the rule in one short simple sentence${lang ? ', "practice": one NEW example sentence that uses the correct form' : ''}}
+   (${lang ? 'be thorough: every clear grammar mistake you can find, most important first, the same type together' : 'concept or reasoning mistakes'}),
+ "vocab": 0–8 × {"word", "pos", "level", "def", "quote" (from the class), "example"${lang ? ', "synonyms": 2–3 synonyms or close alternatives' : ''}}${lang ? `,
+ "expressions": 0–5 × {"said": their exact words, "natural": how a fluent speaker would usually say it (an expression, collocation or phrasal verb), "why": one short sentence}
+   (only phrases that were understandable but sounded unnatural; not the grammar mistakes already in "improve")` : ''}}
+Focus on what helps them improve most: ${lang ? 'grammar (wrong → right), vocabulary with synonyms, natural expressions and pronunciation' : 'the concepts and the subject terms'}. Explanations must be simple and adapted to the student's level.
 Use only what each student actually said; empty arrays if there is no evidence. ${langRule(info.lang, info.locale)} Keep every text under 240 characters.`;
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
@@ -301,10 +307,19 @@ function oneStudent(s) {
     ref: String(s.ref || '').trim(), highlight: clean(s.highlight, 300) || '—', level: clean(s.level, 40) || '—', score: (() => { try { return int(s.score ?? 0, 0, 100, 'score'); } catch { return 0; } })(),
     ...(Number.isFinite(num(s.terms_used)) ? { terms_used: int(s.terms_used, 0, 1000, 'terms_used') } : {}),
     tracker: items(s.tracker, 6, o => ({ concept: reqStr(o.concept, 120, 'concept'), difficulty: clean(o.difficulty, 30), used: int(o.used ?? 0, 0, 999, 'used'), mastery: int(o.mastery ?? 0, 0, 100, 'mastery') }), 'tracker'),
-    pron: items(s.pron, 4, o => ({ item: reqStr(o.item, 160, 'pron.item'), score: int(o.score ?? 0, 0, 100, 'pron.score'), tip: clean(o.tip, 300) }), 'pron'),
+    // 2026-11-11 (Ignacio): pronunciation = a GUIDE (respelling + tip) from the transcript, without invented scores;
+    // the old shape {item, score, tip} is still accepted (discipline classes and older answers)
+    pron: items(s.pron, 4, o => { const g = clean(o.guide, 80); const sc = Number.isFinite(num(o.score)) && o.score !== '' && o.score !== null && !g ? int(o.score, 0, 100, 'pron.score') : null;
+      if (!g && sc === null) throw new Invalid('pron without guide or score');
+      return { item: reqStr(o.item, 160, 'pron.item'), ...(g ? { guide: g } : {}), ...(sc !== null ? { score: sc } : {}), tip: clean(o.tip, 300) || '—' }; }),
     didWell: items(s.didWell, 3, o => ({ text: reqStr(o.text, 300, 'didWell.text'), note: clean(o.note, 300) }), 'didWell'),
-    improve: items(s.improve, 4, o => ({ original: reqStr(o.original, 300, 'original'), corrected: reqStr(o.corrected, 300, 'corrected'), explanation: clean(o.explanation, 300) }), 'improve'),
-    vocab: items(s.vocab, 6, o => ({ word: reqStr(o.word, 60, 'word'), pos: clean(o.pos, 30), level: clean(o.level, 20), def: clean(o.def, 240), quote: clean(o.quote, 240), example: clean(o.example, 240) }), 'vocab'),
+    // grammar: up to 8, with its type, the rule and a new example to practise ("explanation" = the rule, for older screens)
+    improve: items(s.improve, 8, o => { const rule = clean(o.rule ?? o.explanation, 300);
+      return { ...(clean(o.type, 60) ? { type: clean(o.type, 60) } : {}), original: reqStr(o.original, 300, 'original'), corrected: reqStr(o.corrected, 300, 'corrected'),
+        explanation: rule, ...(clean(o.practice, 240) ? { practice: clean(o.practice, 240) } : {}) }; }),
+    vocab: items(s.vocab, 8, o => { const syn = (Array.isArray(o.synonyms) ? o.synonyms : typeof o.synonyms === 'string' ? o.synonyms.split(/[,;]/) : []).map(x => clean(x, 40)).filter(Boolean).slice(0, 3);
+      return { word: reqStr(o.word, 60, 'word'), pos: clean(o.pos, 30), level: clean(o.level, 20), def: clean(o.def, 240), quote: clean(o.quote, 240), example: clean(o.example, 240), ...(syn.length ? { synonyms: syn } : {}) }; }),
+    expressions: items(s.expressions, 5, o => ({ said: reqStr(o.said ?? o.original, 200, 'said'), natural: reqStr(o.natural ?? o.better, 200, 'natural'), why: clean(o.why, 240) })),
   };
 }
 // → {ok, value: Map(ref → student), errors[]}: the valid ones are kept (the others are retried in a later batch)
@@ -336,7 +351,7 @@ export function teacherData(ai, metrics, base) {
 export function studentData(ai, progress, base, lang) {
   const today = lang === 'es' ? 'Hoy' : 'Today';
   const d = { ...base, highlight: ai.highlight, progress, tracker: ai.tracker.map(t => ({ ...t, updated: today })), pron: ai.pron,
-    didWell: ai.didWell, improve: ai.improve, vocab: ai.vocab, source: 'recording' };
+    didWell: ai.didWell, improve: ai.improve, vocab: ai.vocab, expressions: ai.expressions || [], source: 'recording' };
   checkStudentShape(d); return d;
 }
 const S = v => typeof v === 'string'; const N = v => typeof v === 'number' && Number.isFinite(v);
@@ -362,7 +377,8 @@ export function checkStudentShape(d) {
   if (!S(d.highlight)) throw new Invalid('bad highlight');
   const all = (a, f) => Array.isArray(a) && a.every(f);
   if (!all(d.tracker, t => S(t.concept) && S(t.difficulty) && N(t.used) && S(t.updated) && N(t.mastery))) throw new Invalid('bad tracker');
-  if (!all(d.pron, t => S(t.item) && N(t.score) && S(t.tip))) throw new Invalid('bad pron');
+  if (!all(d.pron, t => S(t.item) && (N(t.score) || S(t.guide)) && S(t.tip))) throw new Invalid('bad pron');
+  if (d.expressions !== undefined && !all(d.expressions, t => S(t.said) && S(t.natural) && S(t.why))) throw new Invalid('bad expressions');
   if (!all(d.didWell, t => S(t.text) && S(t.note))) throw new Invalid('bad didWell');
   if (!all(d.improve, t => S(t.original) && S(t.corrected) && S(t.explanation))) throw new Invalid('bad improve');
   if (!all(d.vocab, t => ['word', 'pos', 'level', 'def', 'quote', 'example'].every(k => S(t[k])))) throw new Invalid('bad vocab');

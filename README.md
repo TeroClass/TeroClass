@@ -51,7 +51,12 @@ AI-powered didactic planning platform for teachers.
 
 ## Database
 
-Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again for the recording pipeline
+Run `supabase/migrations/001_base.sql` in Supabase → SQL Editor (safe to re-run). **It changed again on 2026-11-11 (block
+`ALUMNOS + REPORTE MENSUAL`): a self-registered account that only studies becomes a student when it signs in
+(`tc_should_be_student`), the monthly report per student (`student_monthly_reports`, built by the daily cron from the 1st:
+`api/_lib/rec/monthly.js`; seen by the student and their teacher / substitute, who can add a message) and the class summaries
+carry level / grammar / minutes for the "My insights" timeline (no search any more): run it again** (suite `tests/sql/monthly.sql`).
+Before that it changed for the recording pipeline
 (2026-10-28, block `RECORDING PIPELINE`, see *Grabación real*): run it again** — tested from git 08ff5fc with data, then twice,
 then `002_live_class.sql` (unchanged; still optional and still applies after it). Nothing is recorded until the owner sets the
 variables. Before that it changed for the group notebook

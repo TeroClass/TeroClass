@@ -257,27 +257,22 @@ function generateAs(user, s) {
     if (await page.$('#panel-insights textarea') || await page.$('#panel-insights .lc-student-pick') || await page.$('#ins-tab-report')) throw new Error('editing / other students / report visible to a student');
     // 2026-11-05: one-page DASHBOARD (every part of the class) instead of sub-tabs
     const heads = await page.$$eval('#ins-dash .ins-dash-h span:last-child', b => b.map(x => x.textContent.trim()));
-    if (JSON.stringify(heads) !== '["Repaso","Progreso","Devolución","Vocabulario"]') throw new Error('dashboard sections ES: ' + JSON.stringify(heads));
+    // 2026-11-11: grammar, vocabulary and pronunciation first
+    if (JSON.stringify(heads) !== '["Gramática","Vocabulario","Pronunciación","Repaso","Progreso"]') throw new Error('dashboard sections ES: ' + JSON.stringify(heads));
     const dash = await text(page, '#ins-dash');
     if (!/Temas tratados/.test(dash) || !/Nivel oral \(MCER\)/.test(dash) || !/Tiempo de habla/.test(dash)) throw new Error('dashboard content ES');
     let u = await untranslated(page, '#ins-root'); if (u.length) throw new Error('dashboard sin traducir: ' + JSON.stringify(u));
     await shot(page, 'student-dashboard-es');
-    // search: Enter in a date field with a range that has no classes → empty; clear → back to the latest class
-    await page.fill('#ins-s-from', '2001-01-01'); await page.fill('#ins-s-to', '2001-01-31');
-    await page.press('#ins-s-to', 'Enter');
-    await page.waitForSelector('#ins-dash .ins-empty');
-    if (!/Ninguna clase coincide/.test(await text(page, '#ins-dash'))) throw new Error('empty search ES');
-    await page.click('[data-lc="ins-s-clear"]');
-    await page.waitForSelector('#ins-dash-sheet');
-    // Enter on the class selector also searches
-    await page.selectOption('#ins-s-class', { index: 1 });
-    await page.focus('#ins-s-class'); await page.keyboard.press('Enter');
-    await page.waitForSelector('#ins-dash-sheet');
+    // 2026-11-11: no search. A timeline (one class here, already opened → not "New") and the newest class open by itself
+    if (await page.$('#ins-search') || await page.$('#ins-s-class')) throw new Error('the search bar is still there');
+    if (await page.locator('#ins-rail .ins-cls').count() !== 1) throw new Error('timeline: one class');
+    if (!(await page.$('#ins-rail .ins-cls.active'))) throw new Error('the newest class is not open');
+    if (await page.$('#ins-rail .ins-new')) throw new Error('an opened class still says New');
     // PDF: a print frame with only the dashboard (no search bar, no buttons)
     await page.evaluate(() => { window.__printed = 0; const o = HTMLIFrameElement.prototype; });
     await page.click('#ins-pdf');
     await page.waitForFunction(() => { const f = document.getElementById('ins-print-frame'); return f && f.contentDocument && f.contentDocument.querySelector('#ins-dash-sheet'); });
-    const pdf = await page.evaluate(() => { const d = document.getElementById('ins-print-frame').contentDocument; return { search: !!d.querySelector('#ins-search'), txt: d.body.innerText, title: d.title }; });
+    const pdf = await page.evaluate(() => { const d = document.getElementById('ins-print-frame').contentDocument; return { search: !!d.querySelector('#ins-search, #ins-rail'), txt: d.body.innerText, title: d.title }; });
     if (SHOTS) { const html = await page.evaluate(() => document.getElementById('ins-print-frame').contentDocument.documentElement.outerHTML);
       const pp = await page.context().newPage(); await pp.goto('http://teroclass.test/'); await pp.setContent(html, { waitUntil: 'load' }); await pp.emulateMedia({ media: 'print' });
       await pp.pdf({ path: SHOTS + '/ins-student-dashboard.pdf', format: 'A4', printBackground: true }); await pp.close(); }
@@ -404,6 +399,58 @@ function generateAs(user, s) {
     const c = calls.rpc.filter(x => x.fn === 'my_insight').pop().body; if (c.p_enrollment !== t.eAna.id) throw new Error('my_insight args ' + JSON.stringify(c));
     await shot(page, 'viewas-student');
     await page.click('#viewas-banner .va-exit'); await page.waitForSelector('#viewas-banner', { state: 'hidden' });
+  });
+
+  await run('Monthly report (Spanish): pinned for the student, the teacher adds a message, nobody else sees it', browser, async ({ page }) => {
+    const t = seed(); generateAs(t.tc, t.s1);
+    const rep = { id: 'mr-1', enrollment_id: t.eAna.id, month: '2026-10-01', created_at: new Date().toISOString(), teacher_message: '', message_at: null, message_by: null,
+      data: { v: 1, month: '2026-10', kind: 'language', lang: 'en', classes: 2, attended: 2, scheduled: 3, levelStart: 'B1', levelEnd: 'B1+', scoreStart: 70, scoreEnd: 74, speakingMin: 45.3,
+        series: [{ date: '2026-10-06', title: 'Intro', level: 'B1', score: 70, speakingMin: 20 }, { date: '2026-10-20', title: 'Pitch', level: 'B1+', score: 74, speakingMin: 25.3 }],
+        summary: 'You spoke more every class.', focus: 'Use has with he / she / it.',
+        topErrors: [{ type: 'Verb agreement', original: 'he have', corrected: 'he has', rule: 'he / she / it + has', times: 2 }],
+        vocab: [{ word: 'budget', level: 'B1', def: 'Money for something', synonyms: ['funds'] }], expressions: [{ said: 'do a shooting', natural: 'do a shoot', why: 'noun' }],
+        pron: [{ item: 'budget', guide: 'BUH-jit', tip: 'j sound' }] } };
+    db.student_monthly_reports.push(rep);
+    await login(page, 'ana@mail.com', 'es');
+    await page.waitForSelector('#panel-student.active .gs-ins-item');
+    await page.click('.gs-ins-item');
+    await page.waitForSelector('#ins-rail .ins-report-card');
+    if (!/Reporte de octubre de 2026/i.test(await text(page, '#ins-rail .ins-report-card'))) throw new Error('report card ES: ' + await text(page, '#ins-rail .ins-report-card'));
+    if (!/nuevo/i.test(await text(page, '#ins-rail .ins-report-card'))) throw new Error('report not marked new');
+    await page.click('#ins-rail .ins-report-card');
+    await page.waitForSelector('#ins-dash .ins-month');
+    const body = await text(page, '#ins-dash');
+    for (const want of ['You spoke more every class.', 'Foco para el mes que viene', 'he have', 'he has', 'Palabras del mes', 'funds', 'do a shoot', 'BUH-jit', 'Clase por clase', '2 / 3', 'B1 → B1+'])
+      if (!body.includes(want)) throw new Error('report misses: ' + want);
+    if (await page.$('#ins-dash textarea')) throw new Error('a student can edit the teacher message');
+    let u = await untranslated(page, '#ins-root'); if (u.length) throw new Error('report sin traducir: ' + JSON.stringify(u));
+    await shot(page, 'student-monthly-report-es');
+    await logout(page);
+    // the teacher: list → open → message
+    await login(page, 'tc@c.com', 'es');
+    await page.click('#nav-insights');
+    await page.click('#ins-mr-btn');
+    await page.waitForSelector('[data-lc="ins-mr-teacher"]');
+    await page.click('[data-lc="ins-mr-teacher"]');
+    await page.waitForSelector('#mr-msg');
+    await page.fill('#mr-msg', '¡Gran mes, Ana!');
+    await page.click('#mr-save');
+    await page.waitForFunction(() => /Gran mes/.test(document.getElementById('mr-msg')?.value || ''));
+    if (rep.teacher_message !== '¡Gran mes, Ana!') throw new Error('message not saved');
+    await shot(page, 'teacher-monthly-report-es');
+    await logout(page);
+    await login(page, 'ana@mail.com', 'es');
+    await page.waitForSelector('#panel-student.active .gs-ins-item');
+    await page.click('.gs-ins-item');
+    await page.waitForSelector('#ins-rail .ins-report-card'); await page.click('#ins-rail .ins-report-card');
+    await page.waitForSelector('#ins-dash .ins-month');
+    if (!/¡Gran mes, Ana!/.test(await text(page, '#ins-dash'))) throw new Error('student does not see the teacher message');
+    if (/nuevo/i.test(await text(page, '#ins-rail .ins-report-card'))) throw new Error('opened report still new');
+    await logout(page);
+    // a classmate sees nothing; the admin cannot open it
+    await login(page, 'bruno@mail.com', 'es');
+    const r = await page.evaluate(async () => [JSON.stringify((await sb.rpc('my_monthly_reports')).data), (await sb.rpc('monthly_report', { p_id: 'mr-1' })).error?.message || 'ok']);
+    if (r[0] !== '[]' || !/No autorizado/.test(r[1])) throw new Error('classmate: ' + JSON.stringify(r));
   });
 
   await run('Mobile: student insight and teacher list fit the screen (no horizontal scroll)', browser, async ({ page }) => {

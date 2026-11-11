@@ -61,7 +61,7 @@ const SUPERADMIN_EMAIL = 'owner@teroclass.test';
 
 const db = { users: {}, profiles: [], institutions: [], plannings: [], invitations: [], institution_documents: [],
   class_groups: [], student_enrollments: [], group_members: [], session_series: [], class_sessions: [], session_invitees: [], calendar_tokens: [],
-  teacher_insights: [], student_insights: [],
+  teacher_insights: [], student_insights: [], student_monthly_reports: [],
   class_docs: [], class_doc_updates: [], class_doc_versions: [], class_doc_presence: [], session_attendance: [],
   class_boards: [], class_board_elements: [], class_board_versions: [], class_board_presence: [],
   group_notebooks: [], group_notebook_sections: [], group_notebook_updates: [], group_notebook_versions: [], group_notebook_presence: [], group_notebook_notes: [],
