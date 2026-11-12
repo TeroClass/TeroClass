@@ -64,6 +64,15 @@ if $PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1; then
   refs=$($PSQL -At -d $DB -c "select (select count(*) from public.institutions where public.is_superadmin_id(created_by)) + (select count(*) from public.invitations where public.is_superadmin_id(invited_by)) + (select count(*) from public.institution_documents where public.is_superadmin_id(uploaded_by))")
   if [[ -n "$before" && "$before" == "$after" && "$refs" == "0" ]]; then echo "rerun: superadmins kept ($after), owner refs hidden"; else echo "rerun: **FAIL** before=$before after=$after refs=$refs"; fail=1; fi
 else echo "rerun: **FAIL** 001_base.sql failed on the populated database"; fail=1; fi
+# 2026-11-12 premium overage: a database with the OLD packs (50 = USD 25, 200 = USD 85, no addons_version) gets the new
+# ones (25 = USD 25, 100 = USD 90, analyzed 10 = USD 40, classroom 20 h = USD 70) ONCE; a later super admin edit survives a re-run.
+$PSQL -d $DB -c "update public.platform_settings set plans = (plans - 'addons_version') || jsonb_build_object('addons', '[{\"id\":\"pack_clases_50\",\"kind\":\"classes\",\"credits\":50,\"usd\":25,\"eur\":22},{\"id\":\"pack_clases_200\",\"kind\":\"classes\",\"credits\":200,\"usd\":85,\"eur\":76}]'::jsonb) where id" >/dev/null
+$PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1
+ov=$($PSQL -At -d $DB -c "select string_agg(x->>'id'||':'||(x->>'usd'), ',' order by x->>'id') from public.platform_settings s, jsonb_array_elements(s.plans->'addons') x where s.id and x->>'kind' in ('classes','analyzed','video')")
+$PSQL -d $DB -c "update public.platform_settings set plans = jsonb_set(plans, '{addons,0,usd}', '30'::jsonb) where id" >/dev/null
+$PSQL -d $DB -f supabase/migrations/001_base.sql >/dev/null 2>&1
+kept=$($PSQL -At -d $DB -c "select plans->'addons'->0->>'usd' from public.platform_settings where id")
+if [[ "$ov" == "pack_analizadas_10:40,pack_analizadas_50:175,pack_aula_20h:70,pack_clases_100:90,pack_clases_25:25" && "$kept" == "30" ]]; then echo "overage packs upgrade: ok (once; super admin edit kept)"; else echo "overage packs upgrade: **FAIL** ov=$ov kept=$kept"; fail=1; fi
 # Upgrade path from the version before groups/students (skipped outside a git checkout)
 if git cat-file -e da29348:supabase/migrations/001_base.sql 2>/dev/null; then
   UP=${DB}_up

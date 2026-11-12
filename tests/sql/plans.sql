@@ -62,7 +62,7 @@ set role anon; select qp.as_user(null);
 select qp.eq('P: anon reads the plans (Docente USD 12 / 99, EUR 11.99)', $$select string_agg((x->'prices'->'usd'->>'monthly')||'/'||(x->'prices'->'usd'->>'annual')||'/'||(x->'prices'->'eur'->>'monthly'), ',') from json_array_elements(public.get_plans()->'plans') x where x->>'id'='docente'$$, '12/99/11.99');
 select qp.eq('P: Institución tiers 14 / 12 / 10 per seat (annual)', $$select string_agg(t->'usd'->>'annual_per_month', '/') from json_array_elements(public.get_plans()->'plans') x, json_array_elements(x->'tiers') t where x->>'id'='institucion'$$, '14/12/10');
 select qp.eq('P: trial = 5 classes, pop-up at 2, reminder at 4', $$select (j->'trial'->>'generations_lifetime')||'/'||(j->'trial'->>'paywall_at')||'/'||(j->'trial'->>'reminder_at') from (select public.get_plans() j) x$$, '5/2/4');
-select qp.eq('P: class packs 50 (USD 25) and 200 (USD 85)', $$select string_agg((x->>'credits')||':'||(x->>'usd'), ',' order by (x->>'credits')::int) from json_array_elements(public.get_plans()->'addons') x where x->>'kind'='classes'$$, '50:25,200:85');
+select qp.eq('P: class packs 25 (USD 25) and 100 (USD 90): extra classes cost ~2x the plan', $$select string_agg((x->>'credits')||':'||(x->>'usd'), ',' order by (x->>'credits')::int) from json_array_elements(public.get_plans()->'addons') x where x->>'kind'='classes'$$, '25:25,100:90');
 select qp.eq('P: launch offers hidden while disabled', $$select json_array_length(public.get_plans()->'launch_offers')$$, '0');
 select qp.fails('P: anon cannot read platform_settings', $$select plans from public.platform_settings$$, 'permission denied');
 select qp.fails('P: anon cannot update plans', $$select public.update_plans('{"docente":{"usd_monthly":1}}')$$, 'permission denied');
@@ -206,7 +206,7 @@ select qp.fails('P: plans: negative price refused', $$select public.update_plans
 select qp.fails('P: plans: text price refused', $$select public.update_plans('{"docente":{"usd_monthly":"12"}}')$$, 'inválido');
 select qp.fails('P: plans: reminder after the limit refused', $$select public.update_plans('{"trial":{"reminder_at":9}}')$$, 'recordatorio');
 select qp.fails('P: plans: tiers must keep their number', $$select public.update_plans('{"institucion":{"tiers":[{"usd_monthly":1}]}}')$$, 'tiers');
-select qp.eq('P: plans: Docente 13 / 109 and the 200 pack USD 80', $$select (j->'plans'->1->'prices'->'usd'->>'monthly')||'/'||(j->'plans'->1->'prices'->'usd'->>'annual')||'/'||(j->'addons'->1->>'usd') from (select public.update_plans('{"docente":{"usd_monthly":13,"usd_annual":109},"addons":{"pack_clases_200":{"usd":80}}}') j) x$$, '13/109/80');
+select qp.eq('P: plans: Docente 13 / 109 and the 100 pack USD 80', $$select (j->'plans'->1->'prices'->'usd'->>'monthly')||'/'||(j->'plans'->1->'prices'->'usd'->>'annual')||'/'||(j->'addons'->1->>'usd') from (select public.update_plans('{"docente":{"usd_monthly":13,"usd_annual":109},"addons":{"pack_clases_100":{"usd":80}}}') j) x$$, '13/109/80');
 select qp.eq('P: plans: middle tier 11.5 / 13.75', $$select (j->'plans'->2->'tiers'->1->'usd'->>'annual_per_month')||'/'||(j->'plans'->2->'tiers'->1->'usd'->>'monthly') from (select public.update_plans('{"institucion":{"tiers":[{},{"usd_annual_per_month":11.5,"usd_monthly":13.75},{}]}}') j) x$$, '11.5/13.75');
 select qp.eq('P: plans: the trial limit can change (6) and applies at once', $$select public.update_plans('{"trial":{"generations_lifetime":6}}')->'trial'->>'generations_lifetime'$$, '6');
 select qp.as_user(current_setting('qp.solo'));
@@ -220,7 +220,7 @@ set role anon; select qp.as_user(null);
 select qp.eq('P: get_plans shows only the enabled offer + founder_taken', $$select (select string_agg(o->>'id', ',') from json_array_elements(j->'launch_offers') o)||'/'||(j->>'founder_taken') from (select public.get_plans() j) x$$, 'founder/0');
 reset role;
 set role authenticated; select qp.as_user(:'OWNER');
-select qp.eq('P: plans restored', $$select (j->'plans'->1->'prices'->'usd'->>'monthly')||'/'||(j->'addons'->1->>'usd') from (select public.update_plans('{"docente":{"usd_monthly":12,"usd_annual":99},"addons":{"pack_clases_200":{"usd":85}},"institucion":{"tiers":[{},{"usd_annual_per_month":12,"usd_monthly":14.5},{}]},"launch_offers":{"founder":false}}') j) x$$, '12/85');
+select qp.eq('P: plans restored', $$select (j->'plans'->1->'prices'->'usd'->>'monthly')||'/'||(j->'addons'->1->>'usd') from (select public.update_plans('{"docente":{"usd_monthly":12,"usd_annual":99},"addons":{"pack_clases_100":{"usd":90}},"institucion":{"tiers":[{},{"usd_annual_per_month":12,"usd_monthly":14.5},{}]},"launch_offers":{"founder":false}}') j) x$$, '12/90');
 reset role;
 
 -- ===== sales leads =====

@@ -25,9 +25,9 @@
         limits: { generations_per_seat_month: 30, video_hours_per_seat_month: 5, insights_classes_per_seat_month: 1, video_max_participants: 30 } },
       { id: 'institucion_plus', prices: { usd: { reference_per_seat_month_annual: 9 }, eur: { reference_per_seat_month_annual: 9 } }, limits: { seats_min: 100 } }],
     addons: [
-      { id: 'pack_clases_50', kind: 'classes', credits: 50, usd: 25, eur: 22 }, { id: 'pack_clases_200', kind: 'classes', credits: 200, usd: 85, eur: 76 },
-      { id: 'pack_analizadas_10', kind: 'analyzed', credits: 10, usd: 25, eur: 22 }, { id: 'pack_analizadas_50', kind: 'analyzed', credits: 50, usd: 110, eur: 98 },
-      { id: 'seguimiento_ia_alumno', kind: 'tracking', credits: 8, usd: 2, eur: 1.8 }, { id: 'pack_aula_20h', kind: 'video', credits: 20, usd: 49, eur: 44 }],
+      { id: 'pack_clases_25', kind: 'classes', credits: 25, usd: 25, eur: 22 }, { id: 'pack_clases_100', kind: 'classes', credits: 100, usd: 90, eur: 80 },
+      { id: 'pack_analizadas_10', kind: 'analyzed', credits: 10, usd: 40, eur: 36 }, { id: 'pack_analizadas_50', kind: 'analyzed', credits: 50, usd: 175, eur: 156 },
+      { id: 'seguimiento_ia_alumno', kind: 'tracking', credits: 8, usd: 2, eur: 1.8 }, { id: 'pack_aula_20h', kind: 'video', credits: 20, usd: 70, eur: 62 }],
     launch_offers: [], founder_taken: 0 };
 
   const T = {
@@ -49,7 +49,7 @@
       talk_sales: 'Hablar con ventas',
       tiers_title: 'Institución: precio por docente por mes', tiers_teachers: 'Docentes', tiers_annual: 'Pago anual', tiers_monthly: 'Pago mensual', tiers_plus: '100 o más', tiers_plus_v: 'Institución+ (a medida)',
       tiers_note: 'El tramo vale para todos los docentes de la institución (mínimo 3). Admins cuentan como docentes; los alumnos no pagan.',
-      addons_title: 'Extras', addon_pack_clases_50: 'Pack 50 clases', addon_pack_clases_200: 'Pack 200 clases', addon_pack_analizadas_10: 'Pack 10 clases analizadas',
+      addons_title: 'Extras', addon_pack_clases_25: 'Pack 25 clases', addon_pack_clases_100: 'Pack 100 clases', addon_pack_analizadas_10: 'Pack 10 clases analizadas',
       addon_pack_analizadas_50: 'Pack 50 clases analizadas', addon_seguimiento_ia_alumno: 'Seguimiento IA', addon_seguimiento_ia_alumno_unit: 'por alumno/mes', addon_pack_aula_20h: 'Pack 20 h de aula',
       offers_title: 'Ofertas de lanzamiento',
       offer_founder: 'Instituciones Fundadoras: {d}% menos el primer año con plan anual, precio congelado {m} meses y onboarding gratis. Para las primeras {n} instituciones.',
@@ -116,7 +116,7 @@
       talk_sales: 'Talk to sales',
       tiers_title: 'Institution: price per teacher per month', tiers_teachers: 'Teachers', tiers_annual: 'Billed yearly', tiers_monthly: 'Billed monthly', tiers_plus: '100 or more', tiers_plus_v: 'Institution+ (custom)',
       tiers_note: 'The tier price applies to every teacher of the institution (minimum 3). Admins count as teachers; students are free.',
-      addons_title: 'Add-ons', addon_pack_clases_50: '50-class pack', addon_pack_clases_200: '200-class pack', addon_pack_analizadas_10: '10 analyzed classes',
+      addons_title: 'Add-ons', addon_pack_clases_25: '25-class pack', addon_pack_clases_100: '100-class pack', addon_pack_analizadas_10: '10 analyzed classes',
       addon_pack_analizadas_50: '50 analyzed classes', addon_seguimiento_ia_alumno: 'AI tracking', addon_seguimiento_ia_alumno_unit: 'per student/month', addon_pack_aula_20h: '20 h classroom pack',
       offers_title: 'Launch offers',
       offer_founder: 'Founding Institutions: {d}% off the first year on a yearly plan, price locked for {m} months and free onboarding. For the first {n} institutions.',

@@ -199,8 +199,8 @@ const noPopup = async (page, ms = 900) => { await page.waitForTimeout(ms); if (a
       await page.waitForSelector('.tp-card[data-plan="docente"]');
       const txt = await page.textContent('#tp-root');
       const must = lang === 'es'
-        ? [/Planes de TeroClass/, /Prueba gratis/, /USD 99\/año/, /desde USD 10 por docente\/mes/, /A medida/, /3–9/, /USD 14/, /USD 17/, /Pack 50 clases/, /¿Los alumnos pagan\?/, /¿Qué es una hora de aula\?/, /¿Mis datos y los de mis alumnos\?/, /¿Qué es una "clase"\?/]
-        : [/TeroClass plans/, /Free trial/, /USD 99\/year/, /from USD 10 per teacher\/month/, /Custom/, /Do students pay\?/, /What is a classroom hour\?/, /50-class pack/];
+        ? [/Planes de TeroClass/, /Prueba gratis/, /USD 99\/año/, /desde USD 10 por docente\/mes/, /A medida/, /3–9/, /USD 14/, /USD 17/, /Pack 25 clases/, /¿Los alumnos pagan\?/, /¿Qué es una hora de aula\?/, /¿Mis datos y los de mis alumnos\?/, /¿Qué es una "clase"\?/]
+        : [/TeroClass plans/, /Free trial/, /USD 99\/year/, /from USD 10 per teacher\/month/, /Custom/, /Do students pay\?/, /What is a classroom hour\?/, /25-class pack/];
       for (const re of must) if (!re.test(txt)) throw new Error('missing ' + re);
       if (await page.$('[data-offer]')) throw new Error('launch offers shown while disabled');
       if (await page.evaluate(() => document.documentElement.lang) !== lang) throw new Error('html lang');
@@ -296,7 +296,7 @@ const noPopup = async (page, ms = 900) => { await page.waitForTimeout(ms); if (a
     if (await page.$('#tp-overlay [href*="checkout"], #tp-overlay input[autocomplete="cc-number"]')) throw new Error('fake checkout');
   });
 
-  await run('Plan & usage in classes: monthly classes, class packs (USD 25 / 85), request a pack; plans link', browser, async ({ page }) => {
+  await run('Plan & usage in classes: monthly classes, class packs (USD 25 / 90), request a pack; plans link', browser, async ({ page }) => {
     const madre = M.seedInstitution({ name: 'Madre', slug: 'madre' });
     bill.accounts[madre.id] = { seats: 10, monthly_tokens: 750000, extra: 1250000, plan_status: 'active', plan_id: 'institucion' }; bill.usage[madre.id] = 500000;
     mk('adm@m.com', 'org_admin', madre.id, 'Admin');
@@ -309,13 +309,13 @@ const noPopup = async (page, ms = 900) => { await page.waitForTimeout(ms); if (a
     if (!/Activo/.test(await page.textContent('.bl-planrow'))) throw new Error('plan status');
     if (await page.getAttribute('#bl-plans-link', 'href') !== '/planes') throw new Error('plans link');
     const packs = await page.textContent('.bl-packs');
-    if (!/Pedir\s+Pack 50 clases · USD 25/.test(packs) || !/Pack 200 clases · USD 85/.test(packs)) throw new Error('packs: ' + packs);
+    if (!/Pedir\s+Pack 25 clases · USD 25/.test(packs) || !/Pack 100 clases · USD 90/.test(packs)) throw new Error('packs: ' + packs);
     if (/tokens/i.test(await page.textContent('.bl-metrics'))) throw new Error('raw tokens shown to the admin');
-    await page.click('[data-bl="buy"][data-pack="pack_clases_200"]');
-    await page.click('[data-bl="buy"][data-pack="pack_clases_200"]');
+    await page.click('[data-bl="buy"][data-pack="pack_clases_100"]');
+    await page.click('[data-bl="buy"][data-pack="pack_clases_100"]');
     await page.waitForSelector('.bl-pending');
-    if (!/200 clases · USD 85,00/.test(await page.textContent('.bl-pending'))) throw new Error('pending: ' + await page.textContent('.bl-pending'));
-    const r = bill.requests[0]; if (r.pack_id !== 'pack_clases_200' || r.pack_tokens !== 5000000) throw new Error('request: ' + JSON.stringify(r));
+    if (!/100 clases · USD 90,00/.test(await page.textContent('.bl-pending'))) throw new Error('pending: ' + await page.textContent('.bl-pending'));
+    const r = bill.requests[0]; if (r.pack_id !== 'pack_clases_100' || r.pack_tokens !== 2500000) throw new Error('request: ' + JSON.stringify(r));
   }, { trialOn: false });
 
   await run('Super admin: plans editor + launch offers reach /planes; plan status per institution ends the trial of its teachers; Docente plan', browser, async ({ page, ctx }) => {

@@ -4270,7 +4270,7 @@ function billingHtml(s){
   const planLine=PLAN_ACTIVE.includes(st)?`<span class="bl-plan on">${esc(trText(PLAN_STATUS_LABEL[st]||st))}</span>`
     :`<span class="bl-plan off">${esc(trText('No active plan'))}</span> <span class="bl-sub">${esc(trText('Your teachers and admins are using the free trial (5 classes each).'))}</span>`;
   const banner=blocked?`<div class="bl-banner block" role="alert"><b>Your institution has used all its classes for this month.</b> <span>Teachers can't generate classes until a pack is added or the month renews on</span> <b data-no-i18n>${esc(resets)}</b>.</div>`
-    :warn?`<div class="bl-banner warn" role="status"><b>Your institution has used most of this month's classes.</b> <span>Consider adding a class pack so classes are not interrupted.</span></div>`:'';
+    :warn?`<div class="bl-banner warn" role="status"><b>Your institution has used most of this month's classes.</b> <span>Consider adding a class pack so classes are not interrupted.</span> <span class="bl-sub" id="bl-upsell">Extra classes cost about twice as much as the ones included in your plan: if this happens every month, adding seats is cheaper.</span> <a href="/planes" target="_blank" rel="noopener">See plans &amp; pricing</a></div>`:'';
   const row=(name,email,u,r)=>`<tr><td data-no-i18n>${esc(name)}${email?`<div class="bl-sub">${esc(email)}</div>`:''}</td><td data-no-i18n>≈ ${esc(fmtInt(Math.round((Number(u)||0)/blCredit(s)*10)/10))}</td><td data-no-i18n>${esc(fmtInt(r))}</td></tr>`;
   const units=(s.by_unit||[]),teachers=(s.by_teacher||[]),reqs=(s.requests||[]);
   const empty3='<tr><td colspan="3" class="muted-cell">No AI usage this month yet.</td></tr>';
@@ -5530,7 +5530,7 @@ const I18N_ES_PLANS={
 'Your institution has used all its classes for this month.':'Tu institución usó todas sus clases de este mes.',
 "Teachers can't generate classes until a pack is added or the month renews on":'Los docentes no pueden generar clases hasta que se sume un pack o se renueve el mes, el',
 "Your institution has used most of this month's classes.":'Tu institución ya usó casi todas las clases de este mes.',
-'Consider adding a class pack so classes are not interrupted.':'Conviene sumar un pack de clases para que no se corten.','Classes':'Clases',
+'Consider adding a class pack so classes are not interrupted.':'Conviene sumar un pack de clases para que no se corten.','Extra classes cost about twice as much as the ones included in your plan: if this happens every month, adding seats is cheaper.':'Las clases extra cuestan cerca del doble que las incluidas en tu plan: si te pasa todos los meses, te sale más barato sumar asientos.','Classes':'Clases',
 "Request sent ✓ We'll contact you to complete the payment; the classes are added once confirmed.":'Pedido enviado ✓ Te vamos a contactar para completar el pago; las clases se suman cuando se confirma.',
 'After you pay, the platform team adds the classes and you can keep generating.':'Después del pago, el equipo de la plataforma suma las clases y podés seguir generando.',
 'Defaults':'Valores por defecto','Free allowance and new institutions (prices and packs: Plans & pricing below)':'Asignación gratuita e instituciones nuevas (precios y packs: Planes y precios, más abajo)',

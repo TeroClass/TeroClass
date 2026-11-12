@@ -5657,13 +5657,14 @@ update public.platform_settings set plans = $plans$
    "prices":{"usd":{"reference_per_seat_month_annual":9},"eur":{"reference_per_seat_month_annual":9}},
    "limits":{"seats_min":100,"generations_per_seat_month":40,"video_hours_per_seat_month":8},
    "features":{"pdf_watermark":false}}],
+ "addons_version":"2026-11-12",
  "addons":[
-  {"id":"pack_clases_50","kind":"classes","credits":50,"name_es":"Pack 50 clases","name_en":"50-class pack","usd":25,"eur":22,"expires_months":12},
-  {"id":"pack_clases_200","kind":"classes","credits":200,"name_es":"Pack 200 clases","name_en":"200-class pack","usd":85,"eur":76,"expires_months":12},
-  {"id":"pack_analizadas_10","kind":"analyzed","credits":10,"name_es":"Pack 10 clases analizadas","name_en":"10 analyzed classes","usd":25,"eur":22,"expires_months":12},
-  {"id":"pack_analizadas_50","kind":"analyzed","credits":50,"name_es":"Pack 50 clases analizadas","name_en":"50 analyzed classes","usd":110,"eur":98,"expires_months":12},
+  {"id":"pack_clases_25","kind":"classes","credits":25,"name_es":"Pack 25 clases","name_en":"25-class pack","usd":25,"eur":22,"expires_months":12},
+  {"id":"pack_clases_100","kind":"classes","credits":100,"name_es":"Pack 100 clases","name_en":"100-class pack","usd":90,"eur":80,"expires_months":12},
+  {"id":"pack_analizadas_10","kind":"analyzed","credits":10,"name_es":"Pack 10 clases analizadas","name_en":"10 analyzed classes","usd":40,"eur":36,"expires_months":12},
+  {"id":"pack_analizadas_50","kind":"analyzed","credits":50,"name_es":"Pack 50 clases analizadas","name_en":"50 analyzed classes","usd":175,"eur":156,"expires_months":12},
   {"id":"seguimiento_ia_alumno","kind":"tracking","credits":8,"name_es":"Seguimiento IA por alumno","name_en":"AI tracking per student","usd":2,"eur":1.8,"billing":"per_active_student_per_month"},
-  {"id":"pack_aula_20h","kind":"video","credits":20,"name_es":"Pack 20 horas de aula","name_en":"20 classroom-hour pack","usd":49,"eur":44,"expires_months":12}],
+  {"id":"pack_aula_20h","kind":"video","credits":20,"name_es":"Pack 20 horas de aula","name_en":"20 classroom-hour pack","usd":70,"eur":62,"expires_months":12}],
  "launch_offers":[
   {"id":"founder","enabled":false,"name_es":"Instituciones Fundadoras","name_en":"Founding Institutions","max_accounts":10,"discount_pct_year1":30,"price_lock_months":24,"onboarding_free":true},
   {"id":"pilot_60d","enabled":false,"name_es":"Piloto 60 días","name_en":"60-day pilot","price_usd":150,"max_seats":10,"duration_days":60,"credit_to_annual_pct":100},
@@ -5671,6 +5672,20 @@ update public.platform_settings set plans = $plans$
   {"id":"trial_email_coupon","enabled":false,"name_es":"Cupón TERO20","name_en":"TERO20 coupon","code":"TERO20","discount_pct_year1":20,"valid_days":7}]}
 $plans$::jsonb
  where id and (plans is null or plans = '{}'::jsonb);
+
+-- 2026-11-12: excedente con recargo. Lo que se compra al pasarse del cupo cuesta ~2x lo incluido en el plan
+-- (clase extra ~USD 1 vs ~USD 0,47 en el plan; clase analizada ~USD 4; hora de aula USD 3,50), así cada uso extra deja
+-- buena ganancia y al que se pasa seguido le conviene sumar asientos. Se aplica UNA vez (marca addons_version): después,
+-- lo que el súper admin cambie en Plataforma no se pisa. Las solicitudes ya hechas guardan su precio y sus tokens.
+update public.platform_settings set plans = jsonb_set(plans, '{addons}', $addons$[
+  {"id":"pack_clases_25","kind":"classes","credits":25,"name_es":"Pack 25 clases","name_en":"25-class pack","usd":25,"eur":22,"expires_months":12},
+  {"id":"pack_clases_100","kind":"classes","credits":100,"name_es":"Pack 100 clases","name_en":"100-class pack","usd":90,"eur":80,"expires_months":12},
+  {"id":"pack_analizadas_10","kind":"analyzed","credits":10,"name_es":"Pack 10 clases analizadas","name_en":"10 analyzed classes","usd":40,"eur":36,"expires_months":12},
+  {"id":"pack_analizadas_50","kind":"analyzed","credits":50,"name_es":"Pack 50 clases analizadas","name_en":"50 analyzed classes","usd":175,"eur":156,"expires_months":12},
+  {"id":"seguimiento_ia_alumno","kind":"tracking","credits":8,"name_es":"Seguimiento IA por alumno","name_en":"AI tracking per student","usd":2,"eur":1.8,"billing":"per_active_student_per_month"},
+  {"id":"pack_aula_20h","kind":"video","credits":20,"name_es":"Pack 20 horas de aula","name_en":"20 classroom-hour pack","usd":70,"eur":62,"expires_months":12}]$addons$::jsonb)
+  || '{"addons_version":"2026-11-12"}'::jsonb
+ where id and plans is not null and plans <> '{}'::jsonb and coalesce(plans->>'addons_version', '') < '2026-11-12';
 
 -- Packs de "clases" (2026-10-21): la solicitud guarda qué pack se pidió; las viejas (por tokens) quedan con pack_id null.
 alter table public.token_purchase_requests add column if not exists pack_id text;

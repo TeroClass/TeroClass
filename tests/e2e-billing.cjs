@@ -105,7 +105,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     const teachers = await text(page, '#bl-teachers');
     if (!teachers.includes('Tina ' + XSS) || !/Tomás Norte/.test(teachers) || !/≈ 6/.test(teachers)) throw new Error('by teacher: ' + teachers);
     if (await page.$('#bl-teachers img')) throw new Error('teacher name not escaped');
-    if (!/Ask for 50-class pack · USD 25/.test((await text(page, '.bl-packs')).replace(/\s+/g, ' ')) || !/200-class pack · USD 85/.test((await text(page, '.bl-packs')).replace(/\s+/g, ' '))) throw new Error('buy labels: ' + await text(page, '.bl-packs'));
+    if (!/Ask for 25-class pack · USD 25/.test((await text(page, '.bl-packs')).replace(/\s+/g, ' ')) || !/100-class pack · USD 90/.test((await text(page, '.bl-packs')).replace(/\s+/g, ' '))) throw new Error('buy labels: ' + await text(page, '.bl-packs'));
     if (!/We'll contact you to complete the payment; the classes are added once confirmed\./.test(await text(page, '.bl-buy-card'))) throw new Error('explanation');
     if (!/No purchase requests yet/.test(await text(page, '#bl-requests'))) throw new Error('empty history');
     if (await page.isVisible('#ctx-bar') && !/Colegio/.test(await text(page, '#ctx-bar'))) throw new Error('context bar');
@@ -115,7 +115,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     const t = seed();
     await login(page, 'madm@h.com');
     await page.click('#nav-billing');
-    const B50 = '[data-bl="buy"][data-pack="pack_clases_50"]';
+    const B50 = '[data-bl="buy"][data-pack="pack_clases_25"]';
     await page.waitForSelector(B50);
     await page.click(B50);
     if (!/Click again to send the request/.test(await text(page, B50))) throw new Error('no confirmation step');
@@ -123,10 +123,10 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await page.click(B50);
     await waitToast(page, /Request sent ✓ We'll contact you/);
     await page.waitForSelector('.bl-pending');
-    if (bill.requests.length !== 1 || bill.requests[0].status !== 'pending' || bill.requests[0].pack_tokens !== 1250000 || bill.requests[0].pack_id !== 'pack_clases_50') throw new Error('request: ' + JSON.stringify(bill.requests));
+    if (bill.requests.length !== 1 || bill.requests[0].status !== 'pending' || bill.requests[0].pack_tokens !== 625000 || bill.requests[0].pack_id !== 'pack_clases_25') throw new Error('request: ' + JSON.stringify(bill.requests));
     if (calls.rpc.filter(c => c.fn === 'request_token_pack').length !== 1) throw new Error('rpc count');
     if (await page.$('[data-bl="buy"]')) throw new Error('buy button still shown while pending');
-    if (!/Pending/.test(await text(page, '#bl-requests')) || !/50 classes/.test(await text(page, '#bl-requests')) || !/USD 25\.00/.test(await text(page, '#bl-requests'))) throw new Error('history: ' + await text(page, '#bl-requests'));
+    if (!/Pending/.test(await text(page, '#bl-requests')) || !/25 classes/.test(await text(page, '#bl-requests')) || !/USD 25\.00/.test(await text(page, '#bl-requests'))) throw new Error('history: ' + await text(page, '#bl-requests'));
     // stale screen: the server refuses a second pending request with a clear message
     await page.evaluate(() => { BL.summary.pending = null; document.getElementById('billing-root').innerHTML = billingHtml(BL.summary); });
     await page.click(B50); await page.click(B50);
@@ -181,7 +181,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     if (await page.isDisabled('#btn-generate')) throw new Error('generate button stuck');
   });
 
-  await run('Admin: generation blocked → modal with "Ask for Pack 50 classes · USD 25" → creates the request', browser, async ({ page, st }) => {
+  await run('Admin: generation blocked → modal with "Ask for Pack 25 classes · USD 25" → creates the request', browser, async ({ page, st }) => {
     seed({ used: 250000, monthly: 250000 });
     st.ai = () => ({ status: 402, body: { code: 'budget', scope: 'institution', is_admin: true, can_buy: true, error: 'Your institution has used all its classes for this month. Add a class pack to keep generating.' } });
     await login(page, 'madm@h.com');
@@ -191,7 +191,7 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     await page.click('#btn-generate');
     await page.waitForSelector('#modal-budget.active [data-bl="buy-now"]');
     if (!/Add a class pack/.test(await text(page, '#budget-msg'))) throw new Error('message');
-    if (!/Ask for 50-class pack · USD 25/.test((await text(page, '[data-bl="buy-now"]')).replace(/\s+/g, ' '))) throw new Error('label');
+    if (!/Ask for 25-class pack · USD 25/.test((await text(page, '[data-bl="buy-now"]')).replace(/\s+/g, ' '))) throw new Error('label');
     if (!(await page.isVisible('#budget-explain'))) throw new Error('explanation');
     await page.click('[data-bl="buy-now"]');
     await waitToast(page, /Request sent/);
@@ -324,9 +324,9 @@ function seed({ used = 210000, monthly = 250000, extra = 0, seats = 10 } = {}) {
     if ((await text(page, '#nav-billing .sib-tooltip')) !== 'Plan y consumo') throw new Error('tooltip');
     await page.click('#nav-billing');
     await page.waitForSelector('#bl-seats');
-    if (!/Pedir Pack 50 clases · USD 25/.test((await text(page, '.bl-packs')).replace(/\s+/g, ' '))) throw new Error('buy ES: ' + await text(page, '.bl-packs'));
+    if (!/Pedir Pack 25 clases · USD 25/.test((await text(page, '.bl-packs')).replace(/\s+/g, ' '))) throw new Error('buy ES: ' + await text(page, '.bl-packs'));
     let u = await untranslated(page, '#panel-billing'); if (u.length) throw new Error('billing sin traducir: ' + JSON.stringify(u));
-    await page.click('[data-bl="buy"][data-pack="pack_clases_50"]');
+    await page.click('[data-bl="buy"][data-pack="pack_clases_25"]');
     u = await untranslated(page, '#panel-billing'); if (u.length) throw new Error('confirm sin traducir: ' + JSON.stringify(u));
     await page.evaluate(() => showBudgetModal({ code: 'budget', is_admin: true, can_buy: true, error: 'Your institution has used all its classes for this month. Add a class pack to keep generating.' }));
     await page.waitForSelector('#modal-budget.active [data-bl="buy-now"]');
