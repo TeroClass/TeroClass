@@ -353,7 +353,7 @@ async function analyze(env, s, locale, dl) {
       for (const b of batch) {
         const one = v.value.get(sp.get(b.participant_id).ref); if (!one) continue;
         let data;
-        try { data = AN.studentData(one, AN.studentProgress(metrics, b.participant_id, one, ctx.previous?.[b.enrollment_id], info.kind), studentBase, studentBase.lang); }
+        try { data = AN.studentData({ ...one, pron: AN.pronClips(one.pron, ctx.segments, b.participant_id) }, AN.studentProgress(metrics, b.participant_id, one, ctx.previous?.[b.enrollment_id], info.kind), studentBase, studentBase.lang); }
         catch (e) { warn('student data invalid', e?.message); why = `data: ${e?.message}`; continue; }
         const st = await svc('rec_store_student_insights', { p_live: s.id, p_enrollment: b.enrollment_id, p_participant: b.participant_id, p_data: data, p_model: deployment });
         if (st.ok) left--; else why = `store ${st.status} ${String(st.data?.message || '').slice(0, 120)}`;

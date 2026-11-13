@@ -589,7 +589,11 @@ test('vercel.json: /api/class/rec and /api/class/process go to the dispatcher; d
   assert.ok(v.functions['api/livekit/webhook.js'].maxDuration <= 60);
   assert.ok(pipeline.MIN_AI_MS + 2500 < 45000, 'an AI step fits in one call');
   const csp = v.headers[0].headers.find(h => h.key === 'Content-Security-Policy').value;
-  assert.doesNotMatch(csp, /blob\.core\.windows\.net|cognitive\.microsoft\.com|openai\.azure\.com/, 'the browser never talks to Azure');
+  assert.doesNotMatch(csp, /cognitive\.microsoft\.com|openai\.azure\.com/, 'the browser never talks to Azure AI');
+  // 2026-11-13: only <audio> may read the recordings account (short read-only SAS links signed by /api/class/clip)
+  assert.match(csp, /media-src 'self' blob: mediastream: https:\/\/teroclassrec\.blob\.core\.windows\.net;/);
+  assert.doesNotMatch(csp.replace(/media-src[^;]*;/, ''), /blob\.core\.windows\.net/, 'nowhere else');
+  assert.equal(find('/api/class/clip').destination, '/api/class?action=$1');
 });
 
 test('LiveKit JSON helpers: enums as names or numbers, int64 nanoseconds, omitted zero values', () => {
@@ -782,4 +786,43 @@ test('a phrase transcribed twice (stereo channels) counts once', () => {
   assert.equal(AN.classSegments(dup).length, 1);
   const j = { recognizedPhrases: [0, 1].map(ch => ({ channel: ch, recognitionStatus: 'Success', offsetInTicks: 0, durationInTicks: 10000000, nBest: [{ display: 'Hi', confidence: 0.9 }] })) };
   assert.equal(az.parseTranscript(j).length, 1);
+});
+
+test('pronunciation: where the student said each word (call time, padded, ≤ 15 s); no match → no clip', () => {
+  const segs = AN.classSegments([
+    { participant_id: 'S', start_ms: 70000, end_ms: 74000, text: 'I want to persuade the client.' },
+    { participant_id: 'T', start_ms: 75000, end_ms: 76000, text: 'Persuade them!' },
+    { participant_id: 'S', start_ms: 90000, end_ms: 92000, text: 'Persuade, yes.' }]);
+  const out = AN.pronClips([{ item: 'persuade', quote: 'Persuade, yes', tip: 't', guide: 'per-SWEYD' }, { item: 'budget', tip: 't', guide: 'BUH-jit' }], segs, 'S');
+  assert.deepEqual(out[0].clip, { start_ms: 89700, end_ms: 92300 }, 'the quoted segment, in CALL time (not rebased)');
+  assert.equal(out[1].clip, undefined);
+  const v = AN.validateStudentsAi({ students: [{ ...STUDENT_AI('S1'), pron: [{ item: 'persuade', guide: 'per-SWEYD', tip: 'You used…', quote: 'I want to persuade', context: 'I want to persuade the client.', score: 70 }] }] }, ['S1']);
+  const p = v.value.get('S1').pron[0];
+  assert.equal(p.score, undefined, 'no percentages'); assert.equal(p.context, 'I want to persuade the client.'); assert.equal(p.quote, 'I want to persuade');
+});
+
+test('clip: signed read-only link to the student\'s own track, only when the database allows it', async () => {
+  setEnv(true);
+  const INS = '5e6f7081-92a3-4b4c-8d9e-0f1a2b3c4d5e';
+  const run = async (body, rpcRes) => {
+    const calls = mockNet([
+      [`${SB}/auth/v1/user`, (u, o) => (o.headers.Authorization === 'Bearer good' ? { json: USER } : { status: 401, json: {} })],
+      rpc('rec_clip_source', rpcRes)]);
+    const r = res(); await quiet(() => classFn({ method: 'POST', query: { action: 'clip' }, headers: { authorization: 'Bearer good' }, body }, r));
+    return { r, calls };
+  };
+  let { r, calls } = await run({ insight: INS, start_ms: 89700, end_ms: 92300 }, () => ({ json: { storage_path: `${LIVE}/p1/f1.ogg`, from_ms: 12000 } }));
+  assert.equal(r.statusCode, 200);
+  const u = new URL(r.body.url);
+  assert.equal(u.host, 'teroclassrec.blob.core.windows.net'); assert.equal(u.searchParams.get('sp'), 'r');
+  assert.ok(Date.parse(u.searchParams.get('se')) - Date.now() <= 600e3 + 5000, 'link valid 10 minutes');
+  assert.deepEqual([r.body.from_s, r.body.to_s], [12, 14.6]);
+  assert.deepEqual(calls.rpc('rec_clip_source')[0].body, { p_insight: INS, p_ms: 89700 });
+  assert.equal(calls.rpc('rec_clip_source')[0].headers.Authorization, 'Bearer good', 'checked with the caller\'s own session');
+  noSecrets({ ...r.body, url: u.origin + u.pathname });
+  ({ r } = await run({ insight: INS, start_ms: 1, end_ms: 2 }, () => ({ status: 400, json: { message: 'No autorizado' } }))); assert.equal(r.statusCode, 403);
+  ({ r } = await run({ insight: INS, start_ms: 1, end_ms: 2 }, () => ({ json: null }))); assert.equal(r.statusCode, 404, 'audio gone (30 days)');
+  ({ r } = await run({ insight: 'x', start_ms: 1, end_ms: 2 }, () => ({ json: null }))); assert.equal(r.statusCode, 400);
+  ({ r } = await run({ insight: INS, start_ms: 0, end_ms: 99999 }, () => ({ json: { storage_path: 'a/b.ogg', from_ms: 0 } }))); assert.equal(r.body.to_s, 20, 'at most 20 s');
+  setEnv(false);
 });

@@ -239,6 +239,29 @@ select qr.as_user(qr.uid('rp-oadm@x.com')::text);
 select qr.fails('R: an admin of another institution cannot see the state', $$select public.rec_session_status(qr.sess('RP past'))$$, 'No autorizado');
 reset role;
 
+-- ===== 2026-11-13: "how you said it in class" — the student's own audio, for her or the staff of the class =====
+update public.recordings set started_at = (select started_at from public.live_sessions where id = qr.live('RP past')) + interval '5 seconds'
+ where egress_id = 'EG_ana1';
+select set_config('qr.ana_ins', (select id::text from public.student_insights where session_id = qr.sess('RP past') and enrollment_id = qr.enr('rp-st1@x.com')), false);
+set role authenticated; select qr.as_user(qr.uid('rp-st1@x.com')::text);
+select qr.eq('C: Ana gets her own track and where to play (call ms − track start)', $$select (x->>'storage_path' is not null)::text||'/'||(x->>'from_ms')
+  from (select public.rec_clip_source(current_setting('qr.ana_ins')::uuid, 9000)::jsonb x) y$$, 'true/4000');
+select qr.eq('C: before her track started → nothing', $$select coalesce(public.rec_clip_source(current_setting('qr.ana_ins')::uuid, 1000)::text, 'null')$$, 'null');
+select qr.as_user(qr.uid('rp-t1@x.com')::text);
+select qr.eq('C: her teacher can listen too', $$select (public.rec_clip_source(current_setting('qr.ana_ins')::uuid, 9000)::jsonb->>'storage_path' is not null)::text$$, 'true');
+select qr.as_user(qr.uid('rp-st3@x.com')::text);
+select qr.fails('C: another student of the class cannot', $$select public.rec_clip_source(current_setting('qr.ana_ins')::uuid, 9000)$$, 'No autorizado');
+select qr.as_user(qr.uid('rp-to@x.com')::text);
+select qr.fails('C: a teacher of another institution cannot', $$select public.rec_clip_source(current_setting('qr.ana_ins')::uuid, 9000)$$, 'No autorizado');
+reset role; set role anon; select qr.as_user('');
+select qr.fails('C: anon cannot', $$select public.rec_clip_source(current_setting('qr.ana_ins')::uuid, 9000)$$, 'permission denied');
+reset role;
+update public.recordings set deleted_at = now() where egress_id = 'EG_ana1';
+set role authenticated; select qr.as_user(qr.uid('rp-st1@x.com')::text);
+select qr.eq('C: after the 30 days (audio deleted) → nothing', $$select coalesce(public.rec_clip_source(current_setting('qr.ana_ins')::uuid, 9000)::text, 'null')$$, 'null');
+reset role;
+update public.recordings set deleted_at = null where egress_id = 'EG_ana1';
+
 -- ===== finish, retention =====
 set role service_role;
 select qr.fails('R: unknown final state refused', $$select public.rec_finish(qr.live('RP past'), 'live')$$, 'inválido');

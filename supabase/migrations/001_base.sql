@@ -7955,6 +7955,37 @@ begin
 end $$;
 -- ══ END ALUMNOS + REPORTE MENSUAL ══
 
+-- ── 2026-11-13: "Escuchá cómo lo dijiste en clase" (pronunciación del alumno) ──
+-- Para unos insights del alumno (p_insight = student_insights.id) y un momento de la llamada (p_ms, el mismo tiempo que
+-- transcript_segments) devuelve el audio del ALUMNO de esos insights: la ruta del archivo y en qué ms de ese archivo empieza. Lo pide el propio alumno (su inscripción) o quien puede
+-- ver los insights de la clase (docente / suplente / admins). Nada si el audio ya se borró (30 días) o no hay grabación.
+create or replace function public.rec_clip_source(p_insight uuid, p_ms integer) returns json
+language plpgsql stable security definer set search_path = public, pg_temp as
+$$
+declare si public.student_insights%rowtype; l public.live_sessions%rowtype; r record;
+begin
+  if auth.uid() is null or p_insight is null or p_ms is null or p_ms < 0 then return null; end if;
+  select * into si from public.student_insights where id = p_insight and not is_demo;
+  if si.id is null or si.participant_id is null then return null; end if;
+  if not (exists (select 1 from public.student_enrollments e where e.id = si.enrollment_id and e.user_id = auth.uid())
+          or public.tc_can_view_insights(si.session_id)) then
+    raise exception 'No autorizado';
+  end if;
+  select ls.* into l from public.live_sessions ls join public.session_participants sp on sp.session_id = ls.id
+   where sp.id = si.participant_id;
+  if l.id is null then return null; end if;
+  select rc.storage_path, (extract(epoch from (rc.started_at - l.started_at)) * 1000)::bigint as off_ms into r
+    from public.recordings rc
+   where rc.participant_id = si.participant_id and rc.session_id = l.id and rc.deleted_at is null
+     and rc.status in ('uploaded','transcribed') and rc.started_at is not null
+     and (extract(epoch from (rc.started_at - l.started_at)) * 1000) <= p_ms
+   order by rc.started_at desc limit 1;
+  if r.storage_path is null then return null; end if;
+  return json_build_object('storage_path', r.storage_path, 'from_ms', greatest(0, p_ms - r.off_ms));
+end $$;
+revoke all on function public.rec_clip_source(uuid, integer) from public, anon;
+grant execute on function public.rec_clip_source(uuid, integer) to authenticated;
+
 -- Que la API de Supabase vea enseguida las funciones nuevas
 notify pgrst, 'reload schema';
 

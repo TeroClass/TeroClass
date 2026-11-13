@@ -62,7 +62,7 @@ export function classSegments(segments) {
   let from = 0; let end = segs[0].end_ms;
   for (let i = 1; i < segs.length; i++) { if (segs[i].start_ms - end > SESSION_GAP_MS) from = i; end = Math.max(end, segs[i].end_ms); }
   const base = segs[from].start_ms;
-  return segs.slice(from).map(s => ({ ...s, start_ms: s.start_ms - base, end_ms: s.end_ms - base }));
+  return segs.slice(from).map(s => ({ ...s, start_ms: s.start_ms - base, end_ms: s.end_ms - base, call_start_ms: s.start_ms, call_end_ms: s.end_ms }));
 }
 
 // ctx: {participants[{participant_id, role, recorded}], segments[{participant_id, start_ms, end_ms, text, words}]}
@@ -230,7 +230,7 @@ Return {"students": [one object per student above, in the same order]}, each:
  "level": ${lang ? 'CEFR speaking level shown in this class (A1, A2, A2+, B1, B1+, B2, C1)' : 'how they explain the concepts: "Explains with support" | "Explains in their own words" | "Explains and justifies" (in the output language)'},
  "score": 0–100 (${lang ? 'grammar accuracy of what they said' : 'accuracy of the concepts they used'}; 0 if they did not speak),
  ${lang ? '' : '"terms_used": how many subject terms they used correctly, '}"tracker": 1–6 × {"concept", "difficulty": ${lang ? '"Easy" | "Medium" | "Hard"' : '"Básico" | "Intermedio" | "Avanzado" (or Basic | Intermediate | Advanced in English)'}, "used": times used, "mastery": 0–100},
- ${lang ? `"pron": 0–4 × {"item": a word or short phrase they SAID that learners usually find hard to pronounce, "guide": simple respelling with the stressed syllable in CAPITALS (e.g. "TAY-lerd", "sai-kluh-RAH-muh"), "tip": one practical tip (stress, silent letters, a sound to watch)} — you only have the transcript, not the audio: never claim you heard how they pronounced it and never give a score,`
+ ${lang ? `"pron": 0–4 × {"item": ONE word they SAID that learners usually find hard to pronounce, "guide": simple respelling with the stressed syllable in CAPITALS (e.g. "TAY-lerd", "sai-kluh-RAH-muh"), "tip": a short friendly note to the student ("You used 'persuade' — the 'sua' sounds like SWAY…"; stress, silent letters, a sound to watch), "quote": their exact words that contain the word, "context": one short natural sentence with the word to practise (their sentence, corrected if needed)} — you only have the transcript, not the audio: never claim you heard how they pronounced it and never give a score,`
    : '"pron": 0–4 × {"item", "score": 0–100, "tip"} (how they used the key concepts),'}
  "didWell": 0–3 × {"text": exact quote, "note"} (${lang ? 'correct uses of the grammar or language of the class' : 'good use of the concepts'}),
  "improve": 0–8 × {"type": short error category${lang ? ' (e.g. "Verb agreement", "Word order", "Verb tenses", "Articles", "Prepositions", "Missing subject")' : ''}, "original": exact quote, "corrected", "rule": the rule in one short simple sentence${lang ? ', "practice": one NEW example sentence that uses the correct form' : ''}}
@@ -311,7 +311,9 @@ function oneStudent(s) {
     // the old shape {item, score, tip} is still accepted (discipline classes and older answers)
     pron: items(s.pron, 4, o => { const g = clean(o.guide, 80); const sc = Number.isFinite(num(o.score)) && o.score !== '' && o.score !== null && !g ? int(o.score, 0, 100, 'pron.score') : null;
       if (!g && sc === null) throw new Invalid('pron without guide or score');
-      return { item: reqStr(o.item, 160, 'pron.item'), ...(g ? { guide: g } : {}), ...(sc !== null ? { score: sc } : {}), tip: clean(o.tip, 300) || '—' }; }),
+      const quote = clean(o.quote, 300); const context = clean(o.context, 240);
+      return { item: reqStr(o.item, 160, 'pron.item'), ...(g ? { guide: g } : {}), ...(sc !== null ? { score: sc } : {}), tip: clean(o.tip, 300) || '—',
+        ...(quote ? { quote } : {}), ...(context ? { context } : {}) }; }),
     didWell: items(s.didWell, 3, o => ({ text: reqStr(o.text, 300, 'didWell.text'), note: clean(o.note, 300) }), 'didWell'),
     // grammar: up to 8, with its type, the rule and a new example to practise ("explanation" = the rule, for older screens)
     improve: items(s.improve, 8, o => { const rule = clean(o.rule ?? o.explanation, 300);
@@ -377,7 +379,7 @@ export function checkStudentShape(d) {
   if (!S(d.highlight)) throw new Invalid('bad highlight');
   const all = (a, f) => Array.isArray(a) && a.every(f);
   if (!all(d.tracker, t => S(t.concept) && S(t.difficulty) && N(t.used) && S(t.updated) && N(t.mastery))) throw new Invalid('bad tracker');
-  if (!all(d.pron, t => S(t.item) && (N(t.score) || S(t.guide)) && S(t.tip))) throw new Invalid('bad pron');
+  if (!all(d.pron, t => S(t.item) && (N(t.score) || S(t.guide)) && S(t.tip) && (t.clip === undefined || (N(t.clip.start_ms) && N(t.clip.end_ms))))) throw new Invalid('bad pron');
   if (d.expressions !== undefined && !all(d.expressions, t => S(t.said) && S(t.natural) && S(t.why))) throw new Invalid('bad expressions');
   if (!all(d.didWell, t => S(t.text) && S(t.note))) throw new Invalid('bad didWell');
   if (!all(d.improve, t => S(t.original) && S(t.corrected) && S(t.explanation))) throw new Invalid('bad improve');
@@ -412,3 +414,23 @@ async function callAzureJsonOnce({ endpoint, key, apiVersion, deployment }, mess
   } finally { clearTimeout(timer); }
 }
 export const estimateTokens = (messages, maxTokens) => Math.ceil(messages.reduce((n, m) => n + m.content.length, 0) / 4) + maxTokens;
+
+// Where the student said each pronunciation word (2026-11-13: "listen to how you said it in class"): the student's own
+// segment that contains the word (preferring the AI's quote) → {start_ms, end_ms} in CALL time (as stored in
+// transcript_segments), padded and at most 15 s. No match → no clip (the view hides that button).
+export function pronClips(pron, segments, participantId) {
+  const mine = (segments || []).filter(s => s.participant_id === participantId && String(s.text || '').trim());
+  const norm = t => String(t || '').toLowerCase().replace(/[’']/g, "'").replace(/[^\p{L}\p{N}' ]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  return (pron || []).map(p => {
+    const w = norm(p.item); if (!w) return p;
+    const re = new RegExp(`(^| )${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}( |$)`);
+    const q = norm(p.quote);
+    const hits = mine.filter(s => re.test(norm(s.text)));
+    const best = hits.find(s => q && (norm(s.text).includes(q) || q.includes(norm(s.text)))) || hits[0];
+    if (!best) return p;
+    const a = Number.isFinite(best.call_start_ms) ? best.call_start_ms : best.start_ms;
+    const b = Number.isFinite(best.call_end_ms) ? best.call_end_ms : best.end_ms;
+    const start = Math.max(0, Math.round(a) - 300); const end = Math.min(start + 15000, Math.round(b) + 300);
+    return end > start ? { ...p, clip: { start_ms: start, end_ms: end } } : p;
+  });
+}

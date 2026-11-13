@@ -363,13 +363,13 @@
     const rows = arr(d.students); const base = t && Object.keys(t).length ? t : obj(rows[0] && rows[0].data);
     return model({ key: 'sess:' + str(s.id), kind: base.kind, lang: base.lang, title: s.title || base.title, subject: base.subject, durationMin: s.duration_min,
       participants: s.students_total, recap: base.recap, teacher: t,
-      students: rows.map(r => ({ ...obj(r.data), name: r.name, _row: r })) });
+      students: rows.map(r => ({ ...obj(r.data), name: r.name, _row: r, _insight: r.is_demo ? '' : str(r.id) })) });
   }
   // my_insight(...) → model with one student
   function modelFromStudent(d) {
     d = obj(d); const data = obj(d.data); const s = obj(d.session);
     return model({ key: 'mine:' + str(d.id), kind: data.kind, lang: data.lang, title: s.title || data.title, subject: data.subject, durationMin: s.duration_min,
-      recap: data.recap, teacher: null, students: [{ ...data, name: d.student_name || '' }] });
+      recap: data.recap, teacher: null, students: [{ ...data, name: d.student_name || '', _insight: d.is_demo ? '' : str(d.id) }] });
   }
 
   // ════════════════════════════════════════════════════════════════════════════════════════
@@ -506,18 +506,80 @@
   }
   // 2026-11-11 (Ignacio): more focus on grammar (wrong → right, grouped by type, rule + an example to practise), vocabulary
   // with synonyms, natural expressions and pronunciation (a GUIDE from the transcript; the % ring only for older insights).
+  // 2026-11-13 (Ignacio): pronunciation WITHOUT percentages — a short note + practice: listen to the word and to a
+  // sentence with it (the browser's voice), record yourself and compare, and hear how you said it in class (your own
+  // microphone track, while the audio is kept: 30 days). Scores from the voice come later (Azure Pronunciation Assessment).
   function pronHtml(X, st) {
-    const L = LABELS[X.kind];
+    const L = LABELS[X.kind]; const lang = X.kind === 'language';
     return `<section class="lc-card">
         <h3>${L.feedbackA}</h3>
-        ${st.pron.length ? `<div class="lc-pron">${st.pron.map(p => {
-          const hasScore = p.score !== undefined && p.score !== null && p.score !== '' && !p.guide;
-          const sc = Math.max(0, Math.min(100, num(p.score)));
-          return `<div class="lc-pron-card">
-          ${hasScore ? `<div class="lc-ring" style="--p:${sc}" role="img" aria-label="${sc}%"><span data-no-i18n>${sc}%</span></div>` : ''}
-          <div><div class="lc-pron-item"><span data-no-i18n>${E(p.item)}</span>${p.guide ? ` <span class="ins-ph" data-no-i18n>${E(p.guide)}</span>` : ''}</div><div class="lc-pron-tip" data-no-i18n>${E(p.tip)}</div></div></div>`; }).join('')}</div>` : '<p class="lc-empty">—</p>'}
-        ${X.kind === 'language' && st.pron.some(p => p.guide) ? '<p class="lc-fine">A guide based on the words of the class. Pronunciation scored from your voice is coming soon.</p>' : ''}
+        ${st.pron.length ? `<div class="lc-pron">${st.pron.map((p, i) => {
+          const clip = obj(p.clip); const hasClip = lang && st._insight && Number.isFinite(Number(clip.start_ms)) && Number(clip.end_ms) > Number(clip.start_ms);
+          const ctx = str(p.context);
+          return `<div class="lc-pron-card ins-pron" data-pron-card="${i}">
+          <div class="ins-pron-body"><div class="lc-pron-item"><span data-no-i18n>${E(p.item)}</span>${p.guide ? ` <span class="ins-ph" data-no-i18n>${E(p.guide)}</span>` : ''}</div>
+          <div class="lc-pron-tip" data-no-i18n>${E(p.tip)}</div>
+          ${lang && ctx ? `<div class="ins-pron-ctx" data-no-i18n>“${E(ctx)}”</div>` : ''}
+          ${lang ? `<div class="ins-pron-actions no-print">
+            <button type="button" class="lc-btn lc-sm ins-pron-btn" data-pron="say" data-text="${E(p.item)}"><span aria-hidden="true">🔊</span> <span>Word</span></button>
+            ${ctx ? `<button type="button" class="lc-btn lc-sm ins-pron-btn" data-pron="say" data-text="${E(ctx)}"><span aria-hidden="true">🔊</span> <span>Sentence</span></button>` : ''}
+            ${hasClip ? `<button type="button" class="lc-btn lc-sm ins-pron-btn" data-pron="clip" data-insight="${E(st._insight)}" data-s="${Math.round(Number(clip.start_ms))}" data-e="${Math.round(Number(clip.end_ms))}"><span aria-hidden="true">🗣️</span> <span>How you said it in class</span></button>` : ''}
+            <button type="button" class="lc-btn lc-sm ins-pron-btn" data-pron="rec"><span aria-hidden="true">🎤</span> <span>Record yourself</span></button>
+            <audio class="ins-pron-mine" controls hidden></audio>
+          </div>` : ''}</div></div>`; }).join('')}</div>` : '<p class="lc-empty">—</p>'}
+        ${lang && st.pron.length ? '<p class="lc-fine">Listen, record yourself and compare. Feedback scored from your voice is coming soon.</p>' : ''}
       </section>`;
+  }
+  // ── pronunciation practice (one listener for every view: teacher panel, student dashboard) ──
+  const PR = { rec: null, chunks: [], stopT: null, audio: null };
+  function pronSay(text) {
+    const S = window.speechSynthesis; if (!S || !text) return false;
+    S.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = 'en-US'; u.rate = 0.85;
+    const v = (S.getVoices() || []).find(x => /^en-US/i.test(x.lang)) || (S.getVoices() || []).find(x => /^en/i.test(x.lang));
+    if (v) u.voice = v; S.speak(u); return true;
+  }
+  function pronBtnText(btn, t) { const sp = btn.querySelectorAll('span'); const el = sp[sp.length - 1]; if (el) el.textContent = tr(t); }
+  async function pronRecord(btn) {
+    const card = btn.closest('.ins-pron-actions'); const out = card && card.querySelector('.ins-pron-mine');
+    if (PR.rec && PR.rec.state === 'recording') { PR.rec.stop(); return; }
+    if (!navigator.mediaDevices || !window.MediaRecorder) { pronBtnText(btn, 'Recording is not available in this browser'); return; }
+    let stream; try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (e) { pronBtnText(btn, 'Allow the microphone to record'); return; }
+    const rec = new MediaRecorder(stream); PR.rec = rec; PR.chunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) PR.chunks.push(e.data); };
+    rec.onstop = () => {
+      clearTimeout(PR.stopT); stream.getTracks().forEach(t => t.stop()); btn.classList.remove('ins-rec-on'); pronBtnText(btn, 'Record again');
+      if (out && PR.chunks.length) { if (out.src) URL.revokeObjectURL(out.src); out.src = URL.createObjectURL(new Blob(PR.chunks, { type: rec.mimeType || 'audio/webm' })); out.hidden = false; out.play().catch(() => {}); }
+    };
+    rec.start(); btn.classList.add('ins-rec-on'); pronBtnText(btn, 'Stop');
+    PR.stopT = setTimeout(() => { if (rec.state === 'recording') rec.stop(); }, 10000);
+  }
+  async function pronClip(btn) {
+    try {
+      const client = typeof sb !== 'undefined' ? sb : window.sb; if (!client) return;
+      const { data: { session } = {} } = await client.auth.getSession();
+      btn.disabled = true;
+      const r = await fetch('/api/class/clip', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (session?.access_token || '') },
+        body: JSON.stringify({ insight: btn.dataset.insight, start_ms: Number(btn.dataset.s), end_ms: Number(btn.dataset.e) }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.url) { pronBtnText(btn, r.status === 404 ? 'The class audio is no longer available' : 'Could not load the audio'); return; }
+      if (PR.audio) PR.audio.pause();
+      const a = new Audio(); PR.audio = a; a.preload = 'auto'; a.src = j.url;
+      const stop = () => { if (a.currentTime >= j.to_s) { a.pause(); a.removeEventListener('timeupdate', stop); } };
+      a.addEventListener('loadedmetadata', () => { try { a.currentTime = j.from_s; } catch (e) { /* seek not supported */ } a.play().catch(() => pronBtnText(btn, 'This browser cannot play the class audio')); }, { once: true });
+      a.addEventListener('timeupdate', stop);
+      a.addEventListener('error', () => pronBtnText(btn, 'This browser cannot play the class audio'), { once: true });
+    } catch (e) { pronBtnText(btn, 'Could not load the audio'); } finally { btn.disabled = false; }
+  }
+  if (typeof document !== 'undefined' && !window.__tcPronInit) {
+    window.__tcPronInit = true;
+    document.addEventListener('click', e => {
+      const btn = e.target && e.target.closest ? e.target.closest('[data-pron]') : null; if (!btn) return;
+      e.preventDefault();
+      const k = btn.dataset.pron;
+      if (k === 'say') { if (!pronSay(btn.dataset.text)) pronBtnText(btn, 'Audio is not available in this browser'); }
+      else if (k === 'rec') pronRecord(btn);
+      else if (k === 'clip') pronClip(btn);
+    });
   }
   function grammarHtml(X, st) {
     const groups = []; const byType = new Map();
@@ -901,6 +963,12 @@
     'What you said → how to say it': 'Así lo dijiste → así se dice', 'No corrections in this class.': 'No hubo correcciones en esta clase.',
     'Rule:': 'Regla:', 'Practice:': 'Para practicar:', 'Synonyms': 'Sinónimos', 'Sound more natural': 'Para sonar más natural', 'more natural:': 'más natural:',
     'A guide based on the words of the class. Pronunciation scored from your voice is coming soon.': 'Guía basada en las palabras de la clase. La evaluación con tu voz llega pronto.',
+    // 2026-11-13: pronunciation practice
+    'Sentence': 'En una frase', 'How you said it in class': 'Cómo lo dijiste en clase', 'Record yourself': 'Grabate', 'Record again': 'Grabar de nuevo', 'Stop': 'Detener',
+    'Listen, record yourself and compare. Feedback scored from your voice is coming soon.': 'Escuchá, grabate y compará. La evaluación con tu voz llega pronto.',
+    'The class audio is no longer available': 'El audio de la clase ya no está disponible', 'Could not load the audio': 'No se pudo cargar el audio',
+    'This browser cannot play the class audio': 'Este navegador no puede reproducir el audio de la clase', 'Allow the microphone to record': 'Permití el micrófono para grabar',
+    'Recording is not available in this browser': 'Este navegador no permite grabar', 'Audio is not available in this browser': 'Este navegador no tiene audio',
     'Classes attended': 'Clases asistidas', 'You spoke': 'Hablaste', 'New words': 'Palabras nuevas', 'Summary of the month': 'Resumen del mes',
     'Focus for next month:': 'Foco para el mes que viene:', 'Only one class with insights this month: there is no trend yet.': 'Este mes hubo una sola clase con insights: todavía no hay una tendencia.',
     'Class by class': 'Clase por clase', 'Class': 'Clase', 'Accuracy': 'Precisión', 'Mistakes that repeated the most': 'Los errores que más se repitieron', 'What to review': 'Para repasar',

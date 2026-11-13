@@ -7,8 +7,9 @@ import ticket from './_lib/class/ticket.js';
 import token from './_lib/class/token.js';
 import rec from './_lib/class/rec.js';
 import processWork from './_lib/class/process.js';
+import clip from './_lib/class/clip.js';
 
-const HANDLERS = { config, ticket, token, rec, process: processWork };
+const HANDLERS = { config, ticket, token, rec, process: processWork, clip };
 
 export default function handler(req, res) {
   const action = String(req.query?.action || '').replace(/\.js$/, '');

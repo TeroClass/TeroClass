@@ -243,3 +243,12 @@
 @media (max-width:860px){.ins-layout{grid-template-columns:minmax(0,1fr)}.ins-rail{position:static}}
 @media print{.ins-rail{display:none!important}.ins-layout{display:block}}
 .ins-nowrap{white-space:nowrap}
+
+/* 2026-11-13: pronunciation practice (listen · record yourself · how you said it in class) */
+.ins-pron{align-items:flex-start}
+.ins-pron-body{min-width:0;flex:1}
+.ins-pron-ctx{font-size:12.5px;font-style:italic;margin-top:6px}
+.ins-pron-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
+.ins-pron-btn{font-size:12px}
+.ins-pron-btn.ins-rec-on{background:#c62828;color:#fff;border-color:#c62828}
+.ins-pron-mine{width:100%;height:32px;margin-top:2px}
